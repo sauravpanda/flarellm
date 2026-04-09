@@ -1,3 +1,8 @@
+//! Browser integration for Flare LLM.
+//!
+//! Provides WASM-bindgen exports for WebGPU detection, device info,
+//! and engine initialization. Designed to be built with `wasm-pack`.
+
 use wasm_bindgen::prelude::*;
 
 /// Check if WebGPU is available in the current browser.
