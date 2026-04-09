@@ -101,6 +101,87 @@ pub fn dequant_q8_0_block(block: &[u8], output: &mut [f32; 32]) {
     }
 }
 
+/// Dequantize a Q6_K block: 256 weights.
+/// Layout: quantized_data[128] + scales[8] (Q8) + d (f16)
+/// Each weight is 6 bits, packed in groups.
+pub fn dequant_q6k_block(block: &[u8], output: &mut [f32; 256]) {
+    // Q6_K block: 128 bytes quant data + 64 bytes high bits + 16 bytes scales + 2 bytes d
+    // Total: 210 bytes for 256 weights
+    if block.len() < 210 {
+        // Fallback: zero fill for malformed blocks
+        for v in output.iter_mut() {
+            *v = 0.0;
+        }
+        return;
+    }
+
+    let d = f16_to_f32(u16::from_le_bytes([block[208], block[209]]));
+    let ql = &block[0..128]; // low 4 bits
+    let qh = &block[128..192]; // high 2 bits
+    let scales = &block[192..208]; // 16 int8 scales
+
+    for j in 0..256 {
+        let ql_byte = ql[j / 2];
+        let low4 = if j % 2 == 0 {
+            ql_byte & 0x0F
+        } else {
+            (ql_byte >> 4) & 0x0F
+        };
+
+        let qh_byte = qh[j / 4];
+        let high2 = (qh_byte >> ((j % 4) * 2)) & 0x03;
+
+        let q = ((high2 as i32) << 4) | (low4 as i32);
+        let q = q - 32; // center around zero
+
+        let scale_idx = j / 16;
+        let sc = scales[scale_idx] as i8 as f32;
+
+        output[j] = d * sc * q as f32;
+    }
+}
+
+/// Dequantize a Q4_K block: 256 weights.
+/// Layout: d (f16) + dmin (f16) + scales[12] + qs[128]
+pub fn dequant_q4k_block(block: &[u8], output: &mut [f32; 256]) {
+    // Q4_K_M: 2 (d) + 2 (dmin) + 12 (scales) + 128 (qs) = 144 bytes
+    if block.len() < 144 {
+        for v in output.iter_mut() {
+            *v = 0.0;
+        }
+        return;
+    }
+
+    let d = f16_to_f32(u16::from_le_bytes([block[0], block[1]]));
+    let dmin = f16_to_f32(u16::from_le_bytes([block[2], block[3]]));
+    let scales_raw = &block[4..16];
+    let qs = &block[16..144];
+
+    // Decode the 8 scale/min pairs from 12 bytes
+    let mut sc = [0u8; 8];
+    let mut mn = [0u8; 8];
+    for i in 0..4 {
+        sc[i] = scales_raw[i] & 0x3F;
+        mn[i] = scales_raw[i + 4] & 0x3F;
+        sc[i + 4] = (scales_raw[i] >> 6) | ((scales_raw[i + 8] & 0x0F) << 2);
+        mn[i + 4] = (scales_raw[i + 4] >> 6) | ((scales_raw[i + 8] >> 4) << 2);
+    }
+
+    for (j, out) in output.iter_mut().enumerate() {
+        let block_idx = j / 32;
+        let byte_idx = j / 2;
+        let nibble = if j % 2 == 0 {
+            qs[byte_idx] & 0x0F
+        } else {
+            (qs[byte_idx] >> 4) & 0x0F
+        };
+
+        let scale = d * sc[block_idx] as f32;
+        let min = dmin * mn[block_idx] as f32;
+        *out = scale * nibble as f32 - min;
+    }
+}
+
 /// Convert f16 (as u16 bits) to f32.
 pub fn f16_to_f32(bits: u16) -> f32 {
     let sign = ((bits >> 15) & 1) as u32;
@@ -158,6 +239,62 @@ mod tests {
         assert_eq!(QuantFormat::from_gguf_type(2), QuantFormat::Q4_0);
         assert_eq!(QuantFormat::from_gguf_type(8), QuantFormat::Q8_0);
         assert_eq!(QuantFormat::from_gguf_type(999), QuantFormat::Unknown(999));
+    }
+
+    #[test]
+    fn test_dequant_q4_0() {
+        // Q4_0 block: 2 bytes scale + 16 bytes data (32 nibbles)
+        let mut block = vec![0x00, 0x3C]; // f16 1.0 scale
+                                          // Pack nibbles: each byte has low and high nibble
+        for _ in 0..16 {
+            block.push(0x88); // both nibbles = 8, centered = 0
+        }
+        let mut output = [0.0f32; 32];
+        dequant_q4_0_block(&block, &mut output);
+        // All values should be 0.0 (nibble 8 - 8 = 0, times scale 1.0)
+        for (i, &val) in output.iter().enumerate() {
+            assert!(
+                val.abs() < 1e-5,
+                "q4_0 dequant: expected ~0.0 at {i}, got {val}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_dequant_q6k_zeroed() {
+        // Q6_K block with all zeros should produce all zeros
+        let block = vec![0u8; 210];
+        let mut output = [0.0f32; 256];
+        dequant_q6k_block(&block, &mut output);
+        for (i, &val) in output.iter().enumerate() {
+            assert!(
+                val.abs() < 1e-5,
+                "q6k dequant: expected ~0.0 at {i}, got {val}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_dequant_q4k_zeroed() {
+        // Q4_K block with all zeros should produce all zeros
+        let block = vec![0u8; 144];
+        let mut output = [0.0f32; 256];
+        dequant_q4k_block(&block, &mut output);
+        for (i, &val) in output.iter().enumerate() {
+            assert!(
+                val.abs() < 1e-5,
+                "q4k dequant: expected ~0.0 at {i}, got {val}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_dequant_q6k_short_block() {
+        // Too-short block should zero-fill
+        let block = vec![0u8; 10];
+        let mut output = [1.0f32; 256];
+        dequant_q6k_block(&block, &mut output);
+        assert!(output.iter().all(|&v| v == 0.0));
     }
 
     #[test]
