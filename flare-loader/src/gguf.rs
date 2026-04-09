@@ -562,14 +562,14 @@ mod tests {
         write_gguf_header(&mut buf, 0, 3);
 
         write_meta_u32(&mut buf, "count", 42);
-        write_meta_f32(&mut buf, "ratio", 2.718);
+        write_meta_f32(&mut buf, "ratio", 1.234);
         write_meta_str(&mut buf, "name", "test_model");
 
         let mut cursor = Cursor::new(buf);
         let file = GgufFile::parse_header(&mut cursor).unwrap();
 
         assert_eq!(file.metadata["count"].as_u32(), Some(42));
-        assert!((file.metadata["ratio"].as_f32().unwrap() - 2.718).abs() < 0.01);
+        assert!((file.metadata["ratio"].as_f32().unwrap() - 1.234).abs() < 0.01);
         assert_eq!(file.metadata["name"].as_str(), Some("test_model"));
     }
 
