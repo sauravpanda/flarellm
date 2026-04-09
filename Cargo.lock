@@ -195,6 +195,7 @@ dependencies = [
 name = "flare-gpu"
 version = "0.1.0"
 dependencies = [
+ "bytemuck",
  "byteorder",
  "flare-core",
  "log",
