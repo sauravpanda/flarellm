@@ -19,6 +19,7 @@ pub mod gguf;
 pub mod progressive;
 pub mod quantize;
 pub mod safetensors;
+pub mod tokenizer;
 pub mod weights;
 
 pub use gguf::{GgufError, GgufFile};
