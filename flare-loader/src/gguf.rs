@@ -34,6 +34,7 @@ pub enum GgufError {
 
 /// Represents a parsed GGUF file header and metadata.
 /// Tensor data is read lazily via offsets.
+#[derive(Debug)]
 pub struct GgufFile {
     pub version: u32,
     pub metadata: HashMap<String, MetadataValue>,
@@ -516,5 +517,183 @@ mod tests {
         let mut cursor = Cursor::new(buf);
         let file = GgufFile::parse_header(&mut cursor).unwrap();
         assert_eq!(file.architecture(), Some("llama"));
+    }
+
+    // Helper: write a metadata key-value pair
+    fn write_meta_u32(buf: &mut Vec<u8>, key: &str, value: u32) {
+        write_gguf_string(buf, key);
+        buf.extend_from_slice(&4u32.to_le_bytes()); // type: uint32
+        buf.extend_from_slice(&value.to_le_bytes());
+    }
+
+    fn write_meta_f32(buf: &mut Vec<u8>, key: &str, value: f32) {
+        write_gguf_string(buf, key);
+        buf.extend_from_slice(&6u32.to_le_bytes()); // type: float32
+        buf.extend_from_slice(&value.to_le_bytes());
+    }
+
+    fn write_meta_str(buf: &mut Vec<u8>, key: &str, value: &str) {
+        write_gguf_string(buf, key);
+        buf.extend_from_slice(&8u32.to_le_bytes()); // type: string
+        write_gguf_string(buf, value);
+    }
+
+    /// Build a complete GGUF buffer with Llama-style metadata for config extraction.
+    fn build_llama_gguf() -> Vec<u8> {
+        let mut buf = Vec::new();
+        let meta_count = 8;
+        write_gguf_header(&mut buf, 0, meta_count);
+
+        write_meta_str(&mut buf, "general.architecture", "llama");
+        write_meta_u32(&mut buf, "llama.embedding_length", 256);
+        write_meta_u32(&mut buf, "llama.block_count", 4);
+        write_meta_u32(&mut buf, "llama.attention.head_count", 8);
+        write_meta_u32(&mut buf, "llama.attention.head_count_kv", 2);
+        write_meta_u32(&mut buf, "llama.feed_forward_length", 512);
+        write_meta_u32(&mut buf, "llama.context_length", 2048);
+        write_meta_f32(&mut buf, "llama.rope.freq_base", 500000.0);
+
+        buf
+    }
+
+    #[test]
+    fn test_parse_multiple_metadata_types() {
+        let mut buf = Vec::new();
+        write_gguf_header(&mut buf, 0, 3);
+
+        write_meta_u32(&mut buf, "count", 42);
+        write_meta_f32(&mut buf, "ratio", 1.234);
+        write_meta_str(&mut buf, "name", "test_model");
+
+        let mut cursor = Cursor::new(buf);
+        let file = GgufFile::parse_header(&mut cursor).unwrap();
+
+        assert_eq!(file.metadata["count"].as_u32(), Some(42));
+        assert!((file.metadata["ratio"].as_f32().unwrap() - 1.234).abs() < 0.01);
+        assert_eq!(file.metadata["name"].as_str(), Some("test_model"));
+    }
+
+    #[test]
+    fn test_to_model_config_llama() {
+        let buf = build_llama_gguf();
+        let mut cursor = Cursor::new(buf);
+        let file = GgufFile::parse_header(&mut cursor).unwrap();
+        let config = file.to_model_config().unwrap();
+
+        assert_eq!(config.hidden_dim, 256);
+        assert_eq!(config.num_layers, 4);
+        assert_eq!(config.num_heads, 8);
+        assert_eq!(config.num_kv_heads, 2);
+        assert_eq!(config.head_dim, 32); // 256 / 8
+        assert_eq!(config.intermediate_dim, 512);
+        assert_eq!(config.max_seq_len, 2048);
+        assert!((config.rope_theta - 500000.0).abs() < 1.0);
+    }
+
+    #[test]
+    fn test_to_model_config_qwen2() {
+        let mut buf = Vec::new();
+        write_gguf_header(&mut buf, 0, 4);
+
+        write_meta_str(&mut buf, "general.architecture", "qwen2");
+        write_meta_u32(&mut buf, "qwen2.embedding_length", 1024);
+        write_meta_u32(&mut buf, "qwen2.block_count", 12);
+        write_meta_u32(&mut buf, "qwen2.attention.head_count", 16);
+
+        let mut cursor = Cursor::new(buf);
+        let file = GgufFile::parse_header(&mut cursor).unwrap();
+        let config = file.to_model_config().unwrap();
+
+        assert_eq!(config.hidden_dim, 1024);
+        assert_eq!(config.num_layers, 12);
+        assert_eq!(config.num_heads, 16);
+        // kv_heads defaults to num_heads when not specified
+        assert_eq!(config.num_kv_heads, 16);
+    }
+
+    #[test]
+    fn test_to_model_config_defaults() {
+        // Only required fields, optional fields should use defaults
+        let mut buf = Vec::new();
+        write_gguf_header(&mut buf, 0, 4);
+
+        write_meta_str(&mut buf, "general.architecture", "llama");
+        write_meta_u32(&mut buf, "llama.embedding_length", 128);
+        write_meta_u32(&mut buf, "llama.block_count", 2);
+        write_meta_u32(&mut buf, "llama.attention.head_count", 4);
+
+        let mut cursor = Cursor::new(buf);
+        let file = GgufFile::parse_header(&mut cursor).unwrap();
+        let config = file.to_model_config().unwrap();
+
+        assert_eq!(config.num_kv_heads, 4); // defaults to num_heads
+        assert_eq!(config.intermediate_dim, 512); // defaults to hidden_dim * 4
+        assert_eq!(config.max_seq_len, 2048); // default
+        assert!((config.rope_theta - 10000.0).abs() < 1.0); // default
+        assert!((config.rms_norm_eps - 1e-5).abs() < 1e-7); // default
+    }
+
+    #[test]
+    fn test_to_model_config_missing_required() {
+        // Missing embedding_length should error
+        let mut buf = Vec::new();
+        write_gguf_header(&mut buf, 0, 2);
+
+        write_meta_str(&mut buf, "general.architecture", "llama");
+        write_meta_u32(&mut buf, "llama.block_count", 2);
+
+        let mut cursor = Cursor::new(buf);
+        let file = GgufFile::parse_header(&mut cursor).unwrap();
+        assert!(file.to_model_config().is_err());
+    }
+
+    #[test]
+    fn test_to_model_config_unsupported_arch() {
+        let mut buf = Vec::new();
+        write_gguf_header(&mut buf, 0, 1);
+        write_meta_str(&mut buf, "general.architecture", "gpt_neox");
+
+        let mut cursor = Cursor::new(buf);
+        let file = GgufFile::parse_header(&mut cursor).unwrap();
+        let result = file.to_model_config();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("gpt_neox"));
+    }
+
+    #[test]
+    fn test_parse_tensor_info() {
+        let mut buf = Vec::new();
+        write_gguf_header(&mut buf, 1, 0);
+
+        // Write one tensor info
+        write_gguf_string(&mut buf, "blk.0.attn_q.weight");
+        buf.extend_from_slice(&2u32.to_le_bytes()); // n_dims = 2
+        buf.extend_from_slice(&4096u64.to_le_bytes()); // dim 0
+        buf.extend_from_slice(&4096u64.to_le_bytes()); // dim 1
+        buf.extend_from_slice(&0u32.to_le_bytes()); // dtype: F32
+        buf.extend_from_slice(&0u64.to_le_bytes()); // offset
+
+        let mut cursor = Cursor::new(buf);
+        let file = GgufFile::parse_header(&mut cursor).unwrap();
+
+        assert_eq!(file.tensors.len(), 1);
+        assert_eq!(file.tensors[0].name, "blk.0.attn_q.weight");
+        assert_eq!(file.tensors[0].dimensions, vec![4096, 4096]);
+        assert_eq!(file.tensors[0].dtype, QuantFormat::F32);
+        assert_eq!(file.tensors[0].numel(), 4096 * 4096);
+    }
+
+    #[test]
+    fn test_unsupported_version() {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&GGUF_MAGIC.to_le_bytes());
+        buf.extend_from_slice(&99u32.to_le_bytes()); // unsupported version
+        buf.extend_from_slice(&0u64.to_le_bytes());
+        buf.extend_from_slice(&0u64.to_le_bytes());
+
+        let mut cursor = Cursor::new(buf);
+        let result = GgufFile::parse_header(&mut cursor);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("99"));
     }
 }
