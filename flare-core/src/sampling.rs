@@ -1,4 +1,4 @@
-/// Sampling strategies for token generation.
+//! Sampling strategies for token generation.
 
 /// Parameters controlling text generation.
 #[derive(Debug, Clone)]
@@ -73,7 +73,11 @@ pub fn sample_top_p(logits: &[f32], top_p: f32, rng_val: f32) -> u32 {
 
     // Sort indices by probability descending
     let mut indices: Vec<usize> = (0..probs.len()).collect();
-    indices.sort_unstable_by(|&a, &b| probs[b].partial_cmp(&probs[a]).unwrap_or(std::cmp::Ordering::Equal));
+    indices.sort_unstable_by(|&a, &b| {
+        probs[b]
+            .partial_cmp(&probs[a])
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
 
     // Find cutoff
     let mut cumulative = 0.0;
@@ -107,7 +111,11 @@ pub fn sample_top_k(logits: &[f32], top_k: usize, rng_val: f32) -> u32 {
     let probs = softmax(logits);
 
     let mut indices: Vec<usize> = (0..probs.len()).collect();
-    indices.sort_unstable_by(|&a, &b| probs[b].partial_cmp(&probs[a]).unwrap_or(std::cmp::Ordering::Equal));
+    indices.sort_unstable_by(|&a, &b| {
+        probs[b]
+            .partial_cmp(&probs[a])
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     indices.truncate(top_k);
 
     let total: f32 = indices.iter().map(|&i| probs[i]).sum();

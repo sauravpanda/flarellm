@@ -34,7 +34,8 @@ impl ModelConfig {
     pub fn estimate_param_count(&self) -> usize {
         let embed = self.vocab_size * self.hidden_dim;
         let per_layer = {
-            let attn_qkv = self.hidden_dim * (self.num_heads + 2 * self.num_kv_heads) * self.head_dim;
+            let attn_qkv =
+                self.hidden_dim * (self.num_heads + 2 * self.num_kv_heads) * self.head_dim;
             let attn_out = self.num_heads * self.head_dim * self.hidden_dim;
             let ffn = 3 * self.hidden_dim * self.intermediate_dim; // gate + up + down
             let norms = 2 * self.hidden_dim;

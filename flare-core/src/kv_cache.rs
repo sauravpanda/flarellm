@@ -49,12 +49,7 @@ impl KvCache {
     }
 
     /// Write a new K/V pair for a given layer at the current position.
-    pub fn write(
-        &mut self,
-        layer: usize,
-        key: &[f32],
-        value: &[f32],
-    ) {
+    pub fn write(&mut self, layer: usize, key: &[f32], value: &[f32]) {
         let kv_size = self.num_kv_heads * self.head_dim;
         let offset = self.position * kv_size;
 

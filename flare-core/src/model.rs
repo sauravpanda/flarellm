@@ -147,7 +147,12 @@ impl Model {
             }
 
             // Down projection
-            let ffn_out = matvec(layer.w_down.data(), &ffn_hidden, dim, config.intermediate_dim);
+            let ffn_out = matvec(
+                layer.w_down.data(),
+                &ffn_hidden,
+                dim,
+                config.intermediate_dim,
+            );
 
             // Residual connection
             let x_data = x.data_mut();
@@ -160,7 +165,11 @@ impl Model {
         self.kv_cache.advance();
 
         // Final RMSNorm
-        let normed = rmsnorm(x.data(), self.weights.output_norm.data(), config.rms_norm_eps);
+        let normed = rmsnorm(
+            x.data(),
+            self.weights.output_norm.data(),
+            config.rms_norm_eps,
+        );
 
         // Output logits: [vocab_size] = output_weight [vocab_size, dim] × normed [dim]
         let logits = matvec(
@@ -188,13 +197,13 @@ fn rmsnorm(x: &[f32], weight: &[f32], eps: f32) -> Vec<f32> {
 /// Matrix-vector multiply: output[rows] = mat[rows, cols] × vec[cols]
 fn matvec(mat: &[f32], vec: &[f32], rows: usize, cols: usize) -> Vec<f32> {
     let mut output = vec![0.0f32; rows];
-    for i in 0..rows {
+    for (i, out) in output.iter_mut().enumerate() {
         let row_offset = i * cols;
         let mut sum = 0.0f32;
         for j in 0..cols {
             sum += mat[row_offset + j] * vec[j];
         }
-        output[i] = sum;
+        *out = sum;
     }
     output
 }
@@ -220,13 +229,13 @@ fn apply_rope(data: &mut [f32], num_heads: usize, head_dim: usize, pos: usize, t
 
 /// Grouped-query attention for a single token position.
 fn grouped_query_attention(
-    q: &[f32],         // [num_heads * head_dim]
+    q: &[f32], // [num_heads * head_dim]
     kv_cache: &KvCache,
     layer: usize,
     num_heads: usize,
     num_kv_heads: usize,
     head_dim: usize,
-    seq_len: usize,     // number of valid KV entries
+    seq_len: usize, // number of valid KV entries
 ) -> Vec<f32> {
     let heads_per_kv = num_heads / num_kv_heads;
     let mut output = vec![0.0f32; num_heads * head_dim];
@@ -243,13 +252,13 @@ fn grouped_query_attention(
         let mut scores = vec![0.0f32; seq_len];
         let scale = 1.0 / (head_dim as f32).sqrt();
 
-        for t in 0..seq_len {
+        for (t, score) in scores.iter_mut().enumerate() {
             let k_offset = t * kv_stride + kv_head * head_dim;
             let mut dot = 0.0f32;
             for d in 0..head_dim {
                 dot += q[q_offset + d] * k_cache[k_offset + d];
             }
-            scores[t] = dot * scale;
+            *score = dot * scale;
         }
 
         // Softmax
@@ -265,9 +274,8 @@ fn grouped_query_attention(
 
         // Weighted sum of values
         let out_offset = h * head_dim;
-        for t in 0..seq_len {
+        for (t, &weight) in scores.iter().enumerate() {
             let v_offset = t * kv_stride + kv_head * head_dim;
-            let weight = scores[t];
             for d in 0..head_dim {
                 output[out_offset + d] += weight * v_cache[v_offset + d];
             }
@@ -290,7 +298,10 @@ mod tests {
         let rms = (30.0f32 / 4.0 + 1e-5).sqrt();
         for (i, &v) in result.iter().enumerate() {
             let expected = (i + 1) as f32 / rms;
-            assert!((v - expected).abs() < 1e-4, "rmsnorm[{i}]: {v} != {expected}");
+            assert!(
+                (v - expected).abs() < 1e-4,
+                "rmsnorm[{i}]: {v} != {expected}"
+            );
         }
     }
 

@@ -61,10 +61,7 @@ impl<'a> Generator<'a> {
         self.tokens.push(token_id);
         self.position += 1;
 
-        GenerationStep {
-            token_id,
-            logits,
-        }
+        GenerationStep { token_id, logits }
     }
 
     /// Generate up to `max_tokens` tokens, calling the callback for each.
@@ -147,9 +144,7 @@ mod tests {
 
         // Initialize with small random-ish values
         let make_tensor = |size: usize| -> Tensor {
-            let data: Vec<f32> = (0..size)
-                .map(|i| (i as f32 * 0.1).sin() * 0.1)
-                .collect();
+            let data: Vec<f32> = (0..size).map(|i| (i as f32 * 0.1).sin() * 0.1).collect();
             Tensor::from_vec(data, &[size]).unwrap()
         };
 
@@ -185,13 +180,7 @@ mod tests {
 
         let mut gen = Generator::new(&mut model, params);
         let prompt = vec![1u32, 2];
-        let generated = gen.generate(
-            &prompt,
-            3,
-            None,
-            || 0.5,
-            |_token, _step| true,
-        );
+        let generated = gen.generate(&prompt, 3, None, || 0.5, |_token, _step| true);
 
         assert_eq!(generated.len(), 3);
         // Total tokens should be prompt + generated
@@ -206,7 +195,7 @@ mod tests {
             ..Default::default()
         };
 
-        let mut gen = Generator::new(&mut model, params);
+        let _gen = Generator::new(&mut model, params);
         // Generate with EOS = the token we expect to get (greedy will pick same token)
         let prompt = vec![0u32];
 
@@ -215,10 +204,14 @@ mod tests {
         let first_token = sampling::sample_greedy(logits_tensor.data());
         model.reset();
 
-        let mut gen = Generator::new(&mut model, SamplingParams { // used in generate() below
-            temperature: 0.0,
-            ..Default::default()
-        });
+        let mut gen = Generator::new(
+            &mut model,
+            SamplingParams {
+                // used in generate() below
+                temperature: 0.0,
+                ..Default::default()
+            },
+        );
 
         let generated = gen.generate(
             &prompt,

@@ -59,8 +59,11 @@ impl QuantFormat {
             QuantFormat::Q4_0 | QuantFormat::Q4_1 => 32,
             QuantFormat::Q5_0 | QuantFormat::Q5_1 => 32,
             QuantFormat::Q8_0 | QuantFormat::Q8_1 => 32,
-            QuantFormat::Q2K | QuantFormat::Q3K | QuantFormat::Q4K
-            | QuantFormat::Q5K | QuantFormat::Q6K => 256,
+            QuantFormat::Q2K
+            | QuantFormat::Q3K
+            | QuantFormat::Q4K
+            | QuantFormat::Q5K
+            | QuantFormat::Q6K => 256,
             QuantFormat::Unknown(_) => 1,
         }
     }
@@ -166,8 +169,8 @@ mod tests {
         }
         let mut output = [0.0f32; 32];
         dequant_q8_0_block(&block, &mut output);
-        for i in 0..32 {
-            assert!((output[i] - i as f32).abs() < 1e-3, "mismatch at {i}");
+        for (i, &val) in output.iter().enumerate() {
+            assert!((val - i as f32).abs() < 1e-3, "mismatch at {i}");
         }
     }
 }

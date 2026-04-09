@@ -9,7 +9,10 @@ pub fn matmul_cpu(a: &Tensor, b: &Tensor, output: &mut Tensor) {
     let a_shape = a.shape();
     let b_shape = b.shape();
 
-    assert!(a_shape.len() == 2 && b_shape.len() == 2, "matmul requires 2D tensors");
+    assert!(
+        a_shape.len() == 2 && b_shape.len() == 2,
+        "matmul requires 2D tensors"
+    );
     assert_eq!(a_shape[1], b_shape[0], "inner dimensions must match");
 
     let m = a_shape[0];

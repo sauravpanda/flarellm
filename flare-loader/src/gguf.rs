@@ -11,7 +11,10 @@ const GGUF_MAGIC: u32 = 0x46475547; // "GGUF" in little-endian
 
 #[derive(Debug, Error)]
 pub enum GgufError {
-    #[error("invalid GGUF magic number: expected 0x{:08X}, got 0x{got:08X}", GGUF_MAGIC)]
+    #[error(
+        "invalid GGUF magic number: expected 0x{:08X}, got 0x{got:08X}",
+        GGUF_MAGIC
+    )]
     InvalidMagic { got: u32 },
     #[error("unsupported GGUF version: {0}")]
     UnsupportedVersion(u32),
@@ -118,7 +121,7 @@ impl GgufFile {
 
         // Version
         let version = reader.read_u32::<LittleEndian>()?;
-        if version < 2 || version > 3 {
+        if !(2..=3).contains(&version) {
             return Err(GgufError::UnsupportedVersion(version));
         }
 
@@ -158,7 +161,7 @@ impl GgufFile {
         // Tensor data starts at the next alignment boundary after the header
         let header_end = reader.stream_position()?;
         let alignment = 32u64;
-        let tensor_data_offset = (header_end + alignment - 1) / alignment * alignment;
+        let tensor_data_offset = header_end.div_ceil(alignment) * alignment;
 
         Ok(Self {
             version,
@@ -193,7 +196,9 @@ impl GgufFile {
             MetadataValue::Int64(v) => Ok(*v as usize),
             MetadataValue::Uint16(v) => Ok(*v as usize),
             MetadataValue::Uint8(v) => Ok(*v as usize),
-            _ => Err(GgufError::MissingMetadata(format!("{key} (not an integer)"))),
+            _ => Err(GgufError::MissingMetadata(format!(
+                "{key} (not an integer)"
+            ))),
         }
     }
 
@@ -225,13 +230,23 @@ impl GgufFile {
 
         let prefix = arch_str.to_lowercase();
 
-        let vocab_size = self.meta_usize(&format!("{prefix}.vocab_size"))
-            .or_else(|_| self.meta_usize("tokenizer.ggml.tokens").map(|_| {
-                // Count tokens from the token array if vocab_size not explicit
-                self.metadata.get("tokenizer.ggml.tokens")
-                    .and_then(|v| if let MetadataValue::Array(a) = v { Some(a.len()) } else { None })
-                    .unwrap_or(32000)
-            }))
+        let vocab_size = self
+            .meta_usize(&format!("{prefix}.vocab_size"))
+            .or_else(|_| {
+                self.meta_usize("tokenizer.ggml.tokens").map(|_| {
+                    // Count tokens from the token array if vocab_size not explicit
+                    self.metadata
+                        .get("tokenizer.ggml.tokens")
+                        .and_then(|v| {
+                            if let MetadataValue::Array(a) = v {
+                                Some(a.len())
+                            } else {
+                                None
+                            }
+                        })
+                        .unwrap_or(32000)
+                })
+            })
             .unwrap_or(32000);
 
         let hidden_dim = self.meta_usize(&format!("{prefix}.embedding_length"))?;
@@ -290,9 +305,8 @@ impl GgufFile {
         let f32_data = dequantize_tensor(&raw, tensor_info.dtype, numel)?;
 
         let shape: Vec<usize> = tensor_info.dimensions.iter().map(|&d| d as usize).collect();
-        Tensor::from_vec(f32_data, &shape).map_err(|e| {
-            GgufError::Io(io::Error::new(io::ErrorKind::InvalidData, e.to_string()))
-        })
+        Tensor::from_vec(f32_data, &shape)
+            .map_err(|e| GgufError::Io(io::Error::new(io::ErrorKind::InvalidData, e.to_string())))
     }
 
     /// Load all tensor data from the file, returning a map of name → Tensor.

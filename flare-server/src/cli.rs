@@ -23,7 +23,8 @@ fn main() {
 
     let model_path = &args[1];
     let tokenizer_path = args.get(2).filter(|s| !s.starts_with("--"));
-    let prompt = args.iter()
+    let prompt = args
+        .iter()
         .position(|a| a == "--prompt")
         .and_then(|i| args.get(i + 1))
         .map(|s| s.as_str());
@@ -32,12 +33,10 @@ fn main() {
     eprintln!("Loading model from {}...", model_path);
     let start = Instant::now();
 
-    let mut file = BufReader::new(
-        File::open(model_path).unwrap_or_else(|e| {
-            eprintln!("Error opening {}: {}", model_path, e);
-            std::process::exit(1);
-        })
-    );
+    let mut file = BufReader::new(File::open(model_path).unwrap_or_else(|e| {
+        eprintln!("Error opening {}: {}", model_path, e);
+        std::process::exit(1);
+    }));
 
     let gguf = GgufFile::parse_header(&mut file).unwrap_or_else(|e| {
         eprintln!("Error parsing GGUF: {}", e);
@@ -50,10 +49,16 @@ fn main() {
     });
 
     eprintln!("Architecture: {:?}", config.architecture);
-    eprintln!("Parameters:   ~{}M", config.estimate_param_count() / 1_000_000);
+    eprintln!(
+        "Parameters:   ~{}M",
+        config.estimate_param_count() / 1_000_000
+    );
     eprintln!("Layers:       {}", config.num_layers);
     eprintln!("Hidden dim:   {}", config.hidden_dim);
-    eprintln!("Heads:        {} (KV: {})", config.num_heads, config.num_kv_heads);
+    eprintln!(
+        "Heads:        {} (KV: {})",
+        config.num_heads, config.num_kv_heads
+    );
     eprintln!("Vocab:        {}", config.vocab_size);
     eprintln!("Context:      {}", config.max_seq_len);
 
@@ -67,14 +72,13 @@ fn main() {
     eprintln!("Model loaded in {:.1}s", start.elapsed().as_secs_f32());
 
     // Load tokenizer
-    let tokenizer: Option<BpeTokenizer> = tokenizer_path
-        .map(|path| {
-            eprintln!("Loading tokenizer from {}...", path);
-            BpeTokenizer::from_file(path).unwrap_or_else(|e| {
-                eprintln!("Error loading tokenizer: {}", e);
-                std::process::exit(1);
-            })
-        });
+    let tokenizer: Option<BpeTokenizer> = tokenizer_path.map(|path| {
+        eprintln!("Loading tokenizer from {}...", path);
+        BpeTokenizer::from_file(path).unwrap_or_else(|e| {
+            eprintln!("Error loading tokenizer: {}", e);
+            std::process::exit(1);
+        })
+    });
 
     let params = SamplingParams {
         temperature: 0.7,
@@ -84,10 +88,11 @@ fn main() {
     };
 
     // Simple RNG (xorshift32)
-    let mut rng_state: u32 = 0xDEADBEEF ^ (std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .subsec_nanos());
+    let mut rng_state: u32 = 0xDEADBEEF
+        ^ (std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .subsec_nanos());
     let mut rng = move || -> f32 {
         rng_state ^= rng_state << 13;
         rng_state ^= rng_state >> 17;
@@ -161,10 +166,7 @@ fn generate_text(
         prompt.bytes().map(|b| b as u32).collect()
     };
 
-    eprintln!(
-        "Prompt: {} tokens",
-        prompt_tokens.len(),
-    );
+    eprintln!("Prompt: {} tokens", prompt_tokens.len(),);
 
     let eos_token = tokenizer.and_then(|t| t.eos_token_id());
 
@@ -175,7 +177,7 @@ fn generate_text(
         &prompt_tokens,
         max_tokens,
         eos_token,
-        || rng(),
+        rng,
         |token_id, _step| {
             // Stream tokens as they're generated
             if let Some(tok) = tokenizer {

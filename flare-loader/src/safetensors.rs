@@ -261,11 +261,7 @@ impl SafeTensorsFile {
 // ---------------------------------------------------------------------------
 
 /// Decode raw bytes into a Vec<f32> according to `dtype`.
-fn decode_to_f32(
-    data: &[u8],
-    dtype: Dtype,
-    numel: usize,
-) -> Result<Vec<f32>, SafeTensorsError> {
+fn decode_to_f32(data: &[u8], dtype: Dtype, numel: usize) -> Result<Vec<f32>, SafeTensorsError> {
     match dtype {
         Dtype::F32 => {
             let mut out = vec![0f32; numel];
@@ -355,10 +351,7 @@ mod tests {
             for (k, v) in meta {
                 m.insert(k.to_string(), serde_json::Value::String(v.to_string()));
             }
-            header_map.insert(
-                "__metadata__".to_string(),
-                serde_json::Value::Object(m),
-            );
+            header_map.insert("__metadata__".to_string(), serde_json::Value::Object(m));
         }
 
         let mut offset = 0usize;
@@ -464,14 +457,8 @@ mod tests {
 
     #[test]
     fn test_multiple_tensors() {
-        let w_data: Vec<u8> = vec![1.0f32, 2.0]
-            .iter()
-            .flat_map(|v| v.to_le_bytes())
-            .collect();
-        let b_data: Vec<u8> = vec![0.5f32]
-            .iter()
-            .flat_map(|v| v.to_le_bytes())
-            .collect();
+        let w_data: Vec<u8> = [1.0f32, 2.0].iter().flat_map(|v| v.to_le_bytes()).collect();
+        let b_data: Vec<u8> = [0.5f32].iter().flat_map(|v| v.to_le_bytes()).collect();
 
         let file_bytes = build_safetensors(
             &[

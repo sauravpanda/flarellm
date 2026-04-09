@@ -5,6 +5,12 @@ pub struct PipelineCache {
     pipelines: HashMap<String, wgpu::ComputePipeline>,
 }
 
+impl Default for PipelineCache {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl PipelineCache {
     pub fn new() -> Self {
         Self {
