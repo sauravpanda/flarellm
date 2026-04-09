@@ -1,0 +1,255 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Flare LLM — Browser Demo</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    background: #0f0f0f;
+    color: #e0e0e0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    min-height: 100vh;
+  }
+
+  header {
+    width: 100%;
+    text-align: center;
+    padding: 1.5rem 1rem 1rem;
+    border-bottom: 1px solid #2a2a2a;
+  }
+
+  header h1 {
+    font-size: 1.4rem;
+    font-weight: 600;
+    color: #f5f5f5;
+  }
+
+  #status-bar {
+    width: 100%;
+    max-width: 700px;
+    margin: 0.75rem auto 0;
+    padding: 0.5rem 1rem;
+    font-size: 0.8rem;
+    color: #888;
+    background: #1a1a1a;
+    border-radius: 6px;
+    line-height: 1.5;
+  }
+
+  #status-bar .label { color: #666; }
+  #status-bar .ok { color: #4caf50; }
+  #status-bar .warn { color: #ff9800; }
+  #status-bar .err { color: #f44336; }
+
+  .note {
+    max-width: 700px;
+    width: 100%;
+    margin: 0.5rem auto 0;
+    padding: 0.5rem 1rem;
+    font-size: 0.75rem;
+    color: #666;
+    text-align: center;
+    font-style: italic;
+  }
+
+  #chat-container {
+    flex: 1;
+    width: 100%;
+    max-width: 700px;
+    display: flex;
+    flex-direction: column;
+    padding: 1rem;
+    overflow: hidden;
+  }
+
+  #messages {
+    flex: 1;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+    padding-bottom: 0.5rem;
+  }
+
+  .message {
+    max-width: 80%;
+    padding: 0.7rem 1rem;
+    border-radius: 12px;
+    font-size: 0.95rem;
+    line-height: 1.45;
+    word-wrap: break-word;
+  }
+
+  .message.user {
+    align-self: flex-end;
+    background: #2563eb;
+    color: #fff;
+    border-bottom-right-radius: 4px;
+  }
+
+  .message.assistant {
+    align-self: flex-start;
+    background: #262626;
+    color: #d0d0d0;
+    border-bottom-left-radius: 4px;
+  }
+
+  #input-area {
+    display: flex;
+    gap: 0.5rem;
+    padding-top: 0.75rem;
+    border-top: 1px solid #2a2a2a;
+  }
+
+  #user-input {
+    flex: 1;
+    padding: 0.65rem 1rem;
+    border: 1px solid #333;
+    border-radius: 8px;
+    background: #1a1a1a;
+    color: #e0e0e0;
+    font-size: 0.95rem;
+    outline: none;
+    transition: border-color 0.2s;
+  }
+
+  #user-input:focus { border-color: #2563eb; }
+
+  #send-btn {
+    padding: 0.65rem 1.4rem;
+    border: none;
+    border-radius: 8px;
+    background: #2563eb;
+    color: #fff;
+    font-size: 0.95rem;
+    font-weight: 500;
+    cursor: pointer;
+    transition: background 0.2s;
+    white-space: nowrap;
+  }
+
+  #send-btn:hover { background: #1d4ed8; }
+  #send-btn:disabled { background: #333; color: #666; cursor: not-allowed; }
+
+  @media (max-width: 520px) {
+    header h1 { font-size: 1.15rem; }
+    .message { max-width: 90%; font-size: 0.9rem; }
+    #send-btn { padding: 0.65rem 1rem; }
+  }
+</style>
+</head>
+<body>
+  <header>
+    <h1>Flare LLM &mdash; Browser Demo</h1>
+  </header>
+
+  <div id="status-bar">
+    <span class="label">Status:</span> <span id="status-text">Initializing...</span>
+  </div>
+
+  <p class="note">Model inference not yet wired up &mdash; this demo validates the WASM integration.</p>
+
+  <div id="chat-container">
+    <div id="messages"></div>
+    <div id="input-area">
+      <input id="user-input" type="text" placeholder="Type a message..." autocomplete="off" disabled />
+      <button id="send-btn" disabled>Send</button>
+    </div>
+  </div>
+
+<script type="module">
+  import init, { webgpu_available, device_info } from '../../flare-web/pkg/flare_web.js';
+
+  const statusEl  = document.getElementById('status-text');
+  const messagesEl = document.getElementById('messages');
+  const inputEl   = document.getElementById('user-input');
+  const sendBtn   = document.getElementById('send-btn');
+
+  function setStatus(html, cls) {
+    statusEl.innerHTML = html;
+    statusEl.className = cls || '';
+  }
+
+  function addMessage(text, role) {
+    const el = document.createElement('div');
+    el.className = 'message ' + role;
+    el.textContent = text;
+    messagesEl.appendChild(el);
+    messagesEl.scrollTop = messagesEl.scrollHeight;
+  }
+
+  function handleSend() {
+    const text = inputEl.value.trim();
+    if (!text) return;
+    inputEl.value = '';
+    addMessage(text, 'user');
+
+    // Placeholder response until inference is wired up
+    setTimeout(() => {
+      addMessage(
+        'This is a placeholder response. Model inference is not yet connected — ' +
+        'the WASM module loaded successfully and WebGPU detection is working.',
+        'assistant'
+      );
+    }, 300);
+  }
+
+  sendBtn.addEventListener('click', handleSend);
+  inputEl.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') handleSend();
+  });
+
+  async function startup() {
+    try {
+      setStatus('Loading WASM module...', '');
+      await init();
+      setStatus('WASM loaded. Checking WebGPU...', '');
+
+      const gpuOk = webgpu_available();
+      const info  = device_info();
+
+      let parsed;
+      try { parsed = JSON.parse(info); } catch (_) { parsed = null; }
+
+      if (gpuOk) {
+        setStatus(
+          '<span class="ok">WebGPU available</span> &mdash; ' +
+          '<span class="label">Device info:</span> ' +
+          (parsed ? parsed.userAgent.slice(0, 80) : info),
+          ''
+        );
+      } else {
+        setStatus(
+          '<span class="warn">WebGPU not available</span> &mdash; ' +
+          'SIMD CPU fallback would be used. ' +
+          '<span class="label">UA:</span> ' +
+          (parsed ? parsed.userAgent.slice(0, 60) : 'unknown'),
+          ''
+        );
+      }
+
+      inputEl.disabled = false;
+      sendBtn.disabled = false;
+      inputEl.focus();
+
+    } catch (err) {
+      console.error('Flare init failed:', err);
+      setStatus(
+        '<span class="err">Failed to load WASM module.</span> ' +
+        'Make sure you ran <code>wasm-pack build flare-web --target web</code> ' +
+        'and are serving from the repo root.',
+        ''
+      );
+    }
+  }
+
+  startup();
+</script>
+</body>
+</html>
