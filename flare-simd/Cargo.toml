@@ -6,6 +6,10 @@ license.workspace = true
 repository.workspace = true
 description = "WASM SIMD128 CPU fallback backend for Flare LLM inference"
 
+[[bench]]
+name = "matmul_bench"
+harness = false
+
 [dependencies]
 flare-core = { path = "../flare-core" }
 thiserror = { workspace = true }
