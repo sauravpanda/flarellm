@@ -7,7 +7,7 @@ use crate::quantize::{self, QuantFormat};
 use flare_core::config::{Architecture, ModelConfig};
 use flare_core::tensor::Tensor;
 
-const GGUF_MAGIC: u32 = 0x46475547; // "GGUF" in little-endian
+const GGUF_MAGIC: u32 = 0x46554747; // "GGUF" as little-endian u32 (bytes: 47 47 55 46)
 
 #[derive(Debug, Error)]
 pub enum GgufError {
