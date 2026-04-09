@@ -168,11 +168,17 @@ impl BpeTokenizer {
 
     // -- internal helpers --
 
-    /// Split text into initial BPE tokens (individual characters / bytes).
-    /// For byte-level BPE (GPT-2 style), each byte maps to a unicode char
-    /// via the well-known byte-to-unicode table.
+    /// Split text into initial BPE tokens using the GPT-2 byte-to-unicode mapping.
+    /// Each byte of the UTF-8 input is mapped to a unicode character that the
+    /// BPE vocabulary uses. For example, space (0x20) maps to 'Ġ' (U+0120).
     fn text_to_initial_tokens(&self, text: &str) -> Vec<String> {
-        text.chars().map(|c| c.to_string()).collect()
+        text.as_bytes()
+            .iter()
+            .map(|&b| {
+                let c = byte_to_unicode(b);
+                c.to_string()
+            })
+            .collect()
     }
 
     /// Run the BPE merge algorithm on a sequence of token strings.
@@ -337,19 +343,20 @@ impl Tokenizer for BpeTokenizer {
             }
         }
 
-        // Handle GPT-2 / byte-level BPE convention: the character '\u{0120}' (Ġ)
-        // represents a leading space.
-        let output = output.replace('\u{0120}', " ");
+        // Decode byte-level BPE: convert unicode chars back to bytes
+        let mut bytes = Vec::new();
+        for c in output.chars() {
+            if let Some(b) = unicode_to_byte(c) {
+                bytes.push(b);
+            } else {
+                // Non-BPE character, encode as UTF-8
+                let mut buf = [0u8; 4];
+                let s = c.encode_utf8(&mut buf);
+                bytes.extend_from_slice(s.as_bytes());
+            }
+        }
 
-        // Handle other common byte-level BPE unicode mappings.
-        // The GPT-2 byte-to-unicode table maps bytes 0-255 to specific unicode
-        // code points. The most impactful one is Ġ for space (0x20 -> \u0120).
-        // Others like Ċ for newline (\n -> \u010a) are also common.
-        let output = output.replace('\u{010a}', "\n");
-        let output = output.replace('\u{010d}', "\r");
-        let output = output.replace('\u{0109}', "\t");
-
-        Ok(output)
+        Ok(String::from_utf8_lossy(&bytes).into_owned())
     }
 
     fn vocab_size(&self) -> usize {
@@ -368,6 +375,75 @@ impl Tokenizer for BpeTokenizer {
     fn eos_token_id(&self) -> Option<u32> {
         self.eos_id
     }
+}
+
+// ---------------------------------------------------------------------------
+// GPT-2 byte-level BPE unicode mapping
+// ---------------------------------------------------------------------------
+
+/// Map a byte to its GPT-2 byte-level BPE unicode character.
+/// The GPT-2 tokenizer maps bytes 0-255 to unicode characters to avoid
+/// control characters in the vocabulary. Printable ASCII characters (33-126)
+/// and some Latin-1 characters (161-172, 174-255) map to themselves.
+/// All other bytes are mapped to a range starting at U+0100.
+fn byte_to_unicode(b: u8) -> char {
+    match b {
+        // Printable ASCII: ! through ~
+        33..=126 => b as char,
+        // Latin-1 supplement ranges that map to themselves
+        161..=172 | 174..=255 => b as char,
+        // Everything else gets shifted to U+0100+
+        _ => {
+            // The offset for non-printable bytes
+            static REMAP: std::sync::LazyLock<[char; 256]> = std::sync::LazyLock::new(|| {
+                let mut table = ['\0'; 256];
+                let mut n = 0u32;
+                for i in 0..256u32 {
+                    let b = i as u8;
+                    if matches!(b, 33..=126 | 161..=172 | 174..=255) {
+                        table[i as usize] = char::from(b);
+                    } else {
+                        table[i as usize] = char::from_u32(256 + n).unwrap_or('\u{FFFD}');
+                        n += 1;
+                    }
+                }
+                table
+            });
+            REMAP[b as usize]
+        }
+    }
+}
+
+/// Reverse mapping: GPT-2 unicode char back to byte.
+fn unicode_to_byte(c: char) -> Option<u8> {
+    let code = c as u32;
+
+    // Direct ASCII/Latin-1 range
+    if matches!(code, 33..=126 | 161..=172 | 174..=255) {
+        return Some(code as u8);
+    }
+
+    // Remapped bytes start at U+0100
+    if code >= 256 {
+        // Build the reverse lookup
+        static REVERSE: std::sync::LazyLock<HashMap<char, u8>> = std::sync::LazyLock::new(|| {
+            let mut map = HashMap::new();
+            let mut n = 0u32;
+            for i in 0..256u32 {
+                let b = i as u8;
+                if !matches!(b, 33..=126 | 161..=172 | 174..=255) {
+                    if let Some(ch) = char::from_u32(256 + n) {
+                        map.insert(ch, b);
+                    }
+                    n += 1;
+                }
+            }
+            map
+        });
+        return REVERSE.get(&c).copied();
+    }
+
+    None
 }
 
 // ---------------------------------------------------------------------------
