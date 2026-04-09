@@ -1,0 +1,25 @@
+[package]
+name = "flare-server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Native server with OpenAI-compatible API for Flare LLM inference"
+
+[[bin]]
+name = "flare-server"
+path = "src/main.rs"
+
+[[bin]]
+name = "flare-cli"
+path = "src/cli.rs"
+
+[dependencies]
+flare-core = { path = "../flare-core" }
+flare-loader = { path = "../flare-loader" }
+flare-gpu = { path = "../flare-gpu" }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+log = { workspace = true }
+thiserror = { workspace = true }

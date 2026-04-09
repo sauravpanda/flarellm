@@ -1,0 +1,12 @@
+[package]
+name = "flare-simd"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "WASM SIMD128 CPU fallback backend for Flare LLM inference"
+
+[dependencies]
+flare-core = { path = "../flare-core" }
+thiserror = { workspace = true }
+log = { workspace = true }

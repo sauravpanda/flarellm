@@ -1,0 +1,15 @@
+[package]
+name = "flare-loader"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Model weight loading for Flare (GGUF, SafeTensors, progressive streaming)"
+
+[dependencies]
+flare-core = { path = "../flare-core" }
+thiserror = { workspace = true }
+byteorder = { workspace = true }
+log = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
