@@ -1,0 +1,38 @@
+[package]
+name = "flare-web"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Browser integration for Flare LLM inference (WASM, Web Workers, Cache API)"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+flare-core = { path = "../flare-core" }
+flare-loader = { path = "../flare-loader" }
+flare-gpu = { path = "../flare-gpu" }
+flare-simd = { path = "../flare-simd" }
+wasm-bindgen = { workspace = true }
+web-sys = { workspace = true, features = [
+    "console",
+    "Navigator",
+    "Window",
+    "Worker",
+    "Request",
+    "Response",
+    "Cache",
+    "CacheStorage",
+    "Headers",
+    "ReadableStream",
+    "Gpu",
+    "GpuAdapter",
+    "GpuDevice",
+] }
+js-sys = { workspace = true }
+wasm-bindgen-futures = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+log = { workspace = true }
+thiserror = { workspace = true }
