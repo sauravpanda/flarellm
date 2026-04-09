@@ -182,6 +182,57 @@ pub fn dequant_q4k_block(block: &[u8], output: &mut [f32; 256]) {
     }
 }
 
+/// Dequantize a Q5_K block: 256 weights.
+/// Layout: d (f16) + dmin (f16) + scales[12] + qh[32] + ql[128]
+/// Each weight is 5 bits: 4 from ql + 1 from qh.
+pub fn dequant_q5k_block(block: &[u8], output: &mut [f32; 256]) {
+    // Q5_K: 2 (d) + 2 (dmin) + 12 (scales) + 32 (qh) + 128 (ql) = 176 bytes
+    if block.len() < 176 {
+        for v in output.iter_mut() {
+            *v = 0.0;
+        }
+        return;
+    }
+
+    let d = f16_to_f32(u16::from_le_bytes([block[0], block[1]]));
+    let dmin = f16_to_f32(u16::from_le_bytes([block[2], block[3]]));
+    let scales_raw = &block[4..16];
+    let qh = &block[16..48]; // high bits
+    let ql = &block[48..176]; // low 4 bits
+
+    // Decode scale/min pairs (same as Q4_K)
+    let mut sc = [0u8; 8];
+    let mut mn = [0u8; 8];
+    for i in 0..4 {
+        sc[i] = scales_raw[i] & 0x3F;
+        mn[i] = scales_raw[i + 4] & 0x3F;
+        sc[i + 4] = (scales_raw[i] >> 6) | ((scales_raw[i + 8] & 0x0F) << 2);
+        mn[i + 4] = (scales_raw[i + 4] >> 6) | ((scales_raw[i + 8] >> 4) << 2);
+    }
+
+    for (j, out) in output.iter_mut().enumerate() {
+        let block_idx = j / 32;
+        let byte_idx = j / 2;
+
+        // Low 4 bits from ql
+        let low4 = if j % 2 == 0 {
+            ql[byte_idx] & 0x0F
+        } else {
+            (ql[byte_idx] >> 4) & 0x0F
+        };
+
+        // High 1 bit from qh
+        let qh_byte = qh[j / 8];
+        let high1 = (qh_byte >> (j % 8)) & 1;
+
+        let q = (low4 as u32) | ((high1 as u32) << 4);
+
+        let scale = d * sc[block_idx] as f32;
+        let min = dmin * mn[block_idx] as f32;
+        *out = scale * q as f32 - min;
+    }
+}
+
 /// Convert f16 (as u16 bits) to f32.
 pub fn f16_to_f32(bits: u16) -> f32 {
     let sign = ((bits >> 15) & 1) as u32;
@@ -284,6 +335,27 @@ mod tests {
                 "q4k dequant: expected ~0.0 at {i}, got {val}"
             );
         }
+    }
+
+    #[test]
+    fn test_dequant_q5k_zeroed() {
+        let block = vec![0u8; 176];
+        let mut output = [0.0f32; 256];
+        dequant_q5k_block(&block, &mut output);
+        for (i, &val) in output.iter().enumerate() {
+            assert!(
+                val.abs() < 1e-5,
+                "q5k dequant: expected ~0.0 at {i}, got {val}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_dequant_q5k_short_block() {
+        let block = vec![0u8; 10];
+        let mut output = [1.0f32; 256];
+        dequant_q5k_block(&block, &mut output);
+        assert!(output.iter().all(|&v| v == 0.0));
     }
 
     #[test]
