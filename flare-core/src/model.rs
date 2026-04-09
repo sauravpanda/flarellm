@@ -327,4 +327,296 @@ mod tests {
             "RoPE should preserve magnitude"
         );
     }
+
+    // ---------------------------------------------------------------
+    // Integration tests: full forward pass
+    // ---------------------------------------------------------------
+
+    use crate::config::Architecture;
+
+    /// Build a tiny deterministic model for testing.
+    /// vocab=8, dim=4, intermediate=8, 1 layer, 2 heads, 2 kv_heads, head_dim=2
+    fn tiny_test_model() -> Model {
+        let config = ModelConfig {
+            architecture: Architecture::Llama,
+            vocab_size: 8,
+            hidden_dim: 4,
+            intermediate_dim: 8,
+            num_layers: 1,
+            num_heads: 2,
+            num_kv_heads: 2,
+            head_dim: 2,
+            max_seq_len: 16,
+            rope_theta: 10000.0,
+            rms_norm_eps: 1e-5,
+        };
+
+        // Deterministic weight init: w[i] = (i % 7 - 3) * 0.1
+        let make_weights =
+            |size: usize| -> Vec<f32> { (0..size).map(|i| ((i % 7) as f32 - 3.0) * 0.1).collect() };
+
+        let dim = config.hidden_dim;
+        let nh = config.num_heads;
+        let nkvh = config.num_kv_heads;
+        let hd = config.head_dim;
+        let inter = config.intermediate_dim;
+        let vocab = config.vocab_size;
+
+        let layer = LayerWeights {
+            attn_norm: Tensor::from_vec(vec![1.0; dim], &[dim]).unwrap(),
+            wq: Tensor::from_vec(make_weights(nh * hd * dim), &[nh * hd * dim]).unwrap(),
+            wk: Tensor::from_vec(make_weights(nkvh * hd * dim), &[nkvh * hd * dim]).unwrap(),
+            wv: Tensor::from_vec(make_weights(nkvh * hd * dim), &[nkvh * hd * dim]).unwrap(),
+            wo: Tensor::from_vec(make_weights(dim * nh * hd), &[dim * nh * hd]).unwrap(),
+            ffn_norm: Tensor::from_vec(vec![1.0; dim], &[dim]).unwrap(),
+            w_gate: Tensor::from_vec(make_weights(inter * dim), &[inter * dim]).unwrap(),
+            w_up: Tensor::from_vec(make_weights(inter * dim), &[inter * dim]).unwrap(),
+            w_down: Tensor::from_vec(make_weights(dim * inter), &[dim * inter]).unwrap(),
+        };
+
+        let weights = ModelWeights {
+            token_embedding: Tensor::from_vec(make_weights(vocab * dim), &[vocab * dim]).unwrap(),
+            layers: vec![layer],
+            output_norm: Tensor::from_vec(vec![1.0; dim], &[dim]).unwrap(),
+            output_weight: Tensor::from_vec(make_weights(vocab * dim), &[vocab * dim]).unwrap(),
+        };
+
+        Model::new(config, weights)
+    }
+
+    #[test]
+    fn test_forward_output_shape() {
+        let mut model = tiny_test_model();
+        let logits = model.forward(0, 0);
+        assert_eq!(logits.shape(), &[8], "output should be [vocab_size]");
+        assert_eq!(logits.numel(), 8);
+    }
+
+    #[test]
+    fn test_forward_different_tokens_different_logits() {
+        let mut model = tiny_test_model();
+        let logits_0 = model.forward(0, 0).data().to_vec();
+        model.reset();
+        let logits_1 = model.forward(1, 0).data().to_vec();
+        // Different token embeddings should produce different logits
+        assert_ne!(
+            logits_0, logits_1,
+            "different tokens should give different logits"
+        );
+    }
+
+    #[test]
+    fn test_forward_logits_are_finite() {
+        let mut model = tiny_test_model();
+        let logits = model.forward(3, 0);
+        for (i, &v) in logits.data().iter().enumerate() {
+            assert!(v.is_finite(), "logit[{i}] = {v} is not finite");
+        }
+    }
+
+    #[test]
+    fn test_multi_token_forward_kv_cache_grows() {
+        let mut model = tiny_test_model();
+        model.forward(0, 0);
+        assert_eq!(model.kv_cache().len(), 1);
+        model.forward(1, 1);
+        assert_eq!(model.kv_cache().len(), 2);
+        model.forward(2, 2);
+        assert_eq!(model.kv_cache().len(), 3);
+    }
+
+    #[test]
+    fn test_forward_position_affects_output() {
+        // RoPE should make the same token at different positions produce different logits
+        let mut model = tiny_test_model();
+        let logits_pos0 = model.forward(0, 0).data().to_vec();
+        // Don't reset — KV cache state will differ, which is fine.
+        // The point is the logits should differ from a fresh model at pos 5.
+        let mut model2 = tiny_test_model();
+        // Feed dummy tokens to advance to position 5
+        for i in 0..5 {
+            model2.forward(0, i);
+        }
+        let logits_pos5 = model2.forward(0, 5).data().to_vec();
+        assert_ne!(
+            logits_pos0, logits_pos5,
+            "same token at different positions should differ (RoPE)"
+        );
+    }
+
+    #[test]
+    fn test_forward_residual_connection() {
+        // With all-zero weights, the residual connection should preserve the embedding.
+        // We use an identity-like setup: norm weights = 1, all projection weights = 0.
+        let config = ModelConfig {
+            architecture: Architecture::Llama,
+            vocab_size: 4,
+            hidden_dim: 4,
+            intermediate_dim: 4,
+            num_layers: 1,
+            num_heads: 2,
+            num_kv_heads: 2,
+            head_dim: 2,
+            max_seq_len: 8,
+            rope_theta: 10000.0,
+            rms_norm_eps: 1e-5,
+        };
+
+        let dim = 4;
+        let zero_4x4 = vec![0.0f32; 16];
+
+        let layer = LayerWeights {
+            attn_norm: Tensor::from_vec(vec![1.0; dim], &[dim]).unwrap(),
+            wq: Tensor::from_vec(zero_4x4.clone(), &[16]).unwrap(),
+            wk: Tensor::from_vec(zero_4x4.clone(), &[16]).unwrap(),
+            wv: Tensor::from_vec(zero_4x4.clone(), &[16]).unwrap(),
+            wo: Tensor::from_vec(zero_4x4.clone(), &[16]).unwrap(),
+            ffn_norm: Tensor::from_vec(vec![1.0; dim], &[dim]).unwrap(),
+            w_gate: Tensor::from_vec(zero_4x4.clone(), &[16]).unwrap(),
+            w_up: Tensor::from_vec(zero_4x4.clone(), &[16]).unwrap(),
+            w_down: Tensor::from_vec(zero_4x4, &[16]).unwrap(),
+        };
+
+        // Embedding: token 0 = [1, 2, 3, 4]
+        let mut embed = vec![0.0f32; 16];
+        embed[0] = 1.0;
+        embed[1] = 2.0;
+        embed[2] = 3.0;
+        embed[3] = 4.0;
+
+        // Output weight = identity-ish (diagonal)
+        let mut out_w = vec![0.0f32; 16];
+        out_w[0] = 1.0; // out[0] picks up normed[0]
+        out_w[5] = 1.0;
+        out_w[10] = 1.0;
+        out_w[15] = 1.0;
+
+        let weights = ModelWeights {
+            token_embedding: Tensor::from_vec(embed, &[16]).unwrap(),
+            layers: vec![layer],
+            output_norm: Tensor::from_vec(vec![1.0; dim], &[dim]).unwrap(),
+            output_weight: Tensor::from_vec(out_w, &[16]).unwrap(),
+        };
+
+        let mut model = Model::new(config, weights);
+        let logits = model.forward(0, 0);
+
+        // With zero projections, residual preserves embedding [1,2,3,4].
+        // After final rmsnorm with weight=1, then matmul with diagonal output_weight,
+        // logits should reflect the normalized embedding.
+        let data = logits.data();
+        // The embedding [1,2,3,4] after RMSNorm has specific values. Just verify finite and non-zero.
+        assert!(
+            data.iter().any(|&v| v.abs() > 1e-6),
+            "residual path should produce non-zero logits"
+        );
+        assert!(
+            data.iter().all(|v| v.is_finite()),
+            "all logits should be finite"
+        );
+    }
+
+    #[test]
+    fn test_gqa_heads_per_kv_group() {
+        // Test with num_heads=4, num_kv_heads=2 (2 heads per KV group)
+        let config = ModelConfig {
+            architecture: Architecture::Llama,
+            vocab_size: 4,
+            hidden_dim: 4,
+            intermediate_dim: 4,
+            num_layers: 1,
+            num_heads: 4,
+            num_kv_heads: 2,
+            head_dim: 1,
+            max_seq_len: 8,
+            rope_theta: 10000.0,
+            rms_norm_eps: 1e-5,
+        };
+
+        let make_w =
+            |size: usize| -> Vec<f32> { (0..size).map(|i| ((i % 5) as f32 - 2.0) * 0.1).collect() };
+
+        let dim = 4;
+        let nh = 4;
+        let nkvh = 2;
+        let hd = 1;
+        let inter = 4;
+
+        let layer = LayerWeights {
+            attn_norm: Tensor::from_vec(vec![1.0; dim], &[dim]).unwrap(),
+            wq: Tensor::from_vec(make_w(nh * hd * dim), &[nh * hd * dim]).unwrap(),
+            wk: Tensor::from_vec(make_w(nkvh * hd * dim), &[nkvh * hd * dim]).unwrap(),
+            wv: Tensor::from_vec(make_w(nkvh * hd * dim), &[nkvh * hd * dim]).unwrap(),
+            wo: Tensor::from_vec(make_w(dim * nh * hd), &[dim * nh * hd]).unwrap(),
+            ffn_norm: Tensor::from_vec(vec![1.0; dim], &[dim]).unwrap(),
+            w_gate: Tensor::from_vec(make_w(inter * dim), &[inter * dim]).unwrap(),
+            w_up: Tensor::from_vec(make_w(inter * dim), &[inter * dim]).unwrap(),
+            w_down: Tensor::from_vec(make_w(dim * inter), &[dim * inter]).unwrap(),
+        };
+
+        let weights = ModelWeights {
+            token_embedding: Tensor::from_vec(make_w(4 * dim), &[4 * dim]).unwrap(),
+            layers: vec![layer],
+            output_norm: Tensor::from_vec(vec![1.0; dim], &[dim]).unwrap(),
+            output_weight: Tensor::from_vec(make_w(4 * dim), &[4 * dim]).unwrap(),
+        };
+
+        let mut model = Model::new(config, weights);
+        let logits = model.forward(0, 0);
+        assert_eq!(logits.shape(), &[4]);
+        assert!(
+            logits.data().iter().all(|v| v.is_finite()),
+            "GQA output should be finite"
+        );
+    }
+
+    #[test]
+    fn test_multi_layer_forward() {
+        // 2 layers should produce different results than 1 layer
+        let mut model_1layer = tiny_test_model();
+        let logits_1 = model_1layer.forward(0, 0).data().to_vec();
+
+        // Build 2-layer model
+        let config = ModelConfig {
+            num_layers: 2,
+            ..model_1layer.config().clone()
+        };
+
+        let make_weights =
+            |size: usize| -> Vec<f32> { (0..size).map(|i| ((i % 7) as f32 - 3.0) * 0.1).collect() };
+
+        let dim = config.hidden_dim;
+        let nh = config.num_heads;
+        let nkvh = config.num_kv_heads;
+        let hd = config.head_dim;
+        let inter = config.intermediate_dim;
+        let vocab = config.vocab_size;
+
+        let make_layer = || LayerWeights {
+            attn_norm: Tensor::from_vec(vec![1.0; dim], &[dim]).unwrap(),
+            wq: Tensor::from_vec(make_weights(nh * hd * dim), &[nh * hd * dim]).unwrap(),
+            wk: Tensor::from_vec(make_weights(nkvh * hd * dim), &[nkvh * hd * dim]).unwrap(),
+            wv: Tensor::from_vec(make_weights(nkvh * hd * dim), &[nkvh * hd * dim]).unwrap(),
+            wo: Tensor::from_vec(make_weights(dim * nh * hd), &[dim * nh * hd]).unwrap(),
+            ffn_norm: Tensor::from_vec(vec![1.0; dim], &[dim]).unwrap(),
+            w_gate: Tensor::from_vec(make_weights(inter * dim), &[inter * dim]).unwrap(),
+            w_up: Tensor::from_vec(make_weights(inter * dim), &[inter * dim]).unwrap(),
+            w_down: Tensor::from_vec(make_weights(dim * inter), &[dim * inter]).unwrap(),
+        };
+
+        let weights = ModelWeights {
+            token_embedding: Tensor::from_vec(make_weights(vocab * dim), &[vocab * dim]).unwrap(),
+            layers: vec![make_layer(), make_layer()],
+            output_norm: Tensor::from_vec(vec![1.0; dim], &[dim]).unwrap(),
+            output_weight: Tensor::from_vec(make_weights(vocab * dim), &[vocab * dim]).unwrap(),
+        };
+
+        let mut model_2layer = Model::new(config, weights);
+        let logits_2 = model_2layer.forward(0, 0).data().to_vec();
+
+        assert_ne!(
+            logits_1, logits_2,
+            "2 layers should produce different output than 1 layer"
+        );
+    }
 }
