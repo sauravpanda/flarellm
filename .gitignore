@@ -1,6 +1,8 @@
 # Build
 /target
 pkg/
+pkg-node/
+pkg-bundler/
 wasm-pack.log
 
 # Dependencies

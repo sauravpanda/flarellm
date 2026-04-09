@@ -1,0 +1,29 @@
+{
+  "name": "@aspect/flare",
+  "version": "0.1.0",
+  "description": "WASM-first LLM inference engine with WebGPU acceleration",
+  "main": "pkg/flare_web.js",
+  "types": "js/types.ts",
+  "files": [
+    "pkg/",
+    "js/"
+  ],
+  "scripts": {
+    "build": "wasm-pack build --target web --out-dir pkg",
+    "build:node": "wasm-pack build --target nodejs --out-dir pkg-node",
+    "build:bundler": "wasm-pack build --target bundler --out-dir pkg-bundler"
+  },
+  "keywords": [
+    "llm",
+    "wasm",
+    "webgpu",
+    "inference",
+    "ai",
+    "rust"
+  ],
+  "license": "MIT OR Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/sauravpanda/flarellm"
+  }
+}
