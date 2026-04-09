@@ -25,3 +25,6 @@ Thumbs.db
 
 # Project planning (not for public repo)
 plan.md
+
+# Agent worktrees
+.claude/
