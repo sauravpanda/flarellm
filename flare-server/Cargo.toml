@@ -28,3 +28,5 @@ serde_json = { workspace = true }
 log = { workspace = true }
 thiserror = { workspace = true }
 axum = { workspace = true }
+tokio-stream = { workspace = true }
+futures = { workspace = true }
