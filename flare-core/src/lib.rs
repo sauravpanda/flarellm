@@ -16,6 +16,7 @@
 //! let tokens = gen.generate(&prompt, 128, None, || 0.5, |tok, _| true);
 //! ```
 
+pub mod chat;
 pub mod config;
 pub mod generate;
 pub mod kv_cache;
