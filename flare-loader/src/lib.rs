@@ -16,6 +16,7 @@
 //! ```
 
 pub mod gguf;
+pub mod progressive;
 pub mod quantize;
 pub mod safetensors;
 pub mod weights;
