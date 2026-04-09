@@ -21,6 +21,7 @@ pub mod config;
 pub mod error;
 pub mod generate;
 pub mod kv_cache;
+pub mod memory;
 pub mod model;
 pub mod sampling;
 pub mod tensor;
