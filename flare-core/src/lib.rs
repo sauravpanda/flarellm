@@ -18,6 +18,7 @@
 
 pub mod chat;
 pub mod config;
+pub mod error;
 pub mod generate;
 pub mod kv_cache;
 pub mod model;
@@ -26,5 +27,6 @@ pub mod tensor;
 pub mod tokenizer;
 
 pub use config::ModelConfig;
+pub use error::{FlareError, ModelError};
 pub use generate::Generator;
 pub use tensor::Tensor;
