@@ -282,12 +282,14 @@ dependencies = [
  "flare-gpu",
  "flare-loader",
  "futures",
+ "http-body-util",
  "log",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
  "tokio",
  "tokio-stream",
+ "tower",
 ]
 
 [[package]]
