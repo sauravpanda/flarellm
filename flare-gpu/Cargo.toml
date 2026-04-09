@@ -1,0 +1,14 @@
+[package]
+name = "flare-gpu"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "WebGPU/wgpu compute backend for Flare LLM inference"
+
+[dependencies]
+flare-core = { path = "../flare-core" }
+wgpu = { workspace = true }
+thiserror = { workspace = true }
+log = { workspace = true }
+byteorder = { workspace = true }
