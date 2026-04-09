@@ -8,6 +8,7 @@ use flare_core::model::Model;
 use flare_core::sampling::SamplingParams;
 use flare_core::tokenizer::{BpeTokenizer, Tokenizer};
 use flare_loader::gguf::GgufFile;
+use flare_loader::tokenizer::GgufVocab;
 use flare_loader::weights::load_model_weights;
 
 fn main() {
@@ -84,7 +85,7 @@ fn main() {
     let mut model = Model::new(config.clone(), weights);
     eprintln!("Model loaded in {:.1}s", start.elapsed().as_secs_f32());
 
-    // Load tokenizer
+    // Load tokenizer (from file or GGUF metadata)
     let tokenizer: Option<BpeTokenizer> = tokenizer_path.map(|path| {
         eprintln!("Loading tokenizer from {}...", path);
         BpeTokenizer::from_file(path).unwrap_or_else(|e| {
@@ -92,6 +93,25 @@ fn main() {
             std::process::exit(1);
         })
     });
+
+    // Fall back to GGUF-embedded vocabulary for decoding
+    let gguf_vocab = if tokenizer.is_none() {
+        match GgufVocab::from_gguf(&gguf) {
+            Ok(vocab) => {
+                eprintln!(
+                    "Using GGUF-embedded vocabulary ({} tokens, bos={:?}, eos={:?})",
+                    vocab.vocab_size, vocab.bos_id, vocab.eos_id
+                );
+                Some(vocab)
+            }
+            Err(e) => {
+                eprintln!("No tokenizer available: {e}");
+                None
+            }
+        }
+    } else {
+        None
+    };
 
     let params = SamplingParams {
         temperature,
@@ -134,6 +154,7 @@ fn main() {
             generate_text(
                 &mut model,
                 tokenizer.as_ref(),
+                gguf_vocab.as_ref(),
                 &formatted,
                 &params,
                 max_tokens,
@@ -143,6 +164,7 @@ fn main() {
             generate_text(
                 &mut model,
                 tokenizer.as_ref(),
+                gguf_vocab.as_ref(),
                 prompt_text,
                 &params,
                 max_tokens,
@@ -198,6 +220,7 @@ fn main() {
             let response = generate_and_collect(
                 &mut model,
                 tokenizer.as_ref(),
+                gguf_vocab.as_ref(),
                 &formatted,
                 &params,
                 max_tokens,
@@ -233,6 +256,7 @@ fn main() {
             generate_text(
                 &mut model,
                 tokenizer.as_ref(),
+                gguf_vocab.as_ref(),
                 input,
                 &params,
                 max_tokens,
@@ -250,32 +274,65 @@ fn get_arg(args: &[String], flag: &str) -> Option<String> {
         .cloned()
 }
 
+/// Encode text to tokens using available tokenizer, or byte-level fallback.
+fn encode_prompt(
+    text: &str,
+    tokenizer: Option<&BpeTokenizer>,
+    vocab: Option<&GgufVocab>,
+) -> Vec<u32> {
+    if let Some(tok) = tokenizer {
+        match tok.encode(text) {
+            Ok(tokens) => return tokens,
+            Err(e) => eprintln!("BPE tokenization error: {e}"),
+        }
+    }
+    // Byte-level fallback: look up each byte in GGUF vocab if available
+    if let Some(v) = vocab {
+        // Try encoding as byte tokens <0xHH>
+        text.bytes()
+            .map(|b| {
+                let byte_token = format!("<0x{b:02X}>");
+                v.encode_token(&byte_token).unwrap_or(b as u32)
+            })
+            .collect()
+    } else {
+        text.bytes().map(|b| b as u32).collect()
+    }
+}
+
+/// Decode a token ID to text using available tokenizer.
+fn decode_token(
+    token_id: u32,
+    tokenizer: Option<&BpeTokenizer>,
+    vocab: Option<&GgufVocab>,
+) -> Option<String> {
+    if let Some(tok) = tokenizer {
+        return tok.decode(&[token_id]).ok();
+    }
+    vocab.map(|v| v.decode(&[token_id]))
+}
+
+/// Get EOS token ID from available tokenizer.
+fn get_eos(tokenizer: Option<&BpeTokenizer>, vocab: Option<&GgufVocab>) -> Option<u32> {
+    if let Some(tok) = tokenizer {
+        return tok.eos_token_id();
+    }
+    vocab.and_then(|v| v.eos_id)
+}
+
 fn generate_text(
     model: &mut Model,
     tokenizer: Option<&BpeTokenizer>,
+    vocab: Option<&GgufVocab>,
     prompt: &str,
     params: &SamplingParams,
     max_tokens: usize,
     rng: &mut dyn FnMut() -> f32,
 ) {
-    // Encode prompt
-    let prompt_tokens = if let Some(tok) = tokenizer {
-        match tok.encode(prompt) {
-            Ok(tokens) => tokens,
-            Err(e) => {
-                eprintln!("Tokenization error: {}", e);
-                return;
-            }
-        }
-    } else {
-        // Fallback: use bytes as token IDs (only useful for testing)
-        eprintln!("Warning: no tokenizer loaded, using byte-level encoding");
-        prompt.bytes().map(|b| b as u32).collect()
-    };
+    let prompt_tokens = encode_prompt(prompt, tokenizer, vocab);
+    eprintln!("Prompt: {} tokens", prompt_tokens.len());
 
-    eprintln!("Prompt: {} tokens", prompt_tokens.len(),);
-
-    let eos_token = tokenizer.and_then(|t| t.eos_token_id());
+    let eos_token = get_eos(tokenizer, vocab);
 
     let start = Instant::now();
     let mut gen = Generator::new(model, params.clone());
@@ -286,12 +343,9 @@ fn generate_text(
         eos_token,
         rng,
         |token_id, _step| {
-            // Stream tokens as they're generated
-            if let Some(tok) = tokenizer {
-                if let Ok(text) = tok.decode(&[token_id]) {
-                    print!("{}", text);
-                    io::stdout().flush().ok();
-                }
+            if let Some(text) = decode_token(token_id, tokenizer, vocab) {
+                print!("{text}");
+                io::stdout().flush().ok();
             }
             true
         },
@@ -310,24 +364,14 @@ fn generate_text(
 fn generate_and_collect(
     model: &mut Model,
     tokenizer: Option<&BpeTokenizer>,
+    vocab: Option<&GgufVocab>,
     prompt: &str,
     params: &SamplingParams,
     max_tokens: usize,
     rng: &mut dyn FnMut() -> f32,
 ) -> String {
-    let prompt_tokens = if let Some(tok) = tokenizer {
-        match tok.encode(prompt) {
-            Ok(tokens) => tokens,
-            Err(e) => {
-                eprintln!("Tokenization error: {}", e);
-                return String::new();
-            }
-        }
-    } else {
-        prompt.bytes().map(|b| b as u32).collect()
-    };
-
-    let eos_token = tokenizer.and_then(|t| t.eos_token_id());
+    let prompt_tokens = encode_prompt(prompt, tokenizer, vocab);
+    let eos_token = get_eos(tokenizer, vocab);
     let mut collected = String::new();
 
     let start = Instant::now();
@@ -339,12 +383,10 @@ fn generate_and_collect(
         eos_token,
         rng,
         |token_id, _step| {
-            if let Some(tok) = tokenizer {
-                if let Ok(text) = tok.decode(&[token_id]) {
-                    print!("{text}");
-                    io::stdout().flush().ok();
-                    collected.push_str(&text);
-                }
+            if let Some(text) = decode_token(token_id, tokenizer, vocab) {
+                print!("{text}");
+                io::stdout().flush().ok();
+                collected.push_str(&text);
             }
             true
         },
