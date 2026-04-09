@@ -368,6 +368,19 @@ fn dequantize_tensor(raw: &[u8], dtype: QuantFormat, numel: usize) -> Result<Vec
             }
             Ok(data)
         }
+        QuantFormat::Q5_0 => {
+            let block_size = 32;
+            let block_bytes = 22; // 2 (scale) + 4 (high bits) + 16 (nibbles)
+            let num_blocks = numel / block_size;
+            let mut data = vec![0.0f32; numel];
+            for b in 0..num_blocks {
+                let block = &raw[b * block_bytes..(b + 1) * block_bytes];
+                let mut out = [0.0f32; 32];
+                quantize::dequant_q5_0_block(block, &mut out);
+                data[b * block_size..(b + 1) * block_size].copy_from_slice(&out);
+            }
+            Ok(data)
+        }
         QuantFormat::Q6K => {
             let block_size = 256;
             let block_bytes = 210;

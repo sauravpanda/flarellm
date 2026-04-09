@@ -101,6 +101,40 @@ pub fn dequant_q8_0_block(block: &[u8], output: &mut [f32; 32]) {
     }
 }
 
+/// Dequantize a Q5_0 block: 32 weights with 5 bits each.
+/// Layout: 2 bytes scale (f16) + 4 bytes high-bit mask + 16 bytes low nibbles
+/// Total: 22 bytes per block of 32 weights.
+///
+/// High bit layout matches llama.cpp: bits 0-15 are for weights 0-15 (low nibbles),
+/// bits 16-31 are for weights 16-31 (high nibbles).
+pub fn dequant_q5_0_block(block: &[u8], output: &mut [f32; 32]) {
+    if block.len() < 22 {
+        for v in output.iter_mut() {
+            *v = 0.0;
+        }
+        return;
+    }
+    let scale = f16_to_f32(u16::from_le_bytes([block[0], block[1]]));
+    let qh = u32::from_le_bytes([block[2], block[3], block[4], block[5]]);
+
+    for j in 0..16 {
+        let byte = block[6 + j];
+        let lo_nibble = byte & 0x0F;
+        let hi_nibble = (byte >> 4) & 0x0F;
+
+        // High bit for weight j (low nibble) is at qh bit j
+        let xh_0 = ((qh >> j) & 1) as u8;
+        // High bit for weight j+16 (high nibble) is at qh bit j+16
+        let xh_1 = ((qh >> (j + 16)) & 1) as u8;
+
+        let x0 = (lo_nibble | (xh_0 << 4)) as i32 - 16;
+        let x1 = (hi_nibble | (xh_1 << 4)) as i32 - 16;
+
+        output[j] = x0 as f32 * scale;
+        output[j + 16] = x1 as f32 * scale;
+    }
+}
+
 /// Dequantize a Q6_K block: 256 weights.
 /// Layout: quantized_data[128] + scales[8] (Q8) + d (f16)
 /// Each weight is 6 bits, packed in groups.
