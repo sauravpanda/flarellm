@@ -2,6 +2,7 @@ use std::fs::File;
 use std::io::{self, BufReader, Write};
 use std::time::Instant;
 
+use flare_core::chat::{ChatMessage, ChatTemplate, Role};
 use flare_core::generate::Generator;
 use flare_core::model::Model;
 use flare_core::sampling::SamplingParams;
@@ -13,21 +14,33 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
 
     if args.len() < 2 {
-        eprintln!("Usage: flare-cli <model.gguf> [tokenizer.json] [--prompt \"...\"]");
+        eprintln!("Usage: flare-cli <model.gguf> [tokenizer.json] [options]");
+        eprintln!();
+        eprintln!("Options:");
+        eprintln!("  --prompt \"...\"    Single prompt mode");
+        eprintln!("  --chat            Chat mode with proper templates");
+        eprintln!("  --system \"...\"    System prompt for chat mode");
+        eprintln!("  --temp <float>    Temperature (default: 0.7)");
+        eprintln!("  --max-tokens <n>  Max tokens to generate (default: 256)");
         eprintln!();
         eprintln!("Examples:");
-        eprintln!("  flare-cli model.gguf");
-        eprintln!("  flare-cli model.gguf tokenizer.json --prompt \"Hello world\"");
+        eprintln!("  flare-cli model.gguf tokenizer.json --prompt \"Hello\"");
+        eprintln!("  flare-cli model.gguf tokenizer.json --chat");
+        eprintln!("  flare-cli model.gguf tokenizer.json --chat --system \"You are a pirate\"");
         std::process::exit(1);
     }
 
     let model_path = &args[1];
     let tokenizer_path = args.get(2).filter(|s| !s.starts_with("--"));
-    let prompt = args
-        .iter()
-        .position(|a| a == "--prompt")
-        .and_then(|i| args.get(i + 1))
-        .map(|s| s.as_str());
+    let prompt = get_arg(&args, "--prompt");
+    let chat_mode = args.iter().any(|a| a == "--chat");
+    let system_prompt = get_arg(&args, "--system");
+    let temperature: f32 = get_arg(&args, "--temp")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0.7);
+    let max_tokens: usize = get_arg(&args, "--max-tokens")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(256);
 
     // Load GGUF
     eprintln!("Loading model from {}...", model_path);
@@ -81,11 +94,14 @@ fn main() {
     });
 
     let params = SamplingParams {
-        temperature: 0.7,
+        temperature,
         top_p: 0.9,
         top_k: 40,
         repeat_penalty: 1.1,
     };
+
+    // Detect chat template from architecture
+    let template = ChatTemplate::from_architecture(gguf.architecture().unwrap_or("llama"));
 
     // Simple RNG (xorshift32)
     let mut rng_state: u32 = 0xDEADBEEF
@@ -100,20 +116,104 @@ fn main() {
         (rng_state as f32) / (u32::MAX as f32)
     };
 
-    if let Some(prompt_text) = prompt {
-        // Single prompt mode
-        generate_text(
-            &mut model,
-            tokenizer.as_ref(),
-            prompt_text,
-            &params,
-            256,
-            &mut rng,
+    if let Some(prompt_text) = prompt.as_deref() {
+        if chat_mode {
+            // Single chat prompt with template formatting
+            let mut messages = Vec::new();
+            if let Some(sys) = &system_prompt {
+                messages.push(ChatMessage {
+                    role: Role::System,
+                    content: sys.clone(),
+                });
+            }
+            messages.push(ChatMessage {
+                role: Role::User,
+                content: prompt_text.to_string(),
+            });
+            let formatted = template.apply(&messages);
+            generate_text(
+                &mut model,
+                tokenizer.as_ref(),
+                &formatted,
+                &params,
+                max_tokens,
+                &mut rng,
+            );
+        } else {
+            generate_text(
+                &mut model,
+                tokenizer.as_ref(),
+                prompt_text,
+                &params,
+                max_tokens,
+                &mut rng,
+            );
+        }
+    } else if chat_mode {
+        // Interactive chat mode with conversation history
+        eprintln!(
+            "\nEntering chat mode ({:?} template). Type your message and press Enter.",
+            template
         );
+        eprintln!("Type 'quit' or Ctrl+C to exit. Type '/reset' to clear history.\n");
+
+        let mut history: Vec<ChatMessage> = Vec::new();
+        if let Some(sys) = &system_prompt {
+            history.push(ChatMessage {
+                role: Role::System,
+                content: sys.clone(),
+            });
+        }
+
+        loop {
+            eprint!("You> ");
+            io::stderr().flush().ok();
+
+            let mut input = String::new();
+            if io::stdin().read_line(&mut input).is_err() || input.trim() == "quit" {
+                break;
+            }
+
+            let input = input.trim();
+            if input.is_empty() {
+                continue;
+            }
+
+            if input == "/reset" {
+                history.retain(|m| m.role == Role::System);
+                model.reset();
+                eprintln!("(conversation reset)");
+                continue;
+            }
+
+            history.push(ChatMessage {
+                role: Role::User,
+                content: input.to_string(),
+            });
+            let formatted = template.apply(&history);
+
+            model.reset();
+            eprint!("AI> ");
+            io::stderr().flush().ok();
+            let response = generate_and_collect(
+                &mut model,
+                tokenizer.as_ref(),
+                &formatted,
+                &params,
+                max_tokens,
+                &mut rng,
+            );
+            println!();
+
+            history.push(ChatMessage {
+                role: Role::Assistant,
+                content: response,
+            });
+        }
     } else {
-        // Interactive mode
+        // Interactive raw prompt mode
         eprintln!("\nEntering interactive mode. Type your prompt and press Enter.");
-        eprintln!("Type 'quit' or Ctrl+C to exit.\n");
+        eprintln!("Type 'quit' or Ctrl+C to exit. Use --chat for conversation mode.\n");
 
         loop {
             eprint!("> ");
@@ -135,12 +235,19 @@ fn main() {
                 tokenizer.as_ref(),
                 input,
                 &params,
-                256,
+                max_tokens,
                 &mut rng,
             );
             println!();
         }
     }
+}
+
+fn get_arg(args: &[String], flag: &str) -> Option<String> {
+    args.iter()
+        .position(|a| a == flag)
+        .and_then(|i| args.get(i + 1))
+        .cloned()
 }
 
 fn generate_text(
@@ -197,4 +304,59 @@ fn generate_text(
         elapsed,
         generated.len() as f32 / elapsed,
     );
+}
+
+/// Like generate_text but collects the output string for chat history.
+fn generate_and_collect(
+    model: &mut Model,
+    tokenizer: Option<&BpeTokenizer>,
+    prompt: &str,
+    params: &SamplingParams,
+    max_tokens: usize,
+    rng: &mut dyn FnMut() -> f32,
+) -> String {
+    let prompt_tokens = if let Some(tok) = tokenizer {
+        match tok.encode(prompt) {
+            Ok(tokens) => tokens,
+            Err(e) => {
+                eprintln!("Tokenization error: {}", e);
+                return String::new();
+            }
+        }
+    } else {
+        prompt.bytes().map(|b| b as u32).collect()
+    };
+
+    let eos_token = tokenizer.and_then(|t| t.eos_token_id());
+    let mut collected = String::new();
+
+    let start = Instant::now();
+    let mut gen = Generator::new(model, params.clone());
+
+    let generated = gen.generate(
+        &prompt_tokens,
+        max_tokens,
+        eos_token,
+        rng,
+        |token_id, _step| {
+            if let Some(tok) = tokenizer {
+                if let Ok(text) = tok.decode(&[token_id]) {
+                    print!("{text}");
+                    io::stdout().flush().ok();
+                    collected.push_str(&text);
+                }
+            }
+            true
+        },
+    );
+
+    let elapsed = start.elapsed().as_secs_f32();
+    eprintln!(
+        "\n[{} tokens in {:.1}s, {:.1} tok/s]",
+        generated.len(),
+        elapsed,
+        generated.len() as f32 / elapsed,
+    );
+
+    collected
 }
