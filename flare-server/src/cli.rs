@@ -120,8 +120,20 @@ fn main() {
         repeat_penalty: 1.1,
     };
 
-    // Detect chat template from architecture
-    let template = ChatTemplate::from_architecture(gguf.architecture().unwrap_or("llama"));
+    // Detect chat template from GGUF metadata or architecture
+    let arch = gguf.architecture().unwrap_or("llama");
+    let template = match gguf.metadata.get("tokenizer.chat_template") {
+        Some(flare_loader::gguf::MetadataValue::String(tmpl)) => {
+            let detected = ChatTemplate::from_gguf_template(tmpl, arch);
+            eprintln!("Chat template: {:?} (from GGUF metadata)", detected);
+            detected
+        }
+        _ => {
+            let detected = ChatTemplate::from_architecture(arch);
+            eprintln!("Chat template: {:?} (from architecture)", detected);
+            detected
+        }
+    };
 
     // Simple RNG (xorshift32)
     let mut rng_state: u32 = 0xDEADBEEF
