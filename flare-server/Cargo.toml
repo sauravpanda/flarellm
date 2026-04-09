@@ -14,10 +14,6 @@ path = "src/main.rs"
 name = "flare-cli"
 path = "src/cli.rs"
 
-[[bin]]
-name = "flare-info"
-path = "src/info.rs"
-
 [dependencies]
 flare-core = { path = "../flare-core" }
 flare-loader = { path = "../flare-loader" }
