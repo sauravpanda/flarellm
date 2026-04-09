@@ -1,6 +1,8 @@
 # Build
 /target
 pkg/
+pkg-node/
+pkg-bundler/
 wasm-pack.log
 
 # Dependencies
@@ -23,3 +25,6 @@ Thumbs.db
 
 # Project planning (not for public repo)
 plan.md
+
+# Agent worktrees
+.claude/
