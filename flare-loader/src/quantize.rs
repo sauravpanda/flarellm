@@ -245,10 +245,8 @@ mod tests {
     fn test_dequant_q4_0() {
         // Q4_0 block: 2 bytes scale + 16 bytes data (32 nibbles)
         let mut block = vec![0x00, 0x3C]; // f16 1.0 scale
-                                          // Pack nibbles: each byte has low and high nibble
-        for _ in 0..16 {
-            block.push(0x88); // both nibbles = 8, centered = 0
-        }
+                                          // Pack nibbles: each byte has low and high nibble (8 = zero-centered)
+        block.extend_from_slice(&[0x88; 16]);
         let mut output = [0.0f32; 32];
         dequant_q4_0_block(&block, &mut output);
         // All values should be 0.0 (nibble 8 - 8 = 0, times scale 1.0)
