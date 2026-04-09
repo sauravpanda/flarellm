@@ -1,4 +1,5 @@
 //! SSE (Server-Sent Events) streaming support for OpenAI-compatible chat completions.
+#![allow(dead_code)] // Will be wired in when switching from inline streaming
 
 use crate::api::{ChatCompletionChunk, ChatCompletionRequest};
 use axum::response::{

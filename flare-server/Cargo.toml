@@ -30,3 +30,7 @@ thiserror = { workspace = true }
 axum = { workspace = true }
 tokio-stream = { workspace = true }
 futures = { workspace = true }
+
+[dev-dependencies]
+http-body-util = "0.1"
+tower = { version = "0.5", features = ["util"] }
