@@ -36,11 +36,27 @@ pub enum ChatTemplate {
 
 impl ChatTemplate {
     /// Auto-detect template from model architecture name.
+    /// Prefer `from_gguf_template()` when the Jinja template string is available.
     pub fn from_architecture(arch: &str) -> Self {
         match arch.to_lowercase().as_str() {
             "llama" => ChatTemplate::Llama3,
             "qwen2" | "mistral" => ChatTemplate::ChatML,
             _ => ChatTemplate::ChatML,
+        }
+    }
+
+    /// Detect template from the GGUF `tokenizer.chat_template` Jinja string.
+    /// Falls back to architecture-based detection if the template is unrecognized.
+    pub fn from_gguf_template(template_str: &str, arch: &str) -> Self {
+        if template_str.contains("<|im_start|>") {
+            ChatTemplate::ChatML
+        } else if template_str.contains("<|start_header_id|>") {
+            ChatTemplate::Llama3
+        } else if template_str.contains("### Instruction") {
+            ChatTemplate::Alpaca
+        } else {
+            // Unrecognized template, fall back to architecture
+            Self::from_architecture(arch)
         }
     }
 
@@ -236,5 +252,42 @@ mod tests {
         let json = r#"{"role":"user","content":"hello"}"#;
         let msg: ChatMessage = serde_json::from_str(json).unwrap();
         assert_eq!(msg.role, Role::User);
+    }
+
+    #[test]
+    fn test_from_gguf_template_chatml() {
+        let jinja = "{% for message in messages %}{{'<|im_start|>' + message['role']}}{% endfor %}";
+        assert_eq!(
+            ChatTemplate::from_gguf_template(jinja, "llama"),
+            ChatTemplate::ChatML
+        );
+    }
+
+    #[test]
+    fn test_from_gguf_template_llama3() {
+        let jinja = "{% for message in messages %}<|start_header_id|>{{ message.role }}<|end_header_id|>{% endfor %}";
+        assert_eq!(
+            ChatTemplate::from_gguf_template(jinja, "qwen2"),
+            ChatTemplate::Llama3
+        );
+    }
+
+    #[test]
+    fn test_from_gguf_template_alpaca() {
+        let jinja = "### Instruction:\n{{ prompt }}\n### Response:";
+        assert_eq!(
+            ChatTemplate::from_gguf_template(jinja, "llama"),
+            ChatTemplate::Alpaca
+        );
+    }
+
+    #[test]
+    fn test_from_gguf_template_unknown_falls_back() {
+        let jinja = "some unknown template format";
+        // Should fall back to architecture detection
+        assert_eq!(
+            ChatTemplate::from_gguf_template(jinja, "qwen2"),
+            ChatTemplate::ChatML
+        );
     }
 }
