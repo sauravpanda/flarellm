@@ -151,3 +151,150 @@ fn find_tensor(tensors: &HashMap<String, Tensor>, names: &[&str]) -> Result<Tens
             .join(" | "),
     ))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use flare_core::tensor::Tensor;
+
+    fn small_tensor(size: usize) -> Tensor {
+        Tensor::from_vec(vec![0.1; size], &[size]).unwrap()
+    }
+
+    fn build_gguf_tensors(layer_count: usize) -> HashMap<String, Tensor> {
+        let dim = 4;
+        let inter = 8;
+        let vocab = 8;
+        let nh = 2;
+        let nkvh = 1;
+        let hd = 2;
+
+        let mut m = HashMap::new();
+        m.insert("token_embd.weight".into(), small_tensor(vocab * dim));
+        m.insert("output_norm.weight".into(), small_tensor(dim));
+        m.insert("output.weight".into(), small_tensor(vocab * dim));
+
+        for i in 0..layer_count {
+            m.insert(format!("blk.{i}.attn_norm.weight"), small_tensor(dim));
+            m.insert(
+                format!("blk.{i}.attn_q.weight"),
+                small_tensor(nh * hd * dim),
+            );
+            m.insert(
+                format!("blk.{i}.attn_k.weight"),
+                small_tensor(nkvh * hd * dim),
+            );
+            m.insert(
+                format!("blk.{i}.attn_v.weight"),
+                small_tensor(nkvh * hd * dim),
+            );
+            m.insert(
+                format!("blk.{i}.attn_output.weight"),
+                small_tensor(dim * nh * hd),
+            );
+            m.insert(format!("blk.{i}.ffn_norm.weight"), small_tensor(dim));
+            m.insert(
+                format!("blk.{i}.ffn_gate.weight"),
+                small_tensor(inter * dim),
+            );
+            m.insert(format!("blk.{i}.ffn_up.weight"), small_tensor(inter * dim));
+            m.insert(
+                format!("blk.{i}.ffn_down.weight"),
+                small_tensor(dim * inter),
+            );
+        }
+        m
+    }
+
+    #[test]
+    fn test_load_layer_gguf_names() {
+        let tensors = build_gguf_tensors(1);
+        let layer = load_layer_weights(&tensors, 0).unwrap();
+        assert_eq!(layer.attn_norm.numel(), 4);
+        assert_eq!(layer.wq.numel(), 16); // 2 * 2 * 4
+        assert_eq!(layer.wk.numel(), 8); // 1 * 2 * 4
+        assert_eq!(layer.w_gate.numel(), 32); // 8 * 4
+    }
+
+    #[test]
+    fn test_load_layer_hf_names() {
+        let dim = 4;
+        let inter = 8;
+        let mut m = HashMap::new();
+        m.insert(
+            "model.layers.0.input_layernorm.weight".into(),
+            small_tensor(dim),
+        );
+        m.insert(
+            "model.layers.0.self_attn.q_proj.weight".into(),
+            small_tensor(16),
+        );
+        m.insert(
+            "model.layers.0.self_attn.k_proj.weight".into(),
+            small_tensor(8),
+        );
+        m.insert(
+            "model.layers.0.self_attn.v_proj.weight".into(),
+            small_tensor(8),
+        );
+        m.insert(
+            "model.layers.0.self_attn.o_proj.weight".into(),
+            small_tensor(16),
+        );
+        m.insert(
+            "model.layers.0.post_attention_layernorm.weight".into(),
+            small_tensor(dim),
+        );
+        m.insert(
+            "model.layers.0.mlp.gate_proj.weight".into(),
+            small_tensor(inter * dim),
+        );
+        m.insert(
+            "model.layers.0.mlp.up_proj.weight".into(),
+            small_tensor(inter * dim),
+        );
+        m.insert(
+            "model.layers.0.mlp.down_proj.weight".into(),
+            small_tensor(dim * inter),
+        );
+
+        let layer = load_layer_weights(&m, 0).unwrap();
+        assert_eq!(layer.wq.numel(), 16);
+        assert_eq!(layer.w_down.numel(), 32);
+    }
+
+    #[test]
+    fn test_find_tensor_fallback() {
+        let mut m = HashMap::new();
+        m.insert("second_name".into(), small_tensor(4));
+        // First name missing, should fall back to second
+        let t = find_tensor(&m, &["first_name", "second_name"]).unwrap();
+        assert_eq!(t.numel(), 4);
+    }
+
+    #[test]
+    fn test_find_tensor_missing() {
+        let m: HashMap<String, Tensor> = HashMap::new();
+        let result = find_tensor(&m, &["a", "b", "c"]);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("a | b | c"));
+    }
+
+    #[test]
+    fn test_load_multiple_layers() {
+        let tensors = build_gguf_tensors(3);
+        for i in 0..3 {
+            let layer = load_layer_weights(&tensors, i).unwrap();
+            assert_eq!(layer.attn_norm.numel(), 4);
+        }
+    }
+
+    #[test]
+    fn test_missing_layer_tensor_errors() {
+        let tensors = build_gguf_tensors(1);
+        // Layer 5 doesn't exist
+        let result = load_layer_weights(&tensors, 5);
+        assert!(result.is_err());
+    }
+}

@@ -89,3 +89,116 @@ impl ComputeBackend for SimdBackend {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use flare_core::model::ComputeBackend;
+    use flare_core::tensor::Tensor;
+
+    #[test]
+    fn test_rmsnorm_unit_weight() {
+        let backend = SimdBackend::new();
+        let input = Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0], &[4]).unwrap();
+        let weight = Tensor::from_vec(vec![1.0, 1.0, 1.0, 1.0], &[4]).unwrap();
+        let mut output = Tensor::zeros(&[4]);
+
+        backend.rmsnorm(&input, &weight, 1e-5, &mut output);
+
+        // RMS of [1,2,3,4] = sqrt(30/4) ≈ 2.7386
+        let rms = (30.0f32 / 4.0 + 1e-5).sqrt();
+        for (i, &v) in output.data().iter().enumerate() {
+            let expected = (i + 1) as f32 / rms;
+            assert!(
+                (v - expected).abs() < 1e-4,
+                "rmsnorm[{i}]: {v} != {expected}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_softmax_properties() {
+        let backend = SimdBackend::new();
+        let mut input = Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0], &[4]).unwrap();
+
+        backend.softmax(&mut input);
+        let data = input.data();
+
+        // Sum should be ~1.0
+        let sum: f32 = data.iter().sum();
+        assert!((sum - 1.0).abs() < 1e-5, "softmax sum = {sum}");
+
+        // Monotonically increasing
+        for i in 0..3 {
+            assert!(
+                data[i] < data[i + 1],
+                "softmax should be monotonically increasing"
+            );
+        }
+
+        // All positive
+        assert!(data.iter().all(|&v| v > 0.0));
+    }
+
+    #[test]
+    fn test_silu_mul() {
+        let backend = SimdBackend::new();
+        let gate = Tensor::from_vec(vec![0.0, 1.0, -1.0, 10.0], &[4]).unwrap();
+        let up = Tensor::from_vec(vec![1.0, 1.0, 1.0, 1.0], &[4]).unwrap();
+        let mut output = Tensor::zeros(&[4]);
+
+        backend.silu_mul(&gate, &up, &mut output);
+        let data = output.data();
+
+        // SiLU(0) = 0
+        assert!(data[0].abs() < 1e-5, "SiLU(0) should be 0, got {}", data[0]);
+        // SiLU(1) = 1 * sigmoid(1) ≈ 0.731
+        assert!((data[1] - 0.731).abs() < 0.01);
+        // SiLU(-1) < 0
+        assert!(data[2] < 0.0, "SiLU(-1) should be negative");
+        // SiLU(10) ≈ 10 (sigmoid(10) ≈ 1)
+        assert!((data[3] - 10.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_rope_preserves_magnitude() {
+        let backend = SimdBackend::new();
+        let mut q = Tensor::from_vec(vec![1.0, 0.0, 0.0, 1.0], &[4]).unwrap();
+        let mut k = Tensor::from_vec(vec![0.5, 0.5, 0.5, 0.5], &[4]).unwrap();
+
+        let q_mag_before: f32 = q.data().iter().map(|x| x * x).sum();
+        let k_mag_before: f32 = k.data().iter().map(|x| x * x).sum();
+
+        backend.rope(&mut q, &mut k, 7, 4, 10000.0);
+
+        let q_mag_after: f32 = q.data().iter().map(|x| x * x).sum();
+        let k_mag_after: f32 = k.data().iter().map(|x| x * x).sum();
+
+        assert!(
+            (q_mag_before - q_mag_after).abs() < 1e-4,
+            "RoPE should preserve Q magnitude"
+        );
+        assert!(
+            (k_mag_before - k_mag_after).abs() < 1e-4,
+            "RoPE should preserve K magnitude"
+        );
+    }
+
+    #[test]
+    fn test_matmul_non_square() {
+        let backend = SimdBackend::new();
+        // [2x3] * [3x2] = [2x2]
+        let a = Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3]).unwrap();
+        let b = Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[3, 2]).unwrap();
+        let mut c = Tensor::zeros(&[2, 2]);
+
+        backend.matmul(&a, &b, &mut c);
+
+        // [1*1+2*3+3*5, 1*2+2*4+3*6] = [22, 28]
+        // [4*1+5*3+6*5, 4*2+5*4+6*6] = [49, 64]
+        assert!((c.data()[0] - 22.0).abs() < 1e-3);
+        assert!((c.data()[1] - 28.0).abs() < 1e-3);
+        assert!((c.data()[2] - 49.0).abs() < 1e-3);
+        assert!((c.data()[3] - 64.0).abs() < 1e-3);
+    }
+}
