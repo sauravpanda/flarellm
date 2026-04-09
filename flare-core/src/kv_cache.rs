@@ -153,4 +153,89 @@ mod tests {
         assert_eq!(cache.len(), 0);
         assert_eq!(cache.position(), 0);
     }
+
+    #[test]
+    fn test_wraparound_data_integrity() {
+        // max_seq_len=4, write 6 tokens. Position 0 should have token 4's data.
+        let mut cache = KvCache::new(1, 4, 1, 2);
+        for i in 0..6 {
+            let key = vec![i as f32 * 10.0; 2];
+            let val = vec![i as f32 * 100.0; 2];
+            cache.write(0, &key, &val);
+            cache.advance();
+        }
+        // Token 4 wrote at position 0 (4 % 4 = 0), token 5 at position 1
+        let k_data = cache.keys(0).data();
+        assert!(
+            (k_data[0] - 40.0).abs() < 1e-5,
+            "position 0 should have token 4's key: got {}",
+            k_data[0]
+        );
+        assert!(
+            (k_data[2] - 50.0).abs() < 1e-5,
+            "position 1 should have token 5's key: got {}",
+            k_data[2]
+        );
+    }
+
+    #[test]
+    fn test_position_tracking_after_many_wraps() {
+        let mut cache = KvCache::new(1, 4, 1, 1);
+        for i in 0..100 {
+            cache.write(0, &[i as f32], &[0.0]);
+            cache.advance();
+        }
+        assert_eq!(cache.position(), 0); // 100 % 4 = 0
+        assert_eq!(cache.len(), 4);
+    }
+
+    #[test]
+    fn test_multi_layer_independence() {
+        let mut cache = KvCache::new(2, 4, 1, 2);
+        cache.write(0, &[1.0, 2.0], &[10.0, 20.0]);
+        cache.write(1, &[3.0, 4.0], &[30.0, 40.0]);
+        cache.advance();
+
+        let k0 = cache.keys(0).data();
+        let k1 = cache.keys(1).data();
+        assert!((k0[0] - 1.0).abs() < 1e-5);
+        assert!((k1[0] - 3.0).abs() < 1e-5);
+
+        let v0 = cache.values(0).data();
+        let v1 = cache.values(1).data();
+        assert!((v0[0] - 10.0).abs() < 1e-5);
+        assert!((v1[0] - 30.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_clear_and_reuse() {
+        let mut cache = KvCache::new(1, 4, 1, 2);
+        cache.write(0, &[99.0, 99.0], &[99.0, 99.0]);
+        cache.advance();
+        cache.clear();
+
+        // Old data should be zeroed
+        assert!(cache.keys(0).data().iter().all(|&v| v == 0.0));
+
+        // Write new data
+        cache.write(0, &[1.0, 2.0], &[3.0, 4.0]);
+        cache.advance();
+        assert_eq!(cache.len(), 1);
+        assert!((cache.keys(0).data()[0] - 1.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_minimal_cache_size_one() {
+        let mut cache = KvCache::new(1, 1, 1, 1);
+        cache.write(0, &[1.0], &[10.0]);
+        cache.advance();
+        assert_eq!(cache.len(), 1);
+        assert!((cache.keys(0).data()[0] - 1.0).abs() < 1e-5);
+
+        // Overwrite
+        cache.write(0, &[2.0], &[20.0]);
+        cache.advance();
+        assert_eq!(cache.len(), 1); // still 1
+        assert!((cache.keys(0).data()[0] - 2.0).abs() < 1e-5);
+    }
 }
