@@ -393,6 +393,19 @@ fn dequantize_tensor(raw: &[u8], dtype: QuantFormat, numel: usize) -> Result<Vec
             }
             Ok(data)
         }
+        QuantFormat::Q5K => {
+            let block_size = 256;
+            let block_bytes = 176;
+            let num_blocks = numel / block_size;
+            let mut data = vec![0.0f32; numel];
+            for b in 0..num_blocks {
+                let block = &raw[b * block_bytes..(b + 1) * block_bytes];
+                let mut out = [0.0f32; 256];
+                quantize::dequant_q5k_block(block, &mut out);
+                data[b * block_size..(b + 1) * block_size].copy_from_slice(&out);
+            }
+            Ok(data)
+        }
         other => Err(GgufError::UnsupportedQuant(other)),
     }
 }
