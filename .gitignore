@@ -26,5 +26,8 @@ Thumbs.db
 # Project planning (not for public repo)
 plan.md
 
+# Model files (large binaries)
+models/
+
 # Agent worktrees
 .claude/

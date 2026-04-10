@@ -62,27 +62,46 @@ Batch matrix multiply using tiled loop with TILE=32 for cache locality.
 | Top-p (nucleus) | 128,256 | 1,739µs |
 | Top-k | 128,256 | 1,587µs |
 
-## End-to-End Inference (estimated)
+## End-to-End Inference — SmolLM2-135M Q8_0 (baseline)
 
-Based on matvec timings and model architecture, estimated single-token generation:
+Real measurements using `e2e_bench` with SmolLM2-135M-Instruct Q8_0 (138MB, 30 layers, dim=576).
 
-| Model | Quant | Est. tok/s | Notes |
+| Metric | Value |
+|---|---|
+| Model load time | 0.13s |
+| Prefill (6 tokens) | 130 tok/s |
+| Decode (16 tokens) | 126 tok/s |
+| Decode (64 tokens) | 123 tok/s |
+| Decode (256 tokens) | 102 tok/s |
+| Sustained decode (512 tokens) | **93.7 tok/s** |
+
+### Performance history
+
+| Version | tok/s (decode) | Change |
+|---|---|---|
+| Naive scalar | 19 | baseline |
+| 4-wide unrolled scalar | 29 | +53% |
+| ARM NEON SIMD (current) | 126 | **+6.6x** |
+
+### Phase 1 targets vs actual
+
+| Target | Goal | Actual | Status |
 |---|---|---|---|
-| SmolLM2-135M | Q8_0 | ~75-90 | ARM NEON SIMD |
-| Qwen2.5-0.5B | Q8_0 | ~15-20 | ARM NEON SIMD |
-| Llama-3.2-1B | Q8_0 | ~5-8 | ARM NEON SIMD |
-
-Previous measurements (before NEON SIMD):
-- SmolLM2-135M Q8_0: 29 tok/s (scalar 4-wide unroll)
-- SmolLM2-135M Q8_0: 19 tok/s (naive scalar)
+| CPU 135M | 60 tok/s | 126 tok/s | exceeded |
+| GPU 135M | 150 tok/s | not yet wired | pending |
 
 ## How to Run
 
 ```bash
-# CPU matvec benchmark
+# End-to-end benchmark (requires model file)
+# Download: huggingface-cli download bartowski/SmolLM2-135M-Instruct-GGUF \
+#   SmolLM2-135M-Instruct-Q8_0.gguf --local-dir models
+cargo run -p flare-server --example e2e_bench --release
+
+# CPU matvec benchmark (no model needed)
 cargo run -p flare-core --example matvec_bench --release
 
-# GPU vs CPU comparison
+# GPU vs CPU comparison (no model needed)
 cargo run -p flare-gpu --example gpu_bench --release
 
 # Full matmul + sampling benchmarks
