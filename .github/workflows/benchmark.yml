@@ -1,0 +1,76 @@
+name: Benchmark
+
+# This workflow runs the full e2e benchmark against the baseline model and
+# checks for performance regressions.
+#
+# It does NOT run on every push (models are large). Trigger manually via
+# workflow_dispatch, or on a nightly schedule.
+#
+# To compare two PRs, run the workflow on each branch and compare the JSON
+# artefacts.
+
+on:
+  workflow_dispatch:
+    inputs:
+      threshold_tok_s:
+        description: "Minimum acceptable sustained decode speed (tok/s)"
+        default: "60"
+        required: false
+      log_results:
+        description: "Append results to BENCHMARK_HISTORY.md and open a PR"
+        type: boolean
+        default: false
+  schedule:
+    # Nightly at 02:00 UTC — catches regressions merged during the day
+    - cron: "0 2 * * *"
+
+jobs:
+  bench:
+    name: E2E benchmark — SmolLM2-135M Q8_0
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build artefacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Download baseline model
+        run: ./scripts/download_baseline_model.sh
+
+      - name: Run regression check
+        env:
+          THRESHOLD_TOK_S: ${{ github.event.inputs.threshold_tok_s || '60' }}
+        run: |
+          chmod +x ./scripts/check_perf_regression.sh
+          ./scripts/check_perf_regression.sh | tee bench_result.json
+
+      - name: Upload benchmark JSON
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-${{ github.sha }}
+          path: bench_result.json
+          retention-days: 90
+
+      - name: Append to history and open PR
+        if: ${{ github.event.inputs.log_results == 'true' }}
+        run: |
+          chmod +x ./scripts/bench_multi.sh
+          ./scripts/bench_multi.sh --log
+          git config user.name  "sauravpanda"
+          git config user.email "sgp65@cornell.edu"
+          BRANCH="chore/benchmark-update-$(date +%Y%m%d-%H%M)"
+          git checkout -b "$BRANCH"
+          git add BENCHMARK_HISTORY.md || true
+          git diff --staged --quiet || git commit -m "Update benchmark history $(date +%Y-%m-%d)"
+          git push origin "$BRANCH"
+          gh pr create \
+            --title "chore: update benchmark history $(date +%Y-%m-%d)" \
+            --body "Automated benchmark run. See attached artefact for full JSON." \
+            --head "$BRANCH" --base main \
+            --label "benchmark" || true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
