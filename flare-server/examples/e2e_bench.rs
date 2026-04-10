@@ -35,12 +35,14 @@ fn main() {
     if !Path::new(&model_path).exists() {
         eprintln!("Model not found at: {model_path}");
         eprintln!();
-        eprintln!("Download SmolLM2-135M Q8_0:");
-        eprintln!("  mkdir -p models");
-        eprintln!("  huggingface-cli download bartowski/SmolLM2-135M-Instruct-GGUF \\");
-        eprintln!("    SmolLM2-135M-Instruct-Q8_0.gguf --local-dir models");
+        eprintln!("Quick setup (downloads ~138MB):");
+        eprintln!("  ./scripts/download_baseline_model.sh");
         eprintln!();
-        eprintln!("Or set MODEL_PATH to your GGUF file.");
+        eprintln!("Or manually:");
+        eprintln!("  curl -L \"https://huggingface.co/bartowski/SmolLM2-135M-Instruct-GGUF/resolve/main/SmolLM2-135M-Instruct-Q8_0.gguf\" \\");
+        eprintln!("    -o models/smollm2-135m-instruct-q8_0.gguf");
+        eprintln!();
+        eprintln!("Or set MODEL_PATH to point to your own GGUF file.");
         std::process::exit(1);
     }
 
