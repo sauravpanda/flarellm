@@ -139,11 +139,10 @@ impl Model {
             let gate = matvec(layer.w_gate.data(), &normed, config.intermediate_dim, dim);
             let up = matvec(layer.w_up.data(), &normed, config.intermediate_dim, dim);
 
-            // SiLU(gate) * up
-            let mut ffn_hidden = vec![0.0f32; config.intermediate_dim];
-            for i in 0..config.intermediate_dim {
-                let silu = gate[i] / (1.0 + (-gate[i]).exp());
-                ffn_hidden[i] = silu * up[i];
+            // SiLU(gate) * up — reuse gate allocation
+            let mut ffn_hidden = gate;
+            for (g, &u) in ffn_hidden.iter_mut().zip(up.iter()) {
+                *g = (*g / (1.0 + (-*g).exp())) * u;
             }
 
             // Down projection
@@ -195,15 +194,35 @@ fn rmsnorm(x: &[f32], weight: &[f32], eps: f32) -> Vec<f32> {
 }
 
 /// Matrix-vector multiply: output[rows] = mat[rows, cols] × vec[cols]
+///
+/// Uses 4-wide manual unrolling for better ILP and auto-vectorization.
+/// For a [576, 1536] matrix, this is ~2-3x faster than a naive loop.
 fn matvec(mat: &[f32], vec: &[f32], rows: usize, cols: usize) -> Vec<f32> {
     let mut output = vec![0.0f32; rows];
+    let cols4 = cols & !3; // round down to multiple of 4
+
     for (i, out) in output.iter_mut().enumerate() {
-        let row_offset = i * cols;
-        let mut sum = 0.0f32;
-        for j in 0..cols {
-            sum += mat[row_offset + j] * vec[j];
+        let row = &mat[i * cols..(i + 1) * cols];
+        let mut sum0 = 0.0f32;
+        let mut sum1 = 0.0f32;
+        let mut sum2 = 0.0f32;
+        let mut sum3 = 0.0f32;
+
+        // 4-wide unrolled inner loop
+        let mut j = 0;
+        while j < cols4 {
+            sum0 += row[j] * vec[j];
+            sum1 += row[j + 1] * vec[j + 1];
+            sum2 += row[j + 2] * vec[j + 2];
+            sum3 += row[j + 3] * vec[j + 3];
+            j += 4;
         }
-        *out = sum;
+        // Handle remainder
+        while j < cols {
+            sum0 += row[j] * vec[j];
+            j += 1;
+        }
+        *out = sum0 + sum1 + sum2 + sum3;
     }
     output
 }

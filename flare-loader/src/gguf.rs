@@ -231,23 +231,19 @@ impl GgufFile {
 
         let prefix = arch_str.to_lowercase();
 
+        // Vocab size: prefer embedding tensor shape (most reliable),
+        // because some models have incorrect vocab_size metadata.
         let vocab_size = self
-            .meta_usize(&format!("{prefix}.vocab_size"))
-            .or_else(|_| {
-                self.meta_usize("tokenizer.ggml.tokens").map(|_| {
-                    // Count tokens from the token array if vocab_size not explicit
-                    self.metadata
-                        .get("tokenizer.ggml.tokens")
-                        .and_then(|v| {
-                            if let MetadataValue::Array(a) = v {
-                                Some(a.len())
-                            } else {
-                                None
-                            }
-                        })
-                        .unwrap_or(32000)
-                })
+            .find_tensor("token_embd.weight")
+            .or_else(|| self.find_tensor("model.embed_tokens.weight"))
+            .and_then(|t| {
+                if t.dimensions.len() == 2 {
+                    Some(t.dimensions[1] as usize)
+                } else {
+                    None
+                }
             })
+            .or_else(|| self.meta_usize(&format!("{prefix}.vocab_size")).ok())
             .unwrap_or(32000);
 
         let hidden_dim = self.meta_usize(&format!("{prefix}.embedding_length"))?;
