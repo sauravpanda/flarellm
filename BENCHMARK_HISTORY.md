@@ -65,3 +65,29 @@ Baseline model: SmolLM2-135M-Instruct Q8_0 (138MB, 30 layers, dim=576).
 | Decode (256 tok) | 106.8 |
 | Sustained (512 tok) | **78.9** |
 
+### 2026-04-09 20:39 — `cd1225a Cache GPU compute pipelines to avoid per-call shader comp...`
+
+**Hardware:** Apple M5 Pro, ARM64 (NEON SIMD)  
+**Model:** Llama, ~162M params, 30 layers, dim=576  
+**Load time:** 0.10s
+
+| Metric | tok/s |
+|---|---|
+| Decode (16 tok) | 121.3 |
+| Decode (64 tok) | 121.1 |
+| Decode (256 tok) | 110.5 |
+| Sustained (512 tok) | **93.9** |
+
+### 2026-04-09 20:40 — `cd1225a Cache GPU compute pipelines to avoid per-call shader comp...`
+
+**Hardware:** Apple M5 Pro, ARM64 (NEON SIMD)  
+**Model:** Llama, ~1498M params, 16 layers, dim=2048  
+**Load time:** 0.87s
+
+| Metric | tok/s |
+|---|---|
+| Decode (16 tok) | 13.7 |
+| Decode (64 tok) | 13.4 |
+| Decode (256 tok) | 12.4 |
+| Sustained (512 tok) | **12.5** |
+
