@@ -344,18 +344,126 @@ pub fn rmsnorm(x: &[f32], weight: &[f32], eps: f32) -> Vec<f32> {
 
 /// Matrix-vector multiply: output[rows] = mat[rows, cols] * vec[cols] (CPU implementation).
 ///
-/// Dispatches to platform-specific SIMD implementations at compile time:
-/// - ARM NEON: 4-wide f32 SIMD with 4-way accumulator unrolling (16 elements/iter)
+/// Dispatches to platform-specific SIMD implementations:
+/// - ARM NEON (aarch64): 4-wide f32 SIMD, 4 accumulators (16 elements/iter), compile-time
+/// - x86 AVX2+FMA (x86_64): 8-wide f32 SIMD, 4 accumulators (32 elements/iter), runtime check
 /// - Fallback: 4-wide scalar unrolling for auto-vectorization
+///
+/// All SIMD paths parallelize via rayon for large matrices on native targets.
 pub fn matvec(mat: &[f32], vec: &[f32], rows: usize, cols: usize) -> Vec<f32> {
     #[cfg(target_arch = "aarch64")]
     {
-        matvec_neon(mat, vec, rows, cols)
+        matvec_simd(mat, vec, rows, cols)
     }
-    #[cfg(not(target_arch = "aarch64"))]
+    #[cfg(target_arch = "x86_64")]
+    {
+        if std::is_x86_feature_detected!("avx2") && std::is_x86_feature_detected!("fma") {
+            // SAFETY: feature detection above ensures AVX2 + FMA are available
+            return unsafe { matvec_avx2(mat, vec, rows, cols) };
+        }
+        matvec_scalar(mat, vec, rows, cols)
+    }
+    #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
     {
         matvec_scalar(mat, vec, rows, cols)
     }
+}
+
+/// x86 AVX2 matvec entry point. Runtime-detected; uses #[target_feature] to enable
+/// AVX2/FMA codegen for the inner loop.
+///
+/// # Safety
+/// Caller must ensure AVX2 + FMA are available (via `is_x86_feature_detected!`).
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma")]
+unsafe fn matvec_avx2(mat: &[f32], vec: &[f32], rows: usize, cols: usize) -> Vec<f32> {
+    const PARALLEL_FMA_THRESHOLD: usize = 5_000_000;
+    const CHUNK_ROWS: usize = 64;
+    let total_work = rows * cols;
+
+    if total_work >= PARALLEL_FMA_THRESHOLD && rows >= CHUNK_ROWS * 2 {
+        use rayon::prelude::*;
+        let mut output = vec![0.0f32; rows];
+        output
+            .par_chunks_mut(CHUNK_ROWS)
+            .enumerate()
+            .for_each(|(chunk_idx, out_chunk)| {
+                let row_start = chunk_idx * CHUNK_ROWS;
+                for (local_i, out) in out_chunk.iter_mut().enumerate() {
+                    let i = row_start + local_i;
+                    let row = &mat[i * cols..i * cols + cols];
+                    // SAFETY: AVX2/FMA verified at entry, row.len() == cols
+                    *out = unsafe { matvec_avx2_row(row, vec, cols) };
+                }
+            });
+        return output;
+    }
+
+    let mut output = vec![0.0f32; rows];
+    for (i, out) in output.iter_mut().enumerate() {
+        let row = &mat[i * cols..i * cols + cols];
+        *out = matvec_avx2_row(row, vec, cols);
+    }
+    output
+}
+
+/// Compute one row of x86 AVX2 matvec.
+///
+/// # Safety
+/// `row` and `vec` must both have length `cols`. AVX2 + FMA must be available.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma")]
+unsafe fn matvec_avx2_row(row: &[f32], vec: &[f32], cols: usize) -> f32 {
+    use std::arch::x86_64::*;
+    let cols32 = cols & !31;
+
+    let mut acc0 = _mm256_setzero_ps();
+    let mut acc1 = _mm256_setzero_ps();
+    let mut acc2 = _mm256_setzero_ps();
+    let mut acc3 = _mm256_setzero_ps();
+
+    let mut j = 0usize;
+    while j < cols32 {
+        let r0 = _mm256_loadu_ps(row.as_ptr().add(j));
+        let v0 = _mm256_loadu_ps(vec.as_ptr().add(j));
+        acc0 = _mm256_fmadd_ps(r0, v0, acc0);
+
+        let r1 = _mm256_loadu_ps(row.as_ptr().add(j + 8));
+        let v1 = _mm256_loadu_ps(vec.as_ptr().add(j + 8));
+        acc1 = _mm256_fmadd_ps(r1, v1, acc1);
+
+        let r2 = _mm256_loadu_ps(row.as_ptr().add(j + 16));
+        let v2 = _mm256_loadu_ps(vec.as_ptr().add(j + 16));
+        acc2 = _mm256_fmadd_ps(r2, v2, acc2);
+
+        let r3 = _mm256_loadu_ps(row.as_ptr().add(j + 24));
+        let v3 = _mm256_loadu_ps(vec.as_ptr().add(j + 24));
+        acc3 = _mm256_fmadd_ps(r3, v3, acc3);
+
+        j += 32;
+    }
+
+    // Reduce 4 accumulators of 8 lanes each → scalar
+    let sum01 = _mm256_add_ps(acc0, acc1);
+    let sum23 = _mm256_add_ps(acc2, acc3);
+    let sum = _mm256_add_ps(sum01, sum23);
+
+    // Horizontal sum of 8 lanes
+    let hi128 = _mm256_extractf128_ps(sum, 1);
+    let lo128 = _mm256_castps256_ps128(sum);
+    let sum128 = _mm_add_ps(hi128, lo128);
+    let shuf = _mm_shuffle_ps(sum128, sum128, 0x4E);
+    let sum2 = _mm_add_ps(sum128, shuf);
+    let shuf2 = _mm_shuffle_ps(sum2, sum2, 0xB1);
+    let sum_final = _mm_add_ps(sum2, shuf2);
+    let mut scalar = _mm_cvtss_f32(sum_final);
+
+    // Handle remainder
+    while j < cols {
+        scalar += row[j] * vec[j];
+        j += 1;
+    }
+    scalar
 }
 
 /// Compute one row of NEON matvec. Used by both serial and parallel paths.
@@ -364,7 +472,7 @@ pub fn matvec(mat: &[f32], vec: &[f32], rows: usize, cols: usize) -> Vec<f32> {
 /// `row` and `vec` must both have length `cols`. NEON is always available on aarch64.
 #[cfg(target_arch = "aarch64")]
 #[inline(always)]
-unsafe fn matvec_neon_row(row: &[f32], vec: &[f32], cols: usize) -> f32 {
+unsafe fn matvec_simd_row(row: &[f32], vec: &[f32], cols: usize) -> f32 {
     use std::arch::aarch64::*;
     let cols16 = cols & !15;
 
@@ -407,11 +515,8 @@ unsafe fn matvec_neon_row(row: &[f32], vec: &[f32], cols: usize) -> f32 {
 }
 
 /// ARM NEON SIMD matvec with rayon parallelism on native, serial on wasm32.
-///
-/// Parallelizes by chunking rows so each task handles many rows. The threshold
-/// is based on total work (rows * cols) to amortize rayon dispatch overhead.
 #[cfg(target_arch = "aarch64")]
-fn matvec_neon(mat: &[f32], vec: &[f32], rows: usize, cols: usize) -> Vec<f32> {
+fn matvec_simd(mat: &[f32], vec: &[f32], rows: usize, cols: usize) -> Vec<f32> {
     // Total FMAs above which parallelism wins. ~5M FMAs / ~50µs sequential break-even.
     const PARALLEL_FMA_THRESHOLD: usize = 5_000_000;
     // Chunk size: balance task granularity vs overhead
@@ -431,8 +536,8 @@ fn matvec_neon(mat: &[f32], vec: &[f32], rows: usize, cols: usize) -> Vec<f32> {
                 for (local_i, out) in out_chunk.iter_mut().enumerate() {
                     let i = row_start + local_i;
                     let row = &mat[i * cols..i * cols + cols];
-                    // SAFETY: row.len() == cols, NEON always available on aarch64
-                    *out = unsafe { matvec_neon_row(row, vec, cols) };
+                    // SAFETY: row.len() == cols, SIMD feature gated by cfg
+                    *out = unsafe { matvec_simd_row(row, vec, cols) };
                 }
             });
         return output;
@@ -442,8 +547,8 @@ fn matvec_neon(mat: &[f32], vec: &[f32], rows: usize, cols: usize) -> Vec<f32> {
     let mut output = vec![0.0f32; rows];
     for (i, out) in output.iter_mut().enumerate() {
         let row = &mat[i * cols..i * cols + cols];
-        // SAFETY: row.len() == cols, NEON always available on aarch64
-        *out = unsafe { matvec_neon_row(row, vec, cols) };
+        // SAFETY: row.len() == cols, SIMD feature gated by cfg
+        *out = unsafe { matvec_simd_row(row, vec, cols) };
     }
     output
 }
