@@ -635,9 +635,10 @@ fn matvec_simd(mat: &[f32], vec: &[f32], rows: usize, cols: usize) -> Vec<f32> {
     output
 }
 
-/// Scalar fallback matvec with 4-wide unrolling for auto-vectorization.
-#[cfg(not(target_arch = "aarch64"))]
-fn matvec_scalar(mat: &[f32], vec: &[f32], rows: usize, cols: usize) -> Vec<f32> {
+/// Scalar matvec with 4-wide unrolling for auto-vectorization.
+///
+/// Always available as a reference implementation for tests, regardless of target.
+pub fn matvec_scalar(mat: &[f32], vec: &[f32], rows: usize, cols: usize) -> Vec<f32> {
     let mut output = vec![0.0f32; rows];
     let cols4 = cols & !3;
 
@@ -792,6 +793,115 @@ mod tests {
         let result = matvec(&mat, &v, 2, 2);
         assert!((result[0] - 3.0).abs() < 1e-5);
         assert!((result[1] - 7.0).abs() < 1e-5);
+    }
+
+    /// Test SIMD matvec produces the same result as the scalar reference
+    /// across many sizes, including odd sizes that exercise the remainder loop.
+    #[test]
+    fn test_matvec_simd_matches_scalar() {
+        let test_cases = [
+            (1, 1),
+            (4, 16),
+            (16, 4),
+            (15, 15), // not multiple of SIMD width
+            (17, 33),
+            (64, 64),
+            (128, 256),
+            (256, 128),
+            (576, 576),  // SmolLM Q proj
+            (1536, 576), // SmolLM FFN gate
+            (49152, 64), // wide-tall (logits-like)
+            (300, 257),  // odd remainder
+        ];
+
+        for &(rows, cols) in &test_cases {
+            let mat: Vec<f32> = (0..rows * cols)
+                .map(|i| ((i % 13) as f32 - 6.0) * 0.05)
+                .collect();
+            let v: Vec<f32> = (0..cols).map(|i| (i as f32 * 0.1).sin()).collect();
+
+            let simd = matvec(&mat, &v, rows, cols);
+            let scalar = matvec_scalar(&mat, &v, rows, cols);
+
+            assert_eq!(simd.len(), rows, "size mismatch for {rows}x{cols}");
+            assert_eq!(scalar.len(), rows);
+
+            for i in 0..rows {
+                let diff = (simd[i] - scalar[i]).abs();
+                let tol = (scalar[i].abs() * 1e-4).max(1e-4);
+                assert!(
+                    diff <= tol,
+                    "matvec mismatch at row {i} for {rows}x{cols}: simd={} scalar={} diff={}",
+                    simd[i],
+                    scalar[i],
+                    diff,
+                );
+            }
+        }
+    }
+
+    /// Test parallel and sequential matvec produce identical results.
+    #[test]
+    fn test_matvec_parallel_matches_sequential() {
+        // Sizes both above and below the parallel threshold
+        let test_cases = [
+            (200, 200),   // below threshold, sequential
+            (500, 500),   // below threshold, sequential
+            (1000, 5000), // above threshold (5M FMAs), parallel
+            (4096, 2048), // well above threshold
+        ];
+
+        for &(rows, cols) in &test_cases {
+            let mat: Vec<f32> = (0..rows * cols)
+                .map(|i| (((i * 7) % 19) as f32 - 9.0) * 0.02)
+                .collect();
+            let v: Vec<f32> = (0..cols).map(|i| ((i * 3) as f32 * 0.05).cos()).collect();
+
+            let simd = matvec(&mat, &v, rows, cols);
+            let scalar = matvec_scalar(&mat, &v, rows, cols);
+
+            for i in 0..rows {
+                let diff = (simd[i] - scalar[i]).abs();
+                let tol = (scalar[i].abs() * 1e-4).max(1e-4);
+                assert!(
+                    diff <= tol,
+                    "parallel mismatch at row {i} for {rows}x{cols}: simd={} scalar={}",
+                    simd[i],
+                    scalar[i],
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_rmsnorm_simd_matches_naive() {
+        // Various dim sizes
+        for &dim in &[1, 4, 15, 16, 17, 64, 576, 2048] {
+            let x: Vec<f32> = (0..dim).map(|i| (i as f32 * 0.1).sin()).collect();
+            let weight: Vec<f32> = (0..dim).map(|i| 0.5 + (i as f32 * 0.01)).collect();
+
+            let result = rmsnorm(&x, &weight, 1e-5);
+
+            // Naive reference
+            let sum_sq: f32 = x.iter().map(|v| v * v).sum();
+            let rms = (sum_sq / dim as f32 + 1e-5).sqrt();
+            let expected: Vec<f32> = x
+                .iter()
+                .zip(weight.iter())
+                .map(|(&xi, &wi)| (xi / rms) * wi)
+                .collect();
+
+            for i in 0..dim {
+                let diff = (result[i] - expected[i]).abs();
+                let tol = (expected[i].abs() * 1e-4).max(1e-4);
+                assert!(
+                    diff <= tol,
+                    "rmsnorm mismatch at {i} for dim={dim}: got={} expected={}",
+                    result[i],
+                    expected[i],
+                );
+            }
+        }
     }
 
     #[test]
