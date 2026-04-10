@@ -163,7 +163,7 @@ pub fn dequant_q5_0_block(block: &[u8], output: &mut [f32; 32]) {
 }
 
 /// Dequantize a Q6_K block: 256 weights.
-/// Layout: ql[128] + qh[64] + scales[16] + d[2] = 210 bytes.
+/// Layout: `ql[128]` + `qh[64]` + `scales[16]` + `d[2]` = 210 bytes.
 ///
 /// Follows llama.cpp dequant_row_q6_K exactly: processes two halves of 128
 /// elements each, with interleaved ql/qh access in groups of 32.
@@ -209,7 +209,7 @@ pub fn dequant_q6k_block(block: &[u8], output: &mut [f32; 256]) {
 }
 
 /// Dequantize a Q4_K block: 256 weights.
-/// Layout: d (f16) + dmin (f16) + scales[12] + qs[128]
+/// Layout: d (f16) + dmin (f16) + `scales[12]` + `qs[128]`
 pub fn dequant_q4k_block(block: &[u8], output: &mut [f32; 256]) {
     // Q4_K_M: 2 (d) + 2 (dmin) + 12 (scales) + 128 (qs) = 144 bytes
     if block.len() < 144 {
@@ -248,7 +248,7 @@ pub fn dequant_q4k_block(block: &[u8], output: &mut [f32; 256]) {
 }
 
 /// Dequantize a Q5_K block: 256 weights.
-/// Layout: d (f16) + dmin (f16) + scales[12] + qh[32] + ql[128]
+/// Layout: d (f16) + dmin (f16) + `scales[12]` + `qh[32]` + `ql[128]`
 /// Each weight is 5 bits: 4 from ql + 1 from qh.
 pub fn dequant_q5k_block(block: &[u8], output: &mut [f32; 256]) {
     // Q5_K: 2 (d) + 2 (dmin) + 12 (scales) + 32 (qh) + 128 (ql) = 176 bytes
