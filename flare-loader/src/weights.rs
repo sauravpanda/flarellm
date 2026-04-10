@@ -14,6 +14,22 @@ pub fn load_model_weights<R: Read + Seek>(
     gguf: &GgufFile,
     reader: &mut R,
 ) -> Result<ModelWeights, GgufError> {
+    load_model_weights_with_progress(gguf, reader, |_, _| {})
+}
+
+/// Load ModelWeights with a layer-by-layer progress callback.
+///
+/// `on_layer(current, total)` is called after each layer is loaded.
+/// Useful for updating a progress bar in the browser demo.
+pub fn load_model_weights_with_progress<R, F>(
+    gguf: &GgufFile,
+    reader: &mut R,
+    on_layer: F,
+) -> Result<ModelWeights, GgufError>
+where
+    R: Read + Seek,
+    F: Fn(usize, usize),
+{
     let tensors = gguf.load_all_tensors(reader)?;
     let config = gguf.to_model_config()?;
 
@@ -31,10 +47,12 @@ pub fn load_model_weights<R: Read + Seek>(
         .unwrap_or_else(|_| token_embedding.clone());
 
     // Load layer weights
-    let mut layers = Vec::with_capacity(config.num_layers);
-    for i in 0..config.num_layers {
+    let total = config.num_layers;
+    let mut layers = Vec::with_capacity(total);
+    for i in 0..total {
         let layer = load_layer_weights(&tensors, i)?;
         layers.push(layer);
+        on_layer(i + 1, total);
     }
 
     Ok(ModelWeights {

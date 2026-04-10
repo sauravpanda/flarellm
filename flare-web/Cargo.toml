@@ -30,6 +30,7 @@ web-sys = { workspace = true, features = [
     "CacheStorage",
     "Headers",
     "ReadableStream",
+    "ReadableStreamDefaultReader",
     "Gpu",
     "GpuAdapter",
     "GpuDevice",

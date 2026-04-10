@@ -25,4 +25,4 @@ pub mod weights;
 pub use gguf::{GgufError, GgufFile};
 pub use quantize::QuantFormat;
 pub use safetensors::{SafeTensorsError, SafeTensorsFile};
-pub use weights::load_model_weights;
+pub use weights::{load_model_weights, load_model_weights_with_progress};
