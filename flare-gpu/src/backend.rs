@@ -3,6 +3,7 @@ use flare_core::tensor::Tensor;
 use thiserror::Error;
 
 use crate::buffers;
+use crate::pipeline::{CachedPipeline, PipelineCache};
 
 #[derive(Debug, Error)]
 pub enum GpuError {
@@ -23,9 +24,12 @@ const SILU_MUL_SHADER: &str = include_str!("../shaders/silu_mul.wgsl");
 ///
 /// On native, this uses Vulkan/Metal/DX12 via wgpu.
 /// In the browser (WASM), this uses WebGPU via wgpu's web backend.
+///
+/// Pipelines are cached on first use to avoid per-call shader compilation.
 pub struct WebGpuBackend {
     device: wgpu::Device,
     queue: wgpu::Queue,
+    cache: PipelineCache,
 }
 
 impl WebGpuBackend {
@@ -56,7 +60,11 @@ impl WebGpuBackend {
             .await
             .map_err(|e| GpuError::DeviceRequest(e.to_string()))?;
 
-        Ok(Self { device, queue })
+        Ok(Self {
+            device,
+            queue,
+            cache: PipelineCache::new(),
+        })
     }
 
     pub fn device(&self) -> &wgpu::Device {
@@ -65,6 +73,16 @@ impl WebGpuBackend {
 
     pub fn queue(&self) -> &wgpu::Queue {
         &self.queue
+    }
+
+    /// Standard 4-binding layout: 2 read-only storage, 1 read-write storage, 1 uniform.
+    fn standard_layout() -> [wgpu::BindGroupLayoutEntry; 4] {
+        [
+            storage_ro_entry(0),
+            storage_ro_entry(1),
+            storage_rw_entry(2),
+            uniform_entry(3),
+        ]
     }
 
     /// Run a compute shader with the given bind group and dispatch dimensions,
@@ -114,6 +132,39 @@ impl WebGpuBackend {
         staging.unmap();
         result
     }
+
+    /// Build a 4-entry bind group from the standard layout.
+    fn make_bind_group(
+        &self,
+        cached: &CachedPipeline,
+        a: &wgpu::Buffer,
+        b: &wgpu::Buffer,
+        out: &wgpu::Buffer,
+        params: &wgpu::Buffer,
+    ) -> wgpu::BindGroup {
+        self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: None,
+            layout: &cached.layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: a.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: b.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: out.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: params.as_entire_binding(),
+                },
+            ],
+        })
+    }
 }
 
 impl ComputeBackend for WebGpuBackend {
@@ -143,77 +194,27 @@ impl ComputeBackend for WebGpuBackend {
             bytemuck::cast_slice(&params),
         );
 
-        let shader_module = self
-            .device
-            .create_shader_module(wgpu::ShaderModuleDescriptor {
-                label: Some("matvec"),
-                source: wgpu::ShaderSource::Wgsl(MATMUL_SHADER.into()),
-            });
-
-        let bind_group_layout =
-            self.device
-                .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                    label: Some("matvec_bgl"),
-                    entries: &[
-                        storage_ro_entry(0),
-                        storage_ro_entry(1),
-                        storage_rw_entry(2),
-                        uniform_entry(3),
-                    ],
-                });
-
-        let pipeline_layout = self
-            .device
-            .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: Some("matvec_layout"),
-                bind_group_layouts: &[&bind_group_layout],
-                push_constant_ranges: &[],
-            });
-
-        let pipeline = self
-            .device
-            .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-                label: Some("matvec_pipeline"),
-                layout: Some(&pipeline_layout),
-                module: &shader_module,
-                entry_point: Some("matmul"),
-                compilation_options: Default::default(),
-                cache: None,
-            });
-
-        let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("matvec_bg"),
-            layout: &bind_group_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: a_buf.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: b_buf.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: out_buf.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 3,
-                    resource: params_buf.as_entire_binding(),
-                },
-            ],
-        });
-
-        let tile = 16u32;
-        let dispatch_x = m.div_ceil(tile);
-        let dispatch_y = n.div_ceil(tile);
-
-        self.dispatch_and_readback(
-            &pipeline,
-            &bind_group,
-            [dispatch_x, dispatch_y, 1],
-            &out_buf,
-            output_size,
+        let layout_entries = Self::standard_layout();
+        self.cache.with_pipeline(
+            &self.device,
+            "matvec",
+            MATMUL_SHADER,
+            "matmul",
+            &layout_entries,
+            |cached| {
+                let bind_group =
+                    self.make_bind_group(cached, &a_buf, &b_buf, &out_buf, &params_buf);
+                let tile = 16u32;
+                let dispatch_x = m.div_ceil(tile);
+                let dispatch_y = n.div_ceil(tile);
+                self.dispatch_and_readback(
+                    &cached.pipeline,
+                    &bind_group,
+                    [dispatch_x, dispatch_y, 1],
+                    &out_buf,
+                    output_size,
+                )
+            },
         )
     }
 
@@ -244,76 +245,26 @@ impl ComputeBackend for WebGpuBackend {
             bytemuck::cast_slice(&params),
         );
 
-        let shader_module = self
-            .device
-            .create_shader_module(wgpu::ShaderModuleDescriptor {
-                label: Some("silu_mul_vec"),
-                source: wgpu::ShaderSource::Wgsl(SILU_MUL_SHADER.into()),
-            });
-
-        let bind_group_layout =
-            self.device
-                .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                    label: Some("silu_vec_bgl"),
-                    entries: &[
-                        storage_ro_entry(0),
-                        storage_ro_entry(1),
-                        storage_rw_entry(2),
-                        uniform_entry(3),
-                    ],
-                });
-
-        let pipeline_layout = self
-            .device
-            .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: Some("silu_vec_layout"),
-                bind_group_layouts: &[&bind_group_layout],
-                push_constant_ranges: &[],
-            });
-
-        let pipeline = self
-            .device
-            .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-                label: Some("silu_vec_pipeline"),
-                layout: Some(&pipeline_layout),
-                module: &shader_module,
-                entry_point: Some("silu_mul"),
-                compilation_options: Default::default(),
-                cache: None,
-            });
-
-        let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("silu_vec_bg"),
-            layout: &bind_group_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: gate_buf.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: up_buf.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: out_buf.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 3,
-                    resource: params_buf.as_entire_binding(),
-                },
-            ],
-        });
-
-        let workgroup_size = 256u32;
-        let dispatch_x = size.div_ceil(workgroup_size);
-
-        self.dispatch_and_readback(
-            &pipeline,
-            &bind_group,
-            [dispatch_x, 1, 1],
-            &out_buf,
-            output_size,
+        let layout_entries = Self::standard_layout();
+        self.cache.with_pipeline(
+            &self.device,
+            "silu_mul",
+            SILU_MUL_SHADER,
+            "silu_mul",
+            &layout_entries,
+            |cached| {
+                let bind_group =
+                    self.make_bind_group(cached, &gate_buf, &up_buf, &out_buf, &params_buf);
+                let workgroup_size = 256u32;
+                let dispatch_x = size.div_ceil(workgroup_size);
+                self.dispatch_and_readback(
+                    &cached.pipeline,
+                    &bind_group,
+                    [dispatch_x, 1, 1],
+                    &out_buf,
+                    output_size,
+                )
+            },
         )
     }
 
@@ -352,78 +303,27 @@ impl ComputeBackend for WebGpuBackend {
             bytemuck::cast_slice(&params),
         );
 
-        // We need to create pipeline with proper bind group layout
-        let shader_module = self
-            .device
-            .create_shader_module(wgpu::ShaderModuleDescriptor {
-                label: Some("matmul"),
-                source: wgpu::ShaderSource::Wgsl(MATMUL_SHADER.into()),
-            });
-
-        let bind_group_layout =
-            self.device
-                .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                    label: Some("matmul_bgl"),
-                    entries: &[
-                        storage_ro_entry(0),
-                        storage_ro_entry(1),
-                        storage_rw_entry(2),
-                        uniform_entry(3),
-                    ],
-                });
-
-        let pipeline_layout = self
-            .device
-            .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: Some("matmul_layout"),
-                bind_group_layouts: &[&bind_group_layout],
-                push_constant_ranges: &[],
-            });
-
-        let pipeline = self
-            .device
-            .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-                label: Some("matmul_pipeline"),
-                layout: Some(&pipeline_layout),
-                module: &shader_module,
-                entry_point: Some("matmul"),
-                compilation_options: Default::default(),
-                cache: None,
-            });
-
-        let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("matmul_bg"),
-            layout: &bind_group_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: a_buf.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: b_buf.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: out_buf.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 3,
-                    resource: params_buf.as_entire_binding(),
-                },
-            ],
-        });
-
-        let tile = 16u32;
-        let dispatch_x = m.div_ceil(tile);
-        let dispatch_y = n.div_ceil(tile);
-
-        let result = self.dispatch_and_readback(
-            &pipeline,
-            &bind_group,
-            [dispatch_x, dispatch_y, 1],
-            &out_buf,
-            output_size,
+        let layout_entries = Self::standard_layout();
+        let result = self.cache.with_pipeline(
+            &self.device,
+            "matmul",
+            MATMUL_SHADER,
+            "matmul",
+            &layout_entries,
+            |cached| {
+                let bind_group =
+                    self.make_bind_group(cached, &a_buf, &b_buf, &out_buf, &params_buf);
+                let tile = 16u32;
+                let dispatch_x = m.div_ceil(tile);
+                let dispatch_y = n.div_ceil(tile);
+                self.dispatch_and_readback(
+                    &cached.pipeline,
+                    &bind_group,
+                    [dispatch_x, dispatch_y, 1],
+                    &out_buf,
+                    output_size,
+                )
+            },
         );
 
         output.data_mut()[..result.len()].copy_from_slice(&result);
@@ -524,76 +424,26 @@ impl ComputeBackend for WebGpuBackend {
             bytemuck::cast_slice(&params),
         );
 
-        let shader_module = self
-            .device
-            .create_shader_module(wgpu::ShaderModuleDescriptor {
-                label: Some("silu_mul"),
-                source: wgpu::ShaderSource::Wgsl(SILU_MUL_SHADER.into()),
-            });
-
-        let bind_group_layout =
-            self.device
-                .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                    label: Some("silu_bgl"),
-                    entries: &[
-                        storage_ro_entry(0),
-                        storage_ro_entry(1),
-                        storage_rw_entry(2),
-                        uniform_entry(3),
-                    ],
-                });
-
-        let pipeline_layout = self
-            .device
-            .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: Some("silu_layout"),
-                bind_group_layouts: &[&bind_group_layout],
-                push_constant_ranges: &[],
-            });
-
-        let pipeline = self
-            .device
-            .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-                label: Some("silu_pipeline"),
-                layout: Some(&pipeline_layout),
-                module: &shader_module,
-                entry_point: Some("silu_mul"),
-                compilation_options: Default::default(),
-                cache: None,
-            });
-
-        let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("silu_bg"),
-            layout: &bind_group_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: gate_buf.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: up_buf.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: out_buf.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 3,
-                    resource: params_buf.as_entire_binding(),
-                },
-            ],
-        });
-
-        let workgroup_size = 256u32;
-        let dispatch_x = size.div_ceil(workgroup_size);
-
-        let result = self.dispatch_and_readback(
-            &pipeline,
-            &bind_group,
-            [dispatch_x, 1, 1],
-            &out_buf,
-            output_size,
+        let layout_entries = Self::standard_layout();
+        let result = self.cache.with_pipeline(
+            &self.device,
+            "silu_mul",
+            SILU_MUL_SHADER,
+            "silu_mul",
+            &layout_entries,
+            |cached| {
+                let bind_group =
+                    self.make_bind_group(cached, &gate_buf, &up_buf, &out_buf, &params_buf);
+                let workgroup_size = 256u32;
+                let dispatch_x = size.div_ceil(workgroup_size);
+                self.dispatch_and_readback(
+                    &cached.pipeline,
+                    &bind_group,
+                    [dispatch_x, 1, 1],
+                    &out_buf,
+                    output_size,
+                )
+            },
         );
 
         output.data_mut()[..result.len()].copy_from_slice(&result);
