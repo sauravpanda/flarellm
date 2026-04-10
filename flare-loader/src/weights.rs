@@ -123,6 +123,32 @@ fn load_layer_weights(
         ],
     )?;
 
+    // Optional attention biases (Qwen2 has these, Llama does not)
+    let attn_q_bias = find_tensor(
+        tensors,
+        &[
+            &format!("blk.{i}.attn_q.bias"),
+            &format!("model.layers.{i}.self_attn.q_proj.bias"),
+        ],
+    )
+    .ok();
+    let attn_k_bias = find_tensor(
+        tensors,
+        &[
+            &format!("blk.{i}.attn_k.bias"),
+            &format!("model.layers.{i}.self_attn.k_proj.bias"),
+        ],
+    )
+    .ok();
+    let attn_v_bias = find_tensor(
+        tensors,
+        &[
+            &format!("blk.{i}.attn_v.bias"),
+            &format!("model.layers.{i}.self_attn.v_proj.bias"),
+        ],
+    )
+    .ok();
+
     Ok(LayerWeights {
         attn_norm,
         wq,
@@ -133,6 +159,9 @@ fn load_layer_weights(
         w_gate,
         w_up,
         w_down,
+        attn_q_bias,
+        attn_k_bias,
+        attn_v_bias,
     })
 }
 
