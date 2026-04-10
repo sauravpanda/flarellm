@@ -377,9 +377,9 @@ fn dequantize_tensor(raw: &[u8], dtype: QuantFormat, numel: usize) -> Result<Vec
             }
             Ok(data)
         }
-        QuantFormat::Q6K => dequant_k_blocks(numel, 256, 210, &raw, quantize::dequant_q6k_block),
-        QuantFormat::Q4K => dequant_k_blocks(numel, 256, 144, &raw, quantize::dequant_q4k_block),
-        QuantFormat::Q5K => dequant_k_blocks(numel, 256, 176, &raw, quantize::dequant_q5k_block),
+        QuantFormat::Q6K => dequant_k_blocks(numel, 256, 210, raw, quantize::dequant_q6k_block),
+        QuantFormat::Q4K => dequant_k_blocks(numel, 256, 144, raw, quantize::dequant_q4k_block),
+        QuantFormat::Q5K => dequant_k_blocks(numel, 256, 176, raw, quantize::dequant_q5k_block),
         other => Err(GgufError::UnsupportedQuant(other)),
     }
 }
