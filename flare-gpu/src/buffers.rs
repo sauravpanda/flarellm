@@ -1,4 +1,198 @@
+use std::collections::HashMap;
+use std::sync::Mutex;
+
 use wgpu::util::DeviceExt;
+
+/// Maximum number of idle buffers kept per (usage, size) slot.
+/// Limits peak GPU memory from accumulating freed buffers.
+const MAX_POOL_DEPTH: usize = 4;
+
+// ---------------------------------------------------------------------------
+// Buffer pool — avoids allocating new GPU buffers on every matvec call
+// ---------------------------------------------------------------------------
+
+/// A pool of reusable wgpu buffers keyed by their byte size.
+///
+/// During LLM decode, the same buffer sizes are requested on every token step.
+/// Without pooling, each `matvec` call allocates 5 new GPU buffers and
+/// destroys them after readback — each allocation takes ~1–2 ms of wgpu
+/// overhead.  With pooling the first decode step pays that cost; every
+/// subsequent step reuses the pre-allocated buffers from cache.
+///
+/// Safety: `Mutex` gives interior mutability so `BufferPool` can be owned
+/// by `WebGpuBackend` and used through `&self` (matching the `ComputeBackend`
+/// trait signature, which requires `Send + Sync`).  All GPU work is
+/// synchronously polled before buffers are returned to the pool, so there
+/// are no logical races — each buffer is fully idle before re-entry.
+pub struct BufferPool {
+    storage: Mutex<HashMap<u64, Vec<wgpu::Buffer>>>,
+    output: Mutex<HashMap<u64, Vec<wgpu::Buffer>>>,
+    staging: Mutex<HashMap<u64, Vec<wgpu::Buffer>>>,
+    uniform: Mutex<HashMap<u64, Vec<wgpu::Buffer>>>,
+}
+
+impl BufferPool {
+    pub fn new() -> Self {
+        Self {
+            storage: Mutex::new(HashMap::new()),
+            output: Mutex::new(HashMap::new()),
+            staging: Mutex::new(HashMap::new()),
+            uniform: Mutex::new(HashMap::new()),
+        }
+    }
+
+    // --- Storage buffers (STORAGE | COPY_DST) ---
+
+    /// Get a storage buffer of `data.len()` bytes, uploading `data` to it.
+    /// Returns a pooled buffer if one of the right size is available, otherwise
+    /// allocates a new one.
+    pub fn get_storage(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        data: &[u8],
+    ) -> wgpu::Buffer {
+        let size = data.len() as u64;
+        let buf = self
+            .storage
+            .lock()
+            .expect("buffer pool mutex poisoned")
+            .entry(size)
+            .or_default()
+            .pop()
+            .unwrap_or_else(|| {
+                device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("pool:storage"),
+                    size,
+                    usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                })
+            });
+        queue.write_buffer(&buf, 0, data);
+        buf
+    }
+
+    /// Return a storage buffer to the pool for reuse.
+    pub fn return_storage(&self, buf: wgpu::Buffer) {
+        let size = buf.size();
+        let mut pool = self.storage.lock().expect("buffer pool mutex poisoned");
+        let slot = pool.entry(size).or_default();
+        if slot.len() < MAX_POOL_DEPTH {
+            slot.push(buf);
+        }
+        // If pool is full, the buffer is simply dropped here.
+    }
+
+    // --- Output buffers (STORAGE | COPY_SRC) ---
+
+    /// Get an output-only storage buffer of `size` bytes.
+    /// No data upload — the GPU shader will write to it.
+    pub fn get_output(&self, device: &wgpu::Device, size: u64) -> wgpu::Buffer {
+        self.output
+            .lock()
+            .expect("buffer pool mutex poisoned")
+            .entry(size)
+            .or_default()
+            .pop()
+            .unwrap_or_else(|| {
+                device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("pool:output"),
+                    size,
+                    usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+                    mapped_at_creation: false,
+                })
+            })
+    }
+
+    /// Return an output buffer to the pool.
+    pub fn return_output(&self, buf: wgpu::Buffer) {
+        let size = buf.size();
+        let mut pool = self.output.lock().expect("buffer pool mutex poisoned");
+        let slot = pool.entry(size).or_default();
+        if slot.len() < MAX_POOL_DEPTH {
+            slot.push(buf);
+        }
+    }
+
+    // --- Staging buffers (MAP_READ | COPY_DST) ---
+
+    /// Get a CPU-readable staging buffer of `size` bytes.
+    pub fn get_staging(&self, device: &wgpu::Device, size: u64) -> wgpu::Buffer {
+        self.staging
+            .lock()
+            .expect("buffer pool mutex poisoned")
+            .entry(size)
+            .or_default()
+            .pop()
+            .unwrap_or_else(|| {
+                device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("pool:staging"),
+                    size,
+                    usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                })
+            })
+    }
+
+    /// Return a staging buffer to the pool.
+    pub fn return_staging(&self, buf: wgpu::Buffer) {
+        let size = buf.size();
+        let mut pool = self.staging.lock().expect("buffer pool mutex poisoned");
+        let slot = pool.entry(size).or_default();
+        if slot.len() < MAX_POOL_DEPTH {
+            slot.push(buf);
+        }
+    }
+
+    // --- Uniform buffers (UNIFORM | COPY_DST) ---
+
+    /// Get a uniform buffer, uploading `data` to it.
+    pub fn get_uniform(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        data: &[u8],
+    ) -> wgpu::Buffer {
+        let size = data.len() as u64;
+        let buf = self
+            .uniform
+            .lock()
+            .expect("buffer pool mutex poisoned")
+            .entry(size)
+            .or_default()
+            .pop()
+            .unwrap_or_else(|| {
+                device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("pool:uniform"),
+                    size,
+                    usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                })
+            });
+        queue.write_buffer(&buf, 0, data);
+        buf
+    }
+
+    /// Return a uniform buffer to the pool.
+    pub fn return_uniform(&self, buf: wgpu::Buffer) {
+        let size = buf.size();
+        let mut pool = self.uniform.lock().expect("buffer pool mutex poisoned");
+        let slot = pool.entry(size).or_default();
+        if slot.len() < MAX_POOL_DEPTH {
+            slot.push(buf);
+        }
+    }
+}
+
+impl Default for BufferPool {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Legacy one-shot helpers (used in tests and benchmarks)
+// ---------------------------------------------------------------------------
 
 /// Create a GPU storage buffer from CPU data.
 pub fn create_storage_buffer(device: &wgpu::Device, label: &str, data: &[u8]) -> wgpu::Buffer {

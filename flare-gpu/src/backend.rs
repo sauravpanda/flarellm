@@ -2,7 +2,7 @@ use flare_core::model::ComputeBackend;
 use flare_core::tensor::Tensor;
 use thiserror::Error;
 
-use crate::buffers;
+use crate::buffers::{self, BufferPool};
 use crate::pipeline::{CachedPipeline, PipelineCache};
 
 #[derive(Debug, Error)]
@@ -26,10 +26,14 @@ const SILU_MUL_SHADER: &str = include_str!("../shaders/silu_mul.wgsl");
 /// In the browser (WASM), this uses WebGPU via wgpu's web backend.
 ///
 /// Pipelines are cached on first use to avoid per-call shader compilation.
+/// Buffers are pooled so that repeated calls with the same tensor sizes reuse
+/// already-allocated GPU memory instead of allocating and freeing each time.
 pub struct WebGpuBackend {
     device: wgpu::Device,
     queue: wgpu::Queue,
     cache: PipelineCache,
+    /// Buffer pool: eliminates ~1–2 ms per-allocation overhead on repeated calls.
+    pool: BufferPool,
 }
 
 impl WebGpuBackend {
@@ -64,6 +68,7 @@ impl WebGpuBackend {
             device,
             queue,
             cache: PipelineCache::new(),
+            pool: BufferPool::new(),
         })
     }
 
@@ -87,6 +92,9 @@ impl WebGpuBackend {
 
     /// Run a compute shader with the given bind group and dispatch dimensions,
     /// then read back the output buffer to CPU.
+    ///
+    /// The staging buffer used for readback is pooled; it is returned to the
+    /// pool after the GPU results are copied to the returned `Vec<f32>`.
     fn dispatch_and_readback(
         &self,
         pipeline: &wgpu::ComputePipeline,
@@ -95,7 +103,7 @@ impl WebGpuBackend {
         output_buf: &wgpu::Buffer,
         output_size: u64,
     ) -> Vec<f32> {
-        let staging = buffers::create_staging_buffer(&self.device, "staging", output_size);
+        let staging = self.pool.get_staging(&self.device, output_size);
 
         let mut encoder = self
             .device
@@ -130,6 +138,10 @@ impl WebGpuBackend {
         let result: Vec<f32> = bytemuck::cast_slice(&data).to_vec();
         drop(data);
         staging.unmap();
+
+        // Return staging buffer to pool for the next call
+        self.pool.return_staging(staging);
+
         result
     }
 
@@ -173,29 +185,23 @@ impl ComputeBackend for WebGpuBackend {
         let k = cols as u32;
         let n = 1u32;
 
-        let a_buf =
-            buffers::create_storage_buffer(&self.device, "matvec_mat", bytemuck::cast_slice(mat));
-        let b_buf =
-            buffers::create_storage_buffer(&self.device, "matvec_vec", bytemuck::cast_slice(vec));
+        // Use pooled buffers to avoid per-call GPU allocation overhead.
+        let a_buf = self
+            .pool
+            .get_storage(&self.device, &self.queue, bytemuck::cast_slice(mat));
+        let b_buf = self
+            .pool
+            .get_storage(&self.device, &self.queue, bytemuck::cast_slice(vec));
         let output_size = m as u64 * 4;
-        let out_buf = self.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("matvec_out"),
-            size: output_size,
-            usage: wgpu::BufferUsages::STORAGE
-                | wgpu::BufferUsages::COPY_SRC
-                | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
+        let out_buf = self.pool.get_output(&self.device, output_size);
 
         let params: [u32; 3] = [m, n, k];
-        let params_buf = buffers::create_uniform_buffer(
-            &self.device,
-            "matvec_params",
-            bytemuck::cast_slice(&params),
-        );
+        let params_buf =
+            self.pool
+                .get_uniform(&self.device, &self.queue, bytemuck::cast_slice(&params));
 
         let layout_entries = Self::standard_layout();
-        self.cache.with_pipeline(
+        let result = self.cache.with_pipeline(
             &self.device,
             "matvec",
             MATMUL_SHADER,
@@ -215,38 +221,37 @@ impl ComputeBackend for WebGpuBackend {
                     output_size,
                 )
             },
-        )
+        );
+
+        // Return buffers to pool — GPU work is synchronously polled in
+        // dispatch_and_readback, so they are safe to reuse immediately.
+        self.pool.return_storage(a_buf);
+        self.pool.return_storage(b_buf);
+        self.pool.return_output(out_buf);
+        self.pool.return_uniform(params_buf);
+
+        result
     }
 
     fn silu_mul_vec(&self, gate: &[f32], up: &[f32]) -> Vec<f32> {
         let size = gate.len() as u32;
 
-        let gate_buf = buffers::create_storage_buffer(
-            &self.device,
-            "silu_vec_gate",
-            bytemuck::cast_slice(gate),
-        );
-        let up_buf =
-            buffers::create_storage_buffer(&self.device, "silu_vec_up", bytemuck::cast_slice(up));
+        let gate_buf = self
+            .pool
+            .get_storage(&self.device, &self.queue, bytemuck::cast_slice(gate));
+        let up_buf = self
+            .pool
+            .get_storage(&self.device, &self.queue, bytemuck::cast_slice(up));
         let output_size = size as u64 * 4;
-        let out_buf = self.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("silu_vec_out"),
-            size: output_size,
-            usage: wgpu::BufferUsages::STORAGE
-                | wgpu::BufferUsages::COPY_SRC
-                | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
+        let out_buf = self.pool.get_output(&self.device, output_size);
 
         let params: [u32; 1] = [size];
-        let params_buf = buffers::create_uniform_buffer(
-            &self.device,
-            "silu_vec_params",
-            bytemuck::cast_slice(&params),
-        );
+        let params_buf =
+            self.pool
+                .get_uniform(&self.device, &self.queue, bytemuck::cast_slice(&params));
 
         let layout_entries = Self::standard_layout();
-        self.cache.with_pipeline(
+        let result = self.cache.with_pipeline(
             &self.device,
             "silu_mul",
             SILU_MUL_SHADER,
@@ -265,7 +270,14 @@ impl ComputeBackend for WebGpuBackend {
                     output_size,
                 )
             },
-        )
+        );
+
+        self.pool.return_storage(gate_buf);
+        self.pool.return_storage(up_buf);
+        self.pool.return_output(out_buf);
+        self.pool.return_uniform(params_buf);
+
+        result
     }
 
     fn matmul(&self, a: &Tensor, b: &Tensor, output: &mut Tensor) {
