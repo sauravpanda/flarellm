@@ -4,7 +4,7 @@ use crate::tensor::Tensor;
 
 /// Trait for compute backends (WebGPU, SIMD, native wgpu).
 /// Each backend implements these fundamental operations.
-pub trait ComputeBackend {
+pub trait ComputeBackend: Send + Sync {
     fn matmul(&self, a: &Tensor, b: &Tensor, output: &mut Tensor);
     fn rmsnorm(&self, input: &Tensor, weight: &Tensor, eps: f32, output: &mut Tensor);
     fn rope(&self, q: &mut Tensor, k: &mut Tensor, pos: usize, head_dim: usize, theta: f32);
