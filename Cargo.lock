@@ -336,7 +336,12 @@ dependencies = [
 
 [[package]]
 name = "flarellm"
-version = "0.0.1"
+version = "0.1.0"
+dependencies = [
+ "flarellm-core",
+ "flarellm-gpu",
+ "flarellm-loader",
+]
 
 [[package]]
 name = "flarellm-core"
