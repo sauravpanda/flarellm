@@ -10,6 +10,107 @@ pub trait ComputeBackend {
     fn rope(&self, q: &mut Tensor, k: &mut Tensor, pos: usize, head_dim: usize, theta: f32);
     fn softmax(&self, input: &mut Tensor);
     fn silu_mul(&self, gate: &Tensor, up: &Tensor, output: &mut Tensor);
+
+    /// Matrix-vector multiply: output[rows] = mat[rows, cols] * vec[cols].
+    /// Default implementation reshapes into matmul, but backends can override
+    /// with a more efficient kernel.
+    fn matvec(&self, mat: &[f32], vec: &[f32], rows: usize, cols: usize) -> Vec<f32> {
+        matvec(mat, vec, rows, cols)
+    }
+
+    /// RMSNorm on raw slices, returning a new Vec.
+    /// Default delegates to the CPU implementation.
+    fn rmsnorm_vec(&self, x: &[f32], weight: &[f32], eps: f32) -> Vec<f32> {
+        rmsnorm(x, weight, eps)
+    }
+
+    /// Apply RoPE to interleaved Q or K vectors (in-place on raw slices).
+    fn apply_rope_vec(
+        &self,
+        data: &mut [f32],
+        num_heads: usize,
+        head_dim: usize,
+        pos: usize,
+        theta: f32,
+    ) {
+        apply_rope(data, num_heads, head_dim, pos, theta);
+    }
+
+    /// SiLU(gate) * up, returning a new Vec.
+    fn silu_mul_vec(&self, gate: &[f32], up: &[f32]) -> Vec<f32> {
+        silu_mul_cpu(gate, up)
+    }
+}
+
+/// Default CPU compute backend. Uses optimized scalar loops.
+pub struct CpuBackend;
+
+impl ComputeBackend for CpuBackend {
+    fn matmul(&self, a: &Tensor, b: &Tensor, output: &mut Tensor) {
+        let a_shape = a.shape();
+        let b_shape = b.shape();
+        assert!(a_shape.len() == 2 && b_shape.len() == 2);
+        let m = a_shape[0];
+        let k = a_shape[1];
+        let n = b_shape[1];
+        assert_eq!(b_shape[0], k);
+        let out = output.data_mut();
+        let a_data = a.data();
+        let b_data = b.data();
+        for i in 0..m {
+            for j in 0..n {
+                let mut sum = 0.0f32;
+                for p in 0..k {
+                    sum += a_data[i * k + p] * b_data[p * n + j];
+                }
+                out[i * n + j] = sum;
+            }
+        }
+    }
+
+    fn rmsnorm(&self, input: &Tensor, weight: &Tensor, eps: f32, output: &mut Tensor) {
+        let data = input.data();
+        let w = weight.data();
+        let out = output.data_mut();
+        let dim = w.len();
+        let num_rows = data.len() / dim;
+        for row in 0..num_rows {
+            let offset = row * dim;
+            let row_data = &data[offset..offset + dim];
+            let sum_sq: f32 = row_data.iter().map(|x| x * x).sum();
+            let rms = (sum_sq / dim as f32 + eps).sqrt();
+            for i in 0..dim {
+                out[offset + i] = (row_data[i] / rms) * w[i];
+            }
+        }
+    }
+
+    fn rope(&self, q: &mut Tensor, k: &mut Tensor, pos: usize, head_dim: usize, theta: f32) {
+        let q_heads = q.numel() / head_dim;
+        let k_heads = k.numel() / head_dim;
+        apply_rope(q.data_mut(), q_heads, head_dim, pos, theta);
+        apply_rope(k.data_mut(), k_heads, head_dim, pos, theta);
+    }
+
+    fn softmax(&self, input: &mut Tensor) {
+        let data = input.data_mut();
+        let max = data.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+        let mut sum = 0.0f32;
+        for v in data.iter_mut() {
+            *v = (*v - max).exp();
+            sum += *v;
+        }
+        for v in data.iter_mut() {
+            *v /= sum;
+        }
+    }
+
+    fn silu_mul(&self, gate: &Tensor, up: &Tensor, output: &mut Tensor) {
+        let out = output.data_mut();
+        for (i, (g, u)) in gate.data().iter().zip(up.data().iter()).enumerate() {
+            out[i] = (g / (1.0 + (-g).exp())) * u;
+        }
+    }
 }
 
 /// Weights for a single transformer layer.
@@ -38,10 +139,14 @@ pub struct ModelWeights {
 }
 
 /// The core model that runs inference.
+///
+/// By default uses `CpuBackend` for all compute operations. Call
+/// `set_backend` to plug in a GPU or SIMD backend.
 pub struct Model {
     config: ModelConfig,
     weights: ModelWeights,
     kv_cache: KvCache,
+    backend: Box<dyn ComputeBackend>,
 }
 
 impl Model {
@@ -56,7 +161,14 @@ impl Model {
             config,
             weights,
             kv_cache,
+            backend: Box::new(CpuBackend),
         }
+    }
+
+    /// Replace the compute backend (e.g. with a GPU backend).
+    /// Returns the previous backend.
+    pub fn set_backend(&mut self, backend: Box<dyn ComputeBackend>) -> Box<dyn ComputeBackend> {
+        std::mem::replace(&mut self.backend, backend)
     }
 
     pub fn config(&self) -> &ModelConfig {
@@ -81,6 +193,10 @@ impl Model {
 
     /// Run a single forward pass for one token position.
     /// Returns logits over the vocabulary [vocab_size].
+    ///
+    /// Delegates heavy compute (matvec, rmsnorm, rope, silu_mul) to the
+    /// active `ComputeBackend`. By default this is `CpuBackend`; call
+    /// `set_backend` to use GPU acceleration.
     pub fn forward(&mut self, token_id: u32, pos: usize) -> Tensor {
         let config = &self.config;
         let dim = config.hidden_dim;
@@ -100,12 +216,16 @@ impl Model {
 
             // --- Attention block ---
             // RMSNorm
-            let normed = rmsnorm(x.data(), layer.attn_norm.data(), config.rms_norm_eps);
+            let normed =
+                self.backend
+                    .rmsnorm_vec(x.data(), layer.attn_norm.data(), config.rms_norm_eps);
 
             // QKV projections
-            let mut q_data = matvec(layer.wq.data(), &normed, num_heads * head_dim, dim);
-            let mut k_data = matvec(layer.wk.data(), &normed, kv_dim, dim);
-            let mut v_data = matvec(layer.wv.data(), &normed, kv_dim, dim);
+            let mut q_data =
+                self.backend
+                    .matvec(layer.wq.data(), &normed, num_heads * head_dim, dim);
+            let mut k_data = self.backend.matvec(layer.wk.data(), &normed, kv_dim, dim);
+            let mut v_data = self.backend.matvec(layer.wv.data(), &normed, kv_dim, dim);
 
             // Add attention biases if present (Qwen2)
             if let Some(bias) = &layer.attn_q_bias {
@@ -123,8 +243,15 @@ impl Model {
                     *v += b;
                 }
             }
-            apply_rope(&mut q_data, num_heads, head_dim, pos, config.rope_theta);
-            apply_rope(&mut k_data, num_kv_heads, head_dim, pos, config.rope_theta);
+            self.backend
+                .apply_rope_vec(&mut q_data, num_heads, head_dim, pos, config.rope_theta);
+            self.backend.apply_rope_vec(
+                &mut k_data,
+                num_kv_heads,
+                head_dim,
+                pos,
+                config.rope_theta,
+            );
 
             // Write K, V to cache
             self.kv_cache.write(layer_idx, &k_data, &v_data);
@@ -141,7 +268,9 @@ impl Model {
             );
 
             // Output projection
-            let attn_proj = matvec(layer.wo.data(), &attn_output, dim, num_heads * head_dim);
+            let attn_proj =
+                self.backend
+                    .matvec(layer.wo.data(), &attn_output, dim, num_heads * head_dim);
 
             // Residual connection
             let x_data = x.data_mut();
@@ -150,20 +279,23 @@ impl Model {
             }
 
             // --- FFN block ---
-            let normed = rmsnorm(x.data(), layer.ffn_norm.data(), config.rms_norm_eps);
+            let normed =
+                self.backend
+                    .rmsnorm_vec(x.data(), layer.ffn_norm.data(), config.rms_norm_eps);
 
             // Gate and up projections
-            let gate = matvec(layer.w_gate.data(), &normed, config.intermediate_dim, dim);
-            let up = matvec(layer.w_up.data(), &normed, config.intermediate_dim, dim);
+            let gate =
+                self.backend
+                    .matvec(layer.w_gate.data(), &normed, config.intermediate_dim, dim);
+            let up = self
+                .backend
+                .matvec(layer.w_up.data(), &normed, config.intermediate_dim, dim);
 
-            // SiLU(gate) * up — reuse gate allocation
-            let mut ffn_hidden = gate;
-            for (g, &u) in ffn_hidden.iter_mut().zip(up.iter()) {
-                *g = (*g / (1.0 + (-*g).exp())) * u;
-            }
+            // SiLU(gate) * up
+            let ffn_hidden = self.backend.silu_mul_vec(&gate, &up);
 
             // Down projection
-            let ffn_out = matvec(
+            let ffn_out = self.backend.matvec(
                 layer.w_down.data(),
                 &ffn_hidden,
                 dim,
@@ -181,14 +313,14 @@ impl Model {
         self.kv_cache.advance();
 
         // Final RMSNorm
-        let normed = rmsnorm(
+        let normed = self.backend.rmsnorm_vec(
             x.data(),
             self.weights.output_norm.data(),
             config.rms_norm_eps,
         );
 
-        // Output logits: [vocab_size] = output_weight [vocab_size, dim] × normed [dim]
-        let logits = matvec(
+        // Output logits: [vocab_size] = output_weight [vocab_size, dim] x normed [dim]
+        let logits = self.backend.matvec(
             self.weights.output_weight.data(),
             &normed,
             config.vocab_size,
@@ -199,8 +331,8 @@ impl Model {
     }
 }
 
-/// RMSNorm: normalize and scale.
-fn rmsnorm(x: &[f32], weight: &[f32], eps: f32) -> Vec<f32> {
+/// RMSNorm: normalize and scale (CPU implementation).
+pub fn rmsnorm(x: &[f32], weight: &[f32], eps: f32) -> Vec<f32> {
     let dim = x.len();
     let sum_sq: f32 = x.iter().map(|v| v * v).sum();
     let rms = (sum_sq / dim as f32 + eps).sqrt();
@@ -210,11 +342,11 @@ fn rmsnorm(x: &[f32], weight: &[f32], eps: f32) -> Vec<f32> {
         .collect()
 }
 
-/// Matrix-vector multiply: output[rows] = mat[rows, cols] × vec[cols]
+/// Matrix-vector multiply: output[rows] = mat[rows, cols] * vec[cols] (CPU implementation).
 ///
 /// Uses 4-wide manual unrolling for better ILP and auto-vectorization.
 /// For a [576, 1536] matrix, this is ~2-3x faster than a naive loop.
-fn matvec(mat: &[f32], vec: &[f32], rows: usize, cols: usize) -> Vec<f32> {
+pub fn matvec(mat: &[f32], vec: &[f32], rows: usize, cols: usize) -> Vec<f32> {
     let mut output = vec![0.0f32; rows];
     let cols4 = cols & !3; // round down to multiple of 4
 
@@ -244,8 +376,16 @@ fn matvec(mat: &[f32], vec: &[f32], rows: usize, cols: usize) -> Vec<f32> {
     output
 }
 
-/// Apply RoPE to interleaved Q or K vectors.
-fn apply_rope(data: &mut [f32], num_heads: usize, head_dim: usize, pos: usize, theta: f32) {
+/// SiLU(gate) * up on raw slices, returning a new Vec (CPU implementation).
+pub fn silu_mul_cpu(gate: &[f32], up: &[f32]) -> Vec<f32> {
+    gate.iter()
+        .zip(up.iter())
+        .map(|(&g, &u)| (g / (1.0 + (-g).exp())) * u)
+        .collect()
+}
+
+/// Apply RoPE to interleaved Q or K vectors (CPU implementation).
+pub fn apply_rope(data: &mut [f32], num_heads: usize, head_dim: usize, pos: usize, theta: f32) {
     let half = head_dim / 2;
     for h in 0..num_heads {
         let offset = h * head_dim;

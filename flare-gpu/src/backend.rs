@@ -117,6 +117,206 @@ impl WebGpuBackend {
 }
 
 impl ComputeBackend for WebGpuBackend {
+    fn matvec(&self, mat: &[f32], vec: &[f32], rows: usize, cols: usize) -> Vec<f32> {
+        let m = rows as u32;
+        let k = cols as u32;
+        let n = 1u32;
+
+        let a_buf =
+            buffers::create_storage_buffer(&self.device, "matvec_mat", bytemuck::cast_slice(mat));
+        let b_buf =
+            buffers::create_storage_buffer(&self.device, "matvec_vec", bytemuck::cast_slice(vec));
+        let output_size = m as u64 * 4;
+        let out_buf = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("matvec_out"),
+            size: output_size,
+            usage: wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::COPY_SRC
+                | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        let params: [u32; 3] = [m, n, k];
+        let params_buf = buffers::create_uniform_buffer(
+            &self.device,
+            "matvec_params",
+            bytemuck::cast_slice(&params),
+        );
+
+        let shader_module = self
+            .device
+            .create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("matvec"),
+                source: wgpu::ShaderSource::Wgsl(MATMUL_SHADER.into()),
+            });
+
+        let bind_group_layout =
+            self.device
+                .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                    label: Some("matvec_bgl"),
+                    entries: &[
+                        storage_ro_entry(0),
+                        storage_ro_entry(1),
+                        storage_rw_entry(2),
+                        uniform_entry(3),
+                    ],
+                });
+
+        let pipeline_layout = self
+            .device
+            .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("matvec_layout"),
+                bind_group_layouts: &[&bind_group_layout],
+                push_constant_ranges: &[],
+            });
+
+        let pipeline = self
+            .device
+            .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("matvec_pipeline"),
+                layout: Some(&pipeline_layout),
+                module: &shader_module,
+                entry_point: Some("matmul"),
+                compilation_options: Default::default(),
+                cache: None,
+            });
+
+        let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("matvec_bg"),
+            layout: &bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: a_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: b_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: out_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: params_buf.as_entire_binding(),
+                },
+            ],
+        });
+
+        let tile = 16u32;
+        let dispatch_x = m.div_ceil(tile);
+        let dispatch_y = n.div_ceil(tile);
+
+        self.dispatch_and_readback(
+            &pipeline,
+            &bind_group,
+            [dispatch_x, dispatch_y, 1],
+            &out_buf,
+            output_size,
+        )
+    }
+
+    fn silu_mul_vec(&self, gate: &[f32], up: &[f32]) -> Vec<f32> {
+        let size = gate.len() as u32;
+
+        let gate_buf = buffers::create_storage_buffer(
+            &self.device,
+            "silu_vec_gate",
+            bytemuck::cast_slice(gate),
+        );
+        let up_buf =
+            buffers::create_storage_buffer(&self.device, "silu_vec_up", bytemuck::cast_slice(up));
+        let output_size = size as u64 * 4;
+        let out_buf = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("silu_vec_out"),
+            size: output_size,
+            usage: wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::COPY_SRC
+                | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        let params: [u32; 1] = [size];
+        let params_buf = buffers::create_uniform_buffer(
+            &self.device,
+            "silu_vec_params",
+            bytemuck::cast_slice(&params),
+        );
+
+        let shader_module = self
+            .device
+            .create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("silu_mul_vec"),
+                source: wgpu::ShaderSource::Wgsl(SILU_MUL_SHADER.into()),
+            });
+
+        let bind_group_layout =
+            self.device
+                .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                    label: Some("silu_vec_bgl"),
+                    entries: &[
+                        storage_ro_entry(0),
+                        storage_ro_entry(1),
+                        storage_rw_entry(2),
+                        uniform_entry(3),
+                    ],
+                });
+
+        let pipeline_layout = self
+            .device
+            .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("silu_vec_layout"),
+                bind_group_layouts: &[&bind_group_layout],
+                push_constant_ranges: &[],
+            });
+
+        let pipeline = self
+            .device
+            .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("silu_vec_pipeline"),
+                layout: Some(&pipeline_layout),
+                module: &shader_module,
+                entry_point: Some("silu_mul"),
+                compilation_options: Default::default(),
+                cache: None,
+            });
+
+        let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("silu_vec_bg"),
+            layout: &bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: gate_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: up_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: out_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: params_buf.as_entire_binding(),
+                },
+            ],
+        });
+
+        let workgroup_size = 256u32;
+        let dispatch_x = size.div_ceil(workgroup_size);
+
+        self.dispatch_and_readback(
+            &pipeline,
+            &bind_group,
+            [dispatch_x, 1, 1],
+            &out_buf,
+            output_size,
+        )
+    }
+
     fn matmul(&self, a: &Tensor, b: &Tensor, output: &mut Tensor) {
         let a_shape = a.shape();
         let b_shape = b.shape();
