@@ -1,13 +1,19 @@
 [package]
-name = "flare-loader"
+name = "flarellm-loader"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Model weight loading for Flare (GGUF, SafeTensors, progressive streaming)"
+keywords = ["gguf", "llm", "safetensors", "loader"]
+categories = ["parser-implementations", "science"]
+readme = "../README.md"
+
+[lib]
+name = "flare_loader"
 
 [dependencies]
-flare-core = { path = "../flare-core" }
+flare-core = { package = "flarellm-core", path = "../flare-core", version = "0.1.0" }
 thiserror = { workspace = true }
 byteorder = { workspace = true }
 log = { workspace = true }

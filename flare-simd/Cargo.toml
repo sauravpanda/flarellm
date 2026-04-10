@@ -1,16 +1,22 @@
 [package]
-name = "flare-simd"
+name = "flarellm-simd"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "WASM SIMD128 CPU fallback backend for Flare LLM inference"
+keywords = ["wasm", "simd", "llm", "cpu"]
+categories = ["wasm", "science"]
+readme = "../README.md"
+
+[lib]
+name = "flare_simd"
 
 [[bench]]
 name = "matmul_bench"
 harness = false
 
 [dependencies]
-flare-core = { path = "../flare-core" }
+flare-core = { package = "flarellm-core", path = "../flare-core", version = "0.1.0" }
 thiserror = { workspace = true }
 log = { workspace = true }

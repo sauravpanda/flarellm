@@ -1,10 +1,16 @@
 [package]
-name = "flare-core"
+name = "flarellm-core"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Core inference engine for Flare LLM runtime"
+keywords = ["llm", "inference", "ai", "tensor"]
+categories = ["science", "no-std"]
+readme = "../README.md"
+
+[lib]
+name = "flare_core"
 
 [dependencies]
 thiserror = { workspace = true }
