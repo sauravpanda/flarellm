@@ -335,7 +335,11 @@ dependencies = [
 ]
 
 [[package]]
-name = "flare-core"
+name = "flarellm"
+version = "0.0.1"
+
+[[package]]
+name = "flarellm-core"
 version = "0.1.0"
 dependencies = [
  "byteorder",
@@ -346,12 +350,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "flare-gpu"
+name = "flarellm-gpu"
 version = "0.1.0"
 dependencies = [
  "bytemuck",
  "byteorder",
- "flare-core",
+ "flarellm-core",
  "log",
  "pollster",
  "thiserror 2.0.18",
@@ -359,11 +363,11 @@ dependencies = [
 ]
 
 [[package]]
-name = "flare-loader"
+name = "flarellm-loader"
 version = "0.1.0"
 dependencies = [
  "byteorder",
- "flare-core",
+ "flarellm-core",
  "log",
  "serde",
  "serde_json",
@@ -371,14 +375,14 @@ dependencies = [
 ]
 
 [[package]]
-name = "flare-server"
+name = "flarellm-server"
 version = "0.1.0"
 dependencies = [
  "axum",
  "clap",
- "flare-core",
- "flare-gpu",
- "flare-loader",
+ "flarellm-core",
+ "flarellm-gpu",
+ "flarellm-loader",
  "futures",
  "http-body-util",
  "log",
@@ -392,22 +396,22 @@ dependencies = [
 ]
 
 [[package]]
-name = "flare-simd"
+name = "flarellm-simd"
 version = "0.1.0"
 dependencies = [
- "flare-core",
+ "flarellm-core",
  "log",
  "thiserror 2.0.18",
 ]
 
 [[package]]
-name = "flare-web"
+name = "flarellm-web"
 version = "0.1.0"
 dependencies = [
- "flare-core",
- "flare-gpu",
- "flare-loader",
- "flare-simd",
+ "flarellm-core",
+ "flarellm-gpu",
+ "flarellm-loader",
+ "flarellm-simd",
  "js-sys",
  "log",
  "serde",
@@ -417,10 +421,6 @@ dependencies = [
  "wasm-bindgen-futures",
  "web-sys",
 ]
-
-[[package]]
-name = "flarellm"
-version = "0.0.1"
 
 [[package]]
 name = "foldhash"

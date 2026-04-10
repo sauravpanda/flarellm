@@ -1,10 +1,13 @@
 [package]
-name = "flare-server"
+name = "flarellm-server"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Native server with OpenAI-compatible API for Flare LLM inference"
+keywords = ["llm", "server", "openai", "inference", "api"]
+categories = ["web-programming::http-server", "science"]
+readme = "../README.md"
 
 [[bin]]
 name = "flare-server"
@@ -19,9 +22,9 @@ name = "flare-info"
 path = "src/info.rs"
 
 [dependencies]
-flare-core = { path = "../flare-core" }
-flare-loader = { path = "../flare-loader" }
-flare-gpu = { path = "../flare-gpu" }
+flare-core = { package = "flarellm-core", path = "../flare-core", version = "0.1.0" }
+flare-loader = { package = "flarellm-loader", path = "../flare-loader", version = "0.1.0" }
+flare-gpu = { package = "flarellm-gpu", path = "../flare-gpu", version = "0.1.0" }
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
