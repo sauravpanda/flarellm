@@ -30,6 +30,8 @@ thiserror = { workspace = true }
 axum = { workspace = true }
 tokio-stream = { workspace = true }
 futures = { workspace = true }
+tower-http = { workspace = true }
+clap = { workspace = true }
 
 [dev-dependencies]
 http-body-util = "0.1"
