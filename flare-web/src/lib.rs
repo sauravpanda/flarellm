@@ -210,8 +210,7 @@ impl FlareProgressiveLoader {
         let window = web_sys::window().ok_or_else(|| JsError::new("no window object"))?;
 
         // Kick off the fetch
-        let resp_promise = window
-            .fetch_with_str(&self.url);
+        let resp_promise = window.fetch_with_str(&self.url);
         let resp_value = wasm_bindgen_futures::JsFuture::from(resp_promise)
             .await
             .map_err(|e| JsError::new(&format!("fetch failed: {e:?}")))?;
