@@ -358,59 +358,92 @@ pub fn matvec(mat: &[f32], vec: &[f32], rows: usize, cols: usize) -> Vec<f32> {
     }
 }
 
-/// ARM NEON SIMD matvec: 4 f32 lanes × 4 accumulators = 16 elements per iteration.
+/// Compute one row of NEON matvec. Used by both serial and parallel paths.
+///
+/// # Safety
+/// `row` and `vec` must both have length `cols`. NEON is always available on aarch64.
+#[cfg(target_arch = "aarch64")]
+#[inline(always)]
+unsafe fn matvec_neon_row(row: &[f32], vec: &[f32], cols: usize) -> f32 {
+    use std::arch::aarch64::*;
+    let cols16 = cols & !15;
+
+    let mut acc0 = vdupq_n_f32(0.0);
+    let mut acc1 = vdupq_n_f32(0.0);
+    let mut acc2 = vdupq_n_f32(0.0);
+    let mut acc3 = vdupq_n_f32(0.0);
+
+    let mut j = 0usize;
+    while j < cols16 {
+        let r0 = vld1q_f32(row.as_ptr().add(j));
+        let v0 = vld1q_f32(vec.as_ptr().add(j));
+        acc0 = vfmaq_f32(acc0, r0, v0);
+
+        let r1 = vld1q_f32(row.as_ptr().add(j + 4));
+        let v1 = vld1q_f32(vec.as_ptr().add(j + 4));
+        acc1 = vfmaq_f32(acc1, r1, v1);
+
+        let r2 = vld1q_f32(row.as_ptr().add(j + 8));
+        let v2 = vld1q_f32(vec.as_ptr().add(j + 8));
+        acc2 = vfmaq_f32(acc2, r2, v2);
+
+        let r3 = vld1q_f32(row.as_ptr().add(j + 12));
+        let v3 = vld1q_f32(vec.as_ptr().add(j + 12));
+        acc3 = vfmaq_f32(acc3, r3, v3);
+
+        j += 16;
+    }
+
+    let sum01 = vaddq_f32(acc0, acc1);
+    let sum23 = vaddq_f32(acc2, acc3);
+    let sum = vaddq_f32(sum01, sum23);
+    let mut scalar = vaddvq_f32(sum);
+
+    while j < cols {
+        scalar += row[j] * vec[j];
+        j += 1;
+    }
+    scalar
+}
+
+/// ARM NEON SIMD matvec with rayon parallelism on native, serial on wasm32.
+///
+/// Parallelizes by chunking rows so each task handles many rows. The threshold
+/// is based on total work (rows * cols) to amortize rayon dispatch overhead.
 #[cfg(target_arch = "aarch64")]
 fn matvec_neon(mat: &[f32], vec: &[f32], rows: usize, cols: usize) -> Vec<f32> {
-    use std::arch::aarch64::*;
+    // Total FMAs above which parallelism wins. ~5M FMAs / ~50µs sequential break-even.
+    const PARALLEL_FMA_THRESHOLD: usize = 5_000_000;
+    // Chunk size: balance task granularity vs overhead
+    const CHUNK_ROWS: usize = 64;
 
+    let total_work = rows * cols;
+
+    #[cfg(not(target_arch = "wasm32"))]
+    if total_work >= PARALLEL_FMA_THRESHOLD && rows >= CHUNK_ROWS * 2 {
+        use rayon::prelude::*;
+        let mut output = vec![0.0f32; rows];
+        output
+            .par_chunks_mut(CHUNK_ROWS)
+            .enumerate()
+            .for_each(|(chunk_idx, out_chunk)| {
+                let row_start = chunk_idx * CHUNK_ROWS;
+                for (local_i, out) in out_chunk.iter_mut().enumerate() {
+                    let i = row_start + local_i;
+                    let row = &mat[i * cols..i * cols + cols];
+                    // SAFETY: row.len() == cols, NEON always available on aarch64
+                    *out = unsafe { matvec_neon_row(row, vec, cols) };
+                }
+            });
+        return output;
+    }
+
+    // Sequential path
     let mut output = vec![0.0f32; rows];
-    let cols16 = cols & !15; // round down to 16
-
     for (i, out) in output.iter_mut().enumerate() {
         let row = &mat[i * cols..i * cols + cols];
-
-        // Safety: we stay within bounds (cols16 <= cols), and aarch64 NEON is always available.
-        unsafe {
-            let mut acc0 = vdupq_n_f32(0.0);
-            let mut acc1 = vdupq_n_f32(0.0);
-            let mut acc2 = vdupq_n_f32(0.0);
-            let mut acc3 = vdupq_n_f32(0.0);
-
-            let mut j = 0usize;
-            while j < cols16 {
-                let r0 = vld1q_f32(row.as_ptr().add(j));
-                let v0 = vld1q_f32(vec.as_ptr().add(j));
-                acc0 = vfmaq_f32(acc0, r0, v0);
-
-                let r1 = vld1q_f32(row.as_ptr().add(j + 4));
-                let v1 = vld1q_f32(vec.as_ptr().add(j + 4));
-                acc1 = vfmaq_f32(acc1, r1, v1);
-
-                let r2 = vld1q_f32(row.as_ptr().add(j + 8));
-                let v2 = vld1q_f32(vec.as_ptr().add(j + 8));
-                acc2 = vfmaq_f32(acc2, r2, v2);
-
-                let r3 = vld1q_f32(row.as_ptr().add(j + 12));
-                let v3 = vld1q_f32(vec.as_ptr().add(j + 12));
-                acc3 = vfmaq_f32(acc3, r3, v3);
-
-                j += 16;
-            }
-
-            // Reduce 4 accumulators → scalar
-            let sum01 = vaddq_f32(acc0, acc1);
-            let sum23 = vaddq_f32(acc2, acc3);
-            let sum = vaddq_f32(sum01, sum23);
-            let mut scalar = vaddvq_f32(sum);
-
-            // Handle remainder
-            while j < cols {
-                scalar += row[j] * vec[j];
-                j += 1;
-            }
-
-            *out = scalar;
-        }
+        // SAFETY: row.len() == cols, NEON always available on aarch64
+        *out = unsafe { matvec_neon_row(row, vec, cols) };
     }
     output
 }
