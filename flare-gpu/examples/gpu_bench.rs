@@ -11,7 +11,10 @@ fn bench_matvec(gpu: &WebGpuBackend, label: &str, rows: usize, cols: usize, iter
     let mat_bytes = rows * cols * 4;
     // Skip if matrix exceeds GPU buffer limit (~256MB)
     if mat_bytes > 250_000_000 {
-        println!("{label:35} (skipped: {:.0}MB > GPU buffer limit)", mat_bytes as f64 / 1e6);
+        println!(
+            "{label:35} (skipped: {:.0}MB > GPU buffer limit)",
+            mat_bytes as f64 / 1e6
+        );
         return;
     }
 
@@ -38,9 +41,7 @@ fn bench_matvec(gpu: &WebGpuBackend, label: &str, rows: usize, cols: usize, iter
     let gpu_us = start.elapsed().as_micros() as f64 / iters as f64;
 
     let speedup = cpu_us / gpu_us;
-    println!(
-        "{label:35} CPU: {cpu_us:8.0}µs  GPU: {gpu_us:8.0}µs  speedup: {speedup:.2}x"
-    );
+    println!("{label:35} CPU: {cpu_us:8.0}µs  GPU: {gpu_us:8.0}µs  speedup: {speedup:.2}x");
 }
 
 fn main() {

@@ -287,9 +287,9 @@ impl Model {
             let gate =
                 self.backend
                     .matvec(layer.w_gate.data(), &normed, config.intermediate_dim, dim);
-            let up =
-                self.backend
-                    .matvec(layer.w_up.data(), &normed, config.intermediate_dim, dim);
+            let up = self
+                .backend
+                .matvec(layer.w_up.data(), &normed, config.intermediate_dim, dim);
 
             // SiLU(gate) * up
             let ffn_hidden = self.backend.silu_mul_vec(&gate, &up);

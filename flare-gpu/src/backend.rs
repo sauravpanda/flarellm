@@ -122,16 +122,10 @@ impl ComputeBackend for WebGpuBackend {
         let k = cols as u32;
         let n = 1u32;
 
-        let a_buf = buffers::create_storage_buffer(
-            &self.device,
-            "matvec_mat",
-            bytemuck::cast_slice(mat),
-        );
-        let b_buf = buffers::create_storage_buffer(
-            &self.device,
-            "matvec_vec",
-            bytemuck::cast_slice(vec),
-        );
+        let a_buf =
+            buffers::create_storage_buffer(&self.device, "matvec_mat", bytemuck::cast_slice(mat));
+        let b_buf =
+            buffers::create_storage_buffer(&self.device, "matvec_vec", bytemuck::cast_slice(vec));
         let output_size = m as u64 * 4;
         let out_buf = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("matvec_out"),
@@ -231,11 +225,8 @@ impl ComputeBackend for WebGpuBackend {
             "silu_vec_gate",
             bytemuck::cast_slice(gate),
         );
-        let up_buf = buffers::create_storage_buffer(
-            &self.device,
-            "silu_vec_up",
-            bytemuck::cast_slice(up),
-        );
+        let up_buf =
+            buffers::create_storage_buffer(&self.device, "silu_vec_up", bytemuck::cast_slice(up));
         let output_size = size as u64 * 4;
         let out_buf = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("silu_vec_out"),
