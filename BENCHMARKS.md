@@ -92,18 +92,69 @@ Real measurements using `e2e_bench` with SmolLM2-135M-Instruct Q8_0 (138MB, 30 l
 
 ## How to Run
 
+### Single-model benchmark
+
 ```bash
-# End-to-end benchmark (requires model file)
-# Download: huggingface-cli download bartowski/SmolLM2-135M-Instruct-GGUF \
-#   SmolLM2-135M-Instruct-Q8_0.gguf --local-dir models
-cargo run -p flare-server --example e2e_bench --release
+# Download the baseline model (~138 MB)
+./scripts/download_baseline_model.sh
 
-# CPU matvec benchmark (no model needed)
-cargo run -p flare-core --example matvec_bench --release
+# Run e2e benchmark (human-readable)
+cargo run -p flarellm-server --example e2e_bench --release
 
-# GPU vs CPU comparison (no model needed)
-cargo run -p flare-gpu --example gpu_bench --release
+# Append result to BENCHMARK_HISTORY.md
+cargo run -p flarellm-server --example e2e_bench --release -- --log
+
+# Machine-readable JSON output
+cargo run -p flarellm-server --example e2e_bench --release -- --json
+```
+
+### Multi-model benchmark
+
+Place one or more `.gguf` files under `models/`, then:
+
+```bash
+# Benchmark all models (human-readable summary table)
+./scripts/bench_multi.sh
+
+# JSON output — one object per model per line
+./scripts/bench_multi.sh --json
+
+# JSON output + append each result to BENCHMARK_HISTORY.md
+./scripts/bench_multi.sh --json --log
+```
+
+### Performance regression check
+
+```bash
+# Pass/fail check against a 60 tok/s floor (uses baseline model)
+./scripts/check_perf_regression.sh
+
+# Custom threshold
+THRESHOLD_TOK_S=40 ./scripts/check_perf_regression.sh
+
+# Custom model
+MODEL_PATH=models/my-model.gguf THRESHOLD_TOK_S=20 ./scripts/check_perf_regression.sh
+```
+
+### Automated benchmarks (CI)
+
+The `benchmark` GitHub Actions workflow runs nightly and on `workflow_dispatch`.
+It downloads the baseline model, runs the regression check, and uploads the JSON
+result as a build artefact. To trigger manually:
+
+```
+GitHub → Actions → Benchmark → Run workflow
+```
+
+### CPU / GPU microbenchmarks (no model needed)
+
+```bash
+# CPU matvec benchmark
+cargo run -p flarellm-core --example matvec_bench --release
+
+# GPU vs CPU comparison
+cargo run -p flarellm-gpu --example gpu_bench --release
 
 # Full matmul + sampling benchmarks
-cargo bench -p flare-simd
+cargo bench -p flarellm-simd
 ```
