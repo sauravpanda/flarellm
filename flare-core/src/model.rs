@@ -487,20 +487,34 @@ pub fn silu_mul_cpu(gate: &[f32], up: &[f32]) -> Vec<f32> {
 }
 
 /// Apply RoPE to interleaved Q or K vectors (CPU implementation).
+///
+/// Pre-computes (cos, sin) per dimension index once for the given pos/theta/head_dim,
+/// then applies the rotation to all heads. The original code recomputed
+/// `theta.powf` and `sin_cos` per head, wasting work.
 pub fn apply_rope(data: &mut [f32], num_heads: usize, head_dim: usize, pos: usize, theta: f32) {
     let half = head_dim / 2;
+
+    // Precompute cos/sin once for each frequency
+    let mut cos_table = Vec::with_capacity(half);
+    let mut sin_table = Vec::with_capacity(half);
+    for i in 0..half {
+        let freq = 1.0 / theta.powf(2.0 * i as f32 / head_dim as f32);
+        let angle = pos as f32 * freq;
+        let (sin_val, cos_val) = angle.sin_cos();
+        cos_table.push(cos_val);
+        sin_table.push(sin_val);
+    }
+
+    // Apply rotation to all heads using the cached tables
     for h in 0..num_heads {
         let offset = h * head_dim;
         for i in 0..half {
-            let freq = 1.0 / theta.powf(2.0 * i as f32 / head_dim as f32);
-            let angle = pos as f32 * freq;
-            let cos_val = angle.cos();
-            let sin_val = angle.sin();
-
+            let c = cos_table[i];
+            let s = sin_table[i];
             let x0 = data[offset + i];
             let x1 = data[offset + i + half];
-            data[offset + i] = x0 * cos_val - x1 * sin_val;
-            data[offset + i + half] = x0 * sin_val + x1 * cos_val;
+            data[offset + i] = x0 * c - x1 * s;
+            data[offset + i + half] = x0 * s + x1 * c;
         }
     }
 }
