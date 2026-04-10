@@ -1,9 +1,21 @@
 [package]
 name = "flarellm"
-version = "0.0.1"
+version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/sauravpanda/flarellm"
 description = "A WASM-first LLM inference engine with WebGPU acceleration"
 keywords = ["llm", "wasm", "webgpu", "inference", "ai"]
 categories = ["wasm", "science"]
+readme = "../README.md"
+
+[features]
+default = ["loader"]
+loader = ["dep:flarellm-loader"]
+gpu = ["dep:flarellm-gpu"]
+all = ["loader", "gpu"]
+
+[dependencies]
+flarellm-core = { path = "../flare-core", version = "0.1.0" }
+flarellm-loader = { path = "../flare-loader", version = "0.1.0", optional = true }
+flarellm-gpu = { path = "../flare-gpu", version = "0.1.0", optional = true }
