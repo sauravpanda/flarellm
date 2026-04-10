@@ -24,3 +24,24 @@ export declare class FlareProgressiveLoader {
   /** Fetch, stream, and parse the model. Calls onProgress as chunks arrive. */
   load(onProgress: ProgressCallback): Promise<import('../pkg/flare_web').FlareEngine>;
 }
+
+/**
+ * BPE tokenizer: encode text to token IDs and decode token IDs back to text.
+ * Load from a HuggingFace tokenizer.json string.
+ */
+export declare class FlareTokenizer {
+  /** Load from a tokenizer.json string. */
+  static from_json(json: string): FlareTokenizer;
+  /** Encode text to token IDs. */
+  encode(text: string): Uint32Array;
+  /** Decode token IDs to text. */
+  decode(tokens: Uint32Array): string;
+  /** Decode a single token ID to text (for streaming). */
+  decode_one(tokenId: number): string;
+  /** BOS token ID (may be undefined). */
+  readonly bos_token_id: number | undefined;
+  /** EOS token ID (may be undefined). */
+  readonly eos_token_id: number | undefined;
+  /** Vocabulary size. */
+  readonly vocab_size: number;
+}

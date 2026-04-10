@@ -25,6 +25,7 @@ use std::io::Cursor;
 use flare_core::generate::Generator;
 use flare_core::model::Model;
 use flare_core::sampling::SamplingParams;
+use flare_core::tokenizer::{BpeTokenizer, Tokenizer};
 use flare_loader::gguf::GgufFile;
 use flare_loader::weights::{load_model_weights, load_model_weights_with_progress};
 use wasm_bindgen::prelude::*;
@@ -306,5 +307,80 @@ impl FlareProgressiveLoader {
         Ok(FlareEngine {
             model: Model::new(config, weights),
         })
+    }
+}
+
+/// BPE tokenizer exported to JS for encoding prompts and decoding generated tokens.
+///
+/// Load from a HuggingFace `tokenizer.json` string, then use `encode` / `decode`
+/// in coordination with `FlareEngine` to run full text-in / text-out inference.
+///
+/// # JS example
+///
+/// ```javascript
+/// const resp = await fetch('tokenizer.json');
+/// const json = await resp.text();
+/// const tok = FlareTokenizer.from_json(json);
+///
+/// const ids = tok.encode("Hello, world!");
+/// const engine = FlareEngine.load(modelBytes);
+/// const out = engine.generate_tokens(ids, 64);
+/// console.log(tok.decode(out));
+/// ```
+#[wasm_bindgen]
+pub struct FlareTokenizer {
+    inner: BpeTokenizer,
+}
+
+#[wasm_bindgen]
+impl FlareTokenizer {
+    /// Load a tokenizer from the text of a HuggingFace `tokenizer.json` file.
+    #[wasm_bindgen]
+    pub fn from_json(json: &str) -> Result<FlareTokenizer, JsError> {
+        let inner = BpeTokenizer::from_json(json)
+            .map_err(|e| JsError::new(&format!("tokenizer load error: {e}")))?;
+        Ok(FlareTokenizer { inner })
+    }
+
+    /// Encode text to a sequence of token IDs.
+    #[wasm_bindgen]
+    pub fn encode(&self, text: &str) -> Result<Vec<u32>, JsError> {
+        self.inner
+            .encode(text)
+            .map_err(|e| JsError::new(&format!("encode error: {e}")))
+    }
+
+    /// Decode a sequence of token IDs to text.
+    #[wasm_bindgen]
+    pub fn decode(&self, tokens: &[u32]) -> Result<String, JsError> {
+        self.inner
+            .decode(tokens)
+            .map_err(|e| JsError::new(&format!("decode error: {e}")))
+    }
+
+    /// Decode a single token ID to text (useful for streaming output).
+    #[wasm_bindgen]
+    pub fn decode_one(&self, token_id: u32) -> Result<String, JsError> {
+        self.inner
+            .decode(&[token_id])
+            .map_err(|e| JsError::new(&format!("decode error: {e}")))
+    }
+
+    /// BOS (beginning of sequence) token ID, if defined.
+    #[wasm_bindgen(getter)]
+    pub fn bos_token_id(&self) -> Option<u32> {
+        self.inner.bos_token_id()
+    }
+
+    /// EOS (end of sequence) token ID, if defined.
+    #[wasm_bindgen(getter)]
+    pub fn eos_token_id(&self) -> Option<u32> {
+        self.inner.eos_token_id()
+    }
+
+    /// Vocabulary size.
+    #[wasm_bindgen(getter)]
+    pub fn vocab_size(&self) -> u32 {
+        self.inner.vocab_size() as u32
     }
 }
