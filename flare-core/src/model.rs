@@ -11,7 +11,7 @@ pub trait ComputeBackend: Send + Sync {
     fn softmax(&self, input: &mut Tensor);
     fn silu_mul(&self, gate: &Tensor, up: &Tensor, output: &mut Tensor);
 
-    /// Matrix-vector multiply: output[rows] = mat[rows, cols] * vec[cols].
+    /// Matrix-vector multiply: `output[rows]` = `mat[rows, cols]` * `vec[cols]`.
     /// Default implementation reshapes into matmul, but backends can override
     /// with a more efficient kernel.
     fn matvec(&self, mat: &[f32], vec: &[f32], rows: usize, cols: usize) -> Vec<f32> {
@@ -192,7 +192,7 @@ impl Model {
     }
 
     /// Run a single forward pass for one token position.
-    /// Returns logits over the vocabulary [vocab_size].
+    /// Returns logits over the vocabulary `[vocab_size]`.
     ///
     /// Delegates heavy compute (matvec, rmsnorm, rope, silu_mul) to the
     /// active `ComputeBackend`. By default this is `CpuBackend`; call
@@ -424,7 +424,7 @@ unsafe fn rmsnorm_neon(x: &[f32], weight: &[f32], eps: f32) -> Vec<f32> {
     output
 }
 
-/// Matrix-vector multiply: output[rows] = mat[rows, cols] * vec[cols] (CPU implementation).
+/// Matrix-vector multiply: `output[rows]` = `mat[rows, cols]` * `vec[cols]` (CPU implementation).
 ///
 /// Dispatches to platform-specific SIMD implementations:
 /// - ARM NEON (aarch64): 4-wide f32 SIMD, 4 accumulators (16 elements/iter), compile-time
