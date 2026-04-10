@@ -158,6 +158,9 @@ mod tests {
             w_gate: make_tensor(inter * dim),
             w_up: make_tensor(inter * dim),
             w_down: make_tensor(dim * inter),
+            attn_q_bias: None,
+            attn_k_bias: None,
+            attn_v_bias: None,
         };
 
         let weights = ModelWeights {

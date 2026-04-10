@@ -23,6 +23,10 @@ pub struct LayerWeights {
     pub w_gate: Tensor,
     pub w_up: Tensor,
     pub w_down: Tensor,
+    // Optional attention biases (Qwen2 uses these, Llama does not)
+    pub attn_q_bias: Option<Tensor>,
+    pub attn_k_bias: Option<Tensor>,
+    pub attn_v_bias: Option<Tensor>,
 }
 
 /// Complete model weights.
@@ -99,13 +103,26 @@ impl Model {
             let normed = rmsnorm(x.data(), layer.attn_norm.data(), config.rms_norm_eps);
 
             // QKV projections
-            let q_data = matvec(layer.wq.data(), &normed, num_heads * head_dim, dim);
-            let k_data = matvec(layer.wk.data(), &normed, kv_dim, dim);
-            let v_data = matvec(layer.wv.data(), &normed, kv_dim, dim);
+            let mut q_data = matvec(layer.wq.data(), &normed, num_heads * head_dim, dim);
+            let mut k_data = matvec(layer.wk.data(), &normed, kv_dim, dim);
+            let mut v_data = matvec(layer.wv.data(), &normed, kv_dim, dim);
 
-            // Apply RoPE to Q and K
-            let mut q_data = q_data;
-            let mut k_data = k_data;
+            // Add attention biases if present (Qwen2)
+            if let Some(bias) = &layer.attn_q_bias {
+                for (q, &b) in q_data.iter_mut().zip(bias.data().iter()) {
+                    *q += b;
+                }
+            }
+            if let Some(bias) = &layer.attn_k_bias {
+                for (k, &b) in k_data.iter_mut().zip(bias.data().iter()) {
+                    *k += b;
+                }
+            }
+            if let Some(bias) = &layer.attn_v_bias {
+                for (v, &b) in v_data.iter_mut().zip(bias.data().iter()) {
+                    *v += b;
+                }
+            }
             apply_rope(&mut q_data, num_heads, head_dim, pos, config.rope_theta);
             apply_rope(&mut k_data, num_kv_heads, head_dim, pos, config.rope_theta);
 
@@ -391,6 +408,9 @@ mod tests {
             w_gate: Tensor::from_vec(make_weights(inter * dim), &[inter * dim]).unwrap(),
             w_up: Tensor::from_vec(make_weights(inter * dim), &[inter * dim]).unwrap(),
             w_down: Tensor::from_vec(make_weights(dim * inter), &[dim * inter]).unwrap(),
+            attn_q_bias: None,
+            attn_k_bias: None,
+            attn_v_bias: None,
         };
 
         let weights = ModelWeights {
@@ -494,6 +514,9 @@ mod tests {
             w_gate: Tensor::from_vec(zero_4x4.clone(), &[16]).unwrap(),
             w_up: Tensor::from_vec(zero_4x4.clone(), &[16]).unwrap(),
             w_down: Tensor::from_vec(zero_4x4, &[16]).unwrap(),
+            attn_q_bias: None,
+            attn_k_bias: None,
+            attn_v_bias: None,
         };
 
         // Embedding: token 0 = [1, 2, 3, 4]
@@ -571,6 +594,9 @@ mod tests {
             w_gate: Tensor::from_vec(make_w(inter * dim), &[inter * dim]).unwrap(),
             w_up: Tensor::from_vec(make_w(inter * dim), &[inter * dim]).unwrap(),
             w_down: Tensor::from_vec(make_w(dim * inter), &[dim * inter]).unwrap(),
+            attn_q_bias: None,
+            attn_k_bias: None,
+            attn_v_bias: None,
         };
 
         let weights = ModelWeights {
@@ -621,6 +647,9 @@ mod tests {
             w_gate: Tensor::from_vec(make_weights(inter * dim), &[inter * dim]).unwrap(),
             w_up: Tensor::from_vec(make_weights(inter * dim), &[inter * dim]).unwrap(),
             w_down: Tensor::from_vec(make_weights(dim * inter), &[dim * inter]).unwrap(),
+            attn_q_bias: None,
+            attn_k_bias: None,
+            attn_v_bias: None,
         };
 
         let weights = ModelWeights {
