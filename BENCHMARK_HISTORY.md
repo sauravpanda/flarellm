@@ -52,3 +52,29 @@ Baseline model: SmolLM2-135M-Instruct Q8_0 (138MB, 30 layers, dim=576).
 | Decode (256 tok) | 107.3 |
 | Sustained (512 tok) | **93.1** |
 
+### 2026-04-09 20:36 — `7c9cede Add benchmark history log with --log flag (#65)`
+
+**Hardware:** Apple M5 Pro, ARM64 (NEON SIMD)  
+**Model:** Llama, ~162M params, 30 layers, dim=576  
+**Load time:** 0.11s
+
+| Metric | tok/s |
+|---|---|
+| Decode (16 tok) | 134.1 |
+| Decode (64 tok) | 131.8 |
+| Decode (256 tok) | 116.3 |
+| Sustained (512 tok) | **101.4** |
+
+### 2026-04-09 20:37 — `7c9cede Add benchmark history log with --log flag (#65)`
+
+**Hardware:** Apple M5 Pro, ARM64 (NEON SIMD)  
+**Model:** Llama, ~1498M params, 16 layers, dim=2048  
+**Load time:** 0.87s
+
+| Metric | tok/s |
+|---|---|
+| Decode (16 tok) | 22.4 |
+| Decode (64 tok) | 25.9 |
+| Decode (256 tok) | 23.9 |
+| Sustained (512 tok) | **23.2** |
+
