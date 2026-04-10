@@ -8,6 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `@aspect/flare` npm package: automated publishing workflow triggered on GitHub releases; `npm pack --dry-run` validation added to WASM CI job (#52)
+- `FlareProgressiveLoader` WASM export: fetch a GGUF model from a URL with streaming byte-level download progress (#50)
+- `load_model_weights_with_progress` in `flare-loader` for layer-by-layer parse callbacks (#50)
+- Browser demo tabbed UI with URL-based progressive loading and live progress bar (#50)
+- Browser quickstart section in README with `@aspect/flare` npm install example (#52)
 - ARM NEON SIMD matvec with 4-way accumulator unrolling (#59)
 - x86_64 AVX2+FMA SIMD matvec with runtime feature detection (#74)
 - Rayon parallelism for matvec on large matrices (5M+ FMAs threshold) (#72)

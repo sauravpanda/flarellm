@@ -1,17 +1,31 @@
 {
   "name": "@aspect/flare",
   "version": "0.1.0",
-  "description": "WASM-first LLM inference engine with WebGPU acceleration",
+  "description": "WASM-first LLM inference engine with WebGPU acceleration — run LLMs in the browser with zero server costs",
+  "type": "module",
   "main": "pkg/flare_web.js",
-  "types": "js/types.ts",
+  "module": "pkg/flare_web.js",
+  "types": "pkg/flare_web.d.ts",
   "files": [
-    "pkg/",
-    "js/"
+    "pkg/flare_web_bg.wasm",
+    "pkg/flare_web_bg.wasm.d.ts",
+    "pkg/flare_web.js",
+    "pkg/flare_web.d.ts",
+    "pkg/package.json",
+    "js/",
+    "demo/"
   ],
   "scripts": {
     "build": "wasm-pack build --target web --out-dir pkg",
     "build:node": "wasm-pack build --target nodejs --out-dir pkg-node",
-    "build:bundler": "wasm-pack build --target bundler --out-dir pkg-bundler"
+    "build:bundler": "wasm-pack build --target bundler --out-dir pkg-bundler",
+    "prepublishOnly": "npm run build"
+  },
+  "exports": {
+    ".": {
+      "import": "./pkg/flare_web.js",
+      "types": "./pkg/flare_web.d.ts"
+    }
   },
   "keywords": [
     "llm",
@@ -19,11 +33,26 @@
     "webgpu",
     "inference",
     "ai",
-    "rust"
+    "rust",
+    "browser",
+    "gguf",
+    "transformer"
   ],
   "license": "MIT OR Apache-2.0",
   "repository": {
     "type": "git",
-    "url": "https://github.com/sauravpanda/flarellm"
+    "url": "git+https://github.com/sauravpanda/flarellm.git",
+    "directory": "flare-web"
+  },
+  "bugs": {
+    "url": "https://github.com/sauravpanda/flarellm/issues"
+  },
+  "homepage": "https://github.com/sauravpanda/flarellm#readme",
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  },
+  "engines": {
+    "node": ">=18"
   }
 }

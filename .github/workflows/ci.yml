@@ -63,6 +63,13 @@ jobs:
         run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
       - name: Build flare-web for WASM
         run: wasm-pack build flare-web --target web
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Verify npm package contents (dry run)
+        working-directory: flare-web
+        run: npm pack --dry-run
 
   doc:
     name: Doc build
