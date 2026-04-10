@@ -333,6 +333,19 @@ impl Model {
 
 /// RMSNorm: normalize and scale (CPU implementation).
 pub fn rmsnorm(x: &[f32], weight: &[f32], eps: f32) -> Vec<f32> {
+    #[cfg(target_arch = "aarch64")]
+    {
+        // SAFETY: NEON always available on aarch64
+        unsafe { rmsnorm_neon(x, weight, eps) }
+    }
+    #[cfg(not(target_arch = "aarch64"))]
+    {
+        rmsnorm_scalar(x, weight, eps)
+    }
+}
+
+#[cfg(not(target_arch = "aarch64"))]
+fn rmsnorm_scalar(x: &[f32], weight: &[f32], eps: f32) -> Vec<f32> {
     let dim = x.len();
     let sum_sq: f32 = x.iter().map(|v| v * v).sum();
     let rms = (sum_sq / dim as f32 + eps).sqrt();
@@ -340,6 +353,75 @@ pub fn rmsnorm(x: &[f32], weight: &[f32], eps: f32) -> Vec<f32> {
         .zip(weight.iter())
         .map(|(&xi, &wi)| (xi / rms) * wi)
         .collect()
+}
+
+/// NEON SIMD RMSNorm: vectorized sum-of-squares and normalize.
+#[cfg(target_arch = "aarch64")]
+unsafe fn rmsnorm_neon(x: &[f32], weight: &[f32], eps: f32) -> Vec<f32> {
+    use std::arch::aarch64::*;
+    let dim = x.len();
+    let dim16 = dim & !15;
+
+    // Phase 1: vectorized sum-of-squares with 4 accumulators
+    let mut acc0 = vdupq_n_f32(0.0);
+    let mut acc1 = vdupq_n_f32(0.0);
+    let mut acc2 = vdupq_n_f32(0.0);
+    let mut acc3 = vdupq_n_f32(0.0);
+
+    let mut j = 0usize;
+    while j < dim16 {
+        let v0 = vld1q_f32(x.as_ptr().add(j));
+        acc0 = vfmaq_f32(acc0, v0, v0);
+        let v1 = vld1q_f32(x.as_ptr().add(j + 4));
+        acc1 = vfmaq_f32(acc1, v1, v1);
+        let v2 = vld1q_f32(x.as_ptr().add(j + 8));
+        acc2 = vfmaq_f32(acc2, v2, v2);
+        let v3 = vld1q_f32(x.as_ptr().add(j + 12));
+        acc3 = vfmaq_f32(acc3, v3, v3);
+        j += 16;
+    }
+    let sum_v = vaddq_f32(vaddq_f32(acc0, acc1), vaddq_f32(acc2, acc3));
+    let mut sum_sq = vaddvq_f32(sum_v);
+    while j < dim {
+        sum_sq += x[j] * x[j];
+        j += 1;
+    }
+
+    let rms = (sum_sq / dim as f32 + eps).sqrt();
+    let inv_rms = 1.0 / rms;
+    let inv_rms_v = vdupq_n_f32(inv_rms);
+
+    // Phase 2: vectorized output = (x * inv_rms) * weight
+    let mut output = vec![0.0f32; dim];
+    let mut j = 0usize;
+    while j < dim16 {
+        let v0 = vld1q_f32(x.as_ptr().add(j));
+        let w0 = vld1q_f32(weight.as_ptr().add(j));
+        let r0 = vmulq_f32(vmulq_f32(v0, inv_rms_v), w0);
+        vst1q_f32(output.as_mut_ptr().add(j), r0);
+
+        let v1 = vld1q_f32(x.as_ptr().add(j + 4));
+        let w1 = vld1q_f32(weight.as_ptr().add(j + 4));
+        let r1 = vmulq_f32(vmulq_f32(v1, inv_rms_v), w1);
+        vst1q_f32(output.as_mut_ptr().add(j + 4), r1);
+
+        let v2 = vld1q_f32(x.as_ptr().add(j + 8));
+        let w2 = vld1q_f32(weight.as_ptr().add(j + 8));
+        let r2 = vmulq_f32(vmulq_f32(v2, inv_rms_v), w2);
+        vst1q_f32(output.as_mut_ptr().add(j + 8), r2);
+
+        let v3 = vld1q_f32(x.as_ptr().add(j + 12));
+        let w3 = vld1q_f32(weight.as_ptr().add(j + 12));
+        let r3 = vmulq_f32(vmulq_f32(v3, inv_rms_v), w3);
+        vst1q_f32(output.as_mut_ptr().add(j + 12), r3);
+
+        j += 16;
+    }
+    while j < dim {
+        output[j] = (x[j] * inv_rms) * weight[j];
+        j += 1;
+    }
+    output
 }
 
 /// Matrix-vector multiply: output[rows] = mat[rows, cols] * vec[cols] (CPU implementation).
