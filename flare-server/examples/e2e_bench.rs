@@ -1,13 +1,16 @@
 //! End-to-end inference benchmark using SmolLM2-135M Q8_0.
 //!
 //! Run with:
-//!   cargo run -p flare-server --example e2e_bench --release
+//!   cargo run -p flarellm-server --example e2e_bench --release
 //!
 //! Append results to the benchmark history log:
-//!   cargo run -p flare-server --example e2e_bench --release -- --log
+//!   cargo run -p flarellm-server --example e2e_bench --release -- --log
+//!
+//! Output as JSON (machine-readable, one object per line):
+//!   cargo run -p flarellm-server --example e2e_bench --release -- --json
 //!
 //! Set MODEL_PATH env var to use a different model:
-//!   MODEL_PATH=path/to/model.gguf cargo run -p flare-server --example e2e_bench --release
+//!   MODEL_PATH=path/to/model.gguf cargo run -p flarellm-server --example e2e_bench --release
 
 use std::fs::{File, OpenOptions};
 use std::io::{BufReader, Write};
@@ -28,6 +31,7 @@ const HISTORY_FILE: &str = "BENCHMARK_HISTORY.md";
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let log_mode = args.iter().any(|a| a == "--log");
+    let json_mode = args.iter().any(|a| a == "--json");
 
     let model_path = std::env::var("MODEL_PATH")
         .unwrap_or_else(|_| format!("{DEFAULT_MODEL_DIR}/{DEFAULT_MODEL_NAME}"));
@@ -115,23 +119,46 @@ fn main() {
     let git_info = get_git_info();
     let date = get_date();
 
-    println!();
-    println!("Flare E2E Benchmark");
-    println!("========================================");
-    println!("Date:     {date}");
-    println!("Commit:   {git_info}");
-    println!("Hardware: {hw}");
-    println!("Model:    {model_info}");
-    println!("Load:     {:.2}s", load_time.as_secs_f64());
-    println!();
-    println!("Generation speed (greedy, prompt={prompt_len} tokens):");
-    for &(gen_count, prefill, decode) in &results {
-        println!(
-            "  gen={gen_count:>3}  prefill: {prefill:>7.1} tok/s  decode: {decode:>6.1} tok/s"
-        );
+    if json_mode {
+        // Machine-readable JSON output
+        print!("{{");
+        print!("\"date\":\"{date}\",");
+        print!("\"commit\":\"{}\",", json_escape(&git_info));
+        print!("\"hardware\":\"{}\",", json_escape(&hw));
+        print!("\"model\":\"{}\",", json_escape(&model_info));
+        print!("\"load_secs\":{:.3},", load_time.as_secs_f64());
+        print!("\"prompt_len\":{prompt_len},");
+        print!("\"generation\":[");
+        for (i, &(gen_count, prefill, decode)) in results.iter().enumerate() {
+            if i > 0 {
+                print!(",");
+            }
+            print!(
+                "{{\"gen_count\":{gen_count},\"prefill_tok_s\":{prefill:.2},\"decode_tok_s\":{decode:.2}}}"
+            );
+        }
+        print!("],");
+        print!("\"sustained_512_tok_s\":{sustained_tok_s:.2}");
+        println!("}}");
+    } else {
+        println!();
+        println!("Flare E2E Benchmark");
+        println!("========================================");
+        println!("Date:     {date}");
+        println!("Commit:   {git_info}");
+        println!("Hardware: {hw}");
+        println!("Model:    {model_info}");
+        println!("Load:     {:.2}s", load_time.as_secs_f64());
+        println!();
+        println!("Generation speed (greedy, prompt={prompt_len} tokens):");
+        for &(gen_count, prefill, decode) in &results {
+            println!(
+                "  gen={gen_count:>3}  prefill: {prefill:>7.1} tok/s  decode: {decode:>6.1} tok/s"
+            );
+        }
+        println!();
+        println!("Sustained decode (512 tokens): {sustained_tok_s:.1} tok/s");
     }
-    println!();
-    println!("Sustained decode (512 tokens): {sustained_tok_s:.1} tok/s");
 
     // --- Append to history log ---
     if log_mode {
@@ -280,6 +307,10 @@ fn get_git_info() -> String {
     } else {
         format!("{hash} {subject}")
     }
+}
+
+fn json_escape(s: &str) -> String {
+    s.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
 fn get_date() -> String {
