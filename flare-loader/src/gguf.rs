@@ -341,7 +341,7 @@ fn dequantize_tensor(raw: &[u8], dtype: QuantFormat, numel: usize) -> Result<Vec
         QuantFormat::Q8_0 => {
             let block_size = 32;
             let block_bytes = 34; // 2 (scale) + 32 (data)
-            let num_blocks = numel / block_size;
+            let num_blocks = numel.div_ceil(block_size);
             let mut data = vec![0.0f32; numel];
             for b in 0..num_blocks {
                 let block = &raw[b * block_bytes..(b + 1) * block_bytes];
@@ -354,7 +354,7 @@ fn dequantize_tensor(raw: &[u8], dtype: QuantFormat, numel: usize) -> Result<Vec
         QuantFormat::Q4_0 => {
             let block_size = 32;
             let block_bytes = 18; // 2 (scale) + 16 (data)
-            let num_blocks = numel / block_size;
+            let num_blocks = numel.div_ceil(block_size);
             let mut data = vec![0.0f32; numel];
             for b in 0..num_blocks {
                 let block = &raw[b * block_bytes..(b + 1) * block_bytes];
@@ -367,7 +367,7 @@ fn dequantize_tensor(raw: &[u8], dtype: QuantFormat, numel: usize) -> Result<Vec
         QuantFormat::Q5_0 => {
             let block_size = 32;
             let block_bytes = 22; // 2 (scale) + 4 (high bits) + 16 (nibbles)
-            let num_blocks = numel / block_size;
+            let num_blocks = numel.div_ceil(block_size);
             let mut data = vec![0.0f32; numel];
             for b in 0..num_blocks {
                 let block = &raw[b * block_bytes..(b + 1) * block_bytes];
@@ -377,47 +377,33 @@ fn dequantize_tensor(raw: &[u8], dtype: QuantFormat, numel: usize) -> Result<Vec
             }
             Ok(data)
         }
-        QuantFormat::Q6K => {
-            let block_size = 256;
-            let block_bytes = 210;
-            let num_blocks = numel / block_size;
-            let mut data = vec![0.0f32; numel];
-            for b in 0..num_blocks {
-                let block = &raw[b * block_bytes..(b + 1) * block_bytes];
-                let mut out = [0.0f32; 256];
-                quantize::dequant_q6k_block(block, &mut out);
-                data[b * block_size..(b + 1) * block_size].copy_from_slice(&out);
-            }
-            Ok(data)
-        }
-        QuantFormat::Q4K => {
-            let block_size = 256;
-            let block_bytes = 144;
-            let num_blocks = numel / block_size;
-            let mut data = vec![0.0f32; numel];
-            for b in 0..num_blocks {
-                let block = &raw[b * block_bytes..(b + 1) * block_bytes];
-                let mut out = [0.0f32; 256];
-                quantize::dequant_q4k_block(block, &mut out);
-                data[b * block_size..(b + 1) * block_size].copy_from_slice(&out);
-            }
-            Ok(data)
-        }
-        QuantFormat::Q5K => {
-            let block_size = 256;
-            let block_bytes = 176;
-            let num_blocks = numel / block_size;
-            let mut data = vec![0.0f32; numel];
-            for b in 0..num_blocks {
-                let block = &raw[b * block_bytes..(b + 1) * block_bytes];
-                let mut out = [0.0f32; 256];
-                quantize::dequant_q5k_block(block, &mut out);
-                data[b * block_size..(b + 1) * block_size].copy_from_slice(&out);
-            }
-            Ok(data)
-        }
+        QuantFormat::Q6K => dequant_k_blocks(numel, 256, 210, &raw, quantize::dequant_q6k_block),
+        QuantFormat::Q4K => dequant_k_blocks(numel, 256, 144, &raw, quantize::dequant_q4k_block),
+        QuantFormat::Q5K => dequant_k_blocks(numel, 256, 176, &raw, quantize::dequant_q5k_block),
         other => Err(GgufError::UnsupportedQuant(other)),
     }
+}
+
+/// Dequantize K-quant blocks (Q4_K, Q5_K, Q6_K) with proper handling of
+/// partial last blocks when numel is not a multiple of block_size.
+fn dequant_k_blocks(
+    numel: usize,
+    block_size: usize,
+    block_bytes: usize,
+    raw: &[u8],
+    dequant_fn: fn(&[u8], &mut [f32; 256]),
+) -> Result<Vec<f32>, GgufError> {
+    let num_blocks = numel.div_ceil(block_size);
+    let mut data = vec![0.0f32; numel];
+    for b in 0..num_blocks {
+        let block = &raw[b * block_bytes..(b + 1) * block_bytes];
+        let mut out = [0.0f32; 256];
+        dequant_fn(block, &mut out);
+        let start = b * block_size;
+        let end = (start + block_size).min(numel);
+        data[start..end].copy_from_slice(&out[..end - start]);
+    }
+    Ok(data)
 }
 
 fn read_gguf_string<R: Read>(reader: &mut R) -> Result<String, GgufError> {
@@ -704,5 +690,28 @@ mod tests {
         let result = GgufFile::parse_header(&mut cursor);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("99"));
+    }
+
+    #[test]
+    fn test_dequant_k_blocks_partial_last_block() {
+        // 300 elements with block_size=256 → 2 blocks, last has only 44 elements
+        fn dummy_dequant(block: &[u8], out: &mut [f32; 256]) {
+            let _ = block;
+            for (i, v) in out.iter_mut().enumerate() {
+                *v = i as f32;
+            }
+        }
+
+        // 2 blocks × 144 bytes = 288 bytes of raw data
+        let raw = vec![0u8; 288];
+        let result = super::dequant_k_blocks(300, 256, 144, &raw, dummy_dequant).unwrap();
+
+        assert_eq!(result.len(), 300);
+        // First block: 0..255
+        assert_eq!(result[0], 0.0);
+        assert_eq!(result[255], 255.0);
+        // Second block (partial): only 44 elements copied
+        assert_eq!(result[256], 0.0); // out[0] of second block
+        assert_eq!(result[299], 43.0); // out[43] of second block
     }
 }
