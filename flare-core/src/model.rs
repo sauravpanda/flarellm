@@ -344,11 +344,82 @@ pub fn rmsnorm(x: &[f32], weight: &[f32], eps: f32) -> Vec<f32> {
 
 /// Matrix-vector multiply: output[rows] = mat[rows, cols] * vec[cols] (CPU implementation).
 ///
-/// Uses 4-wide manual unrolling for better ILP and auto-vectorization.
-/// For a [576, 1536] matrix, this is ~2-3x faster than a naive loop.
+/// Dispatches to platform-specific SIMD implementations at compile time:
+/// - ARM NEON: 4-wide f32 SIMD with 4-way accumulator unrolling (16 elements/iter)
+/// - Fallback: 4-wide scalar unrolling for auto-vectorization
 pub fn matvec(mat: &[f32], vec: &[f32], rows: usize, cols: usize) -> Vec<f32> {
+    #[cfg(target_arch = "aarch64")]
+    {
+        matvec_neon(mat, vec, rows, cols)
+    }
+    #[cfg(not(target_arch = "aarch64"))]
+    {
+        matvec_scalar(mat, vec, rows, cols)
+    }
+}
+
+/// ARM NEON SIMD matvec: 4 f32 lanes × 4 accumulators = 16 elements per iteration.
+#[cfg(target_arch = "aarch64")]
+fn matvec_neon(mat: &[f32], vec: &[f32], rows: usize, cols: usize) -> Vec<f32> {
+    use std::arch::aarch64::*;
+
     let mut output = vec![0.0f32; rows];
-    let cols4 = cols & !3; // round down to multiple of 4
+    let cols16 = cols & !15; // round down to 16
+
+    for (i, out) in output.iter_mut().enumerate() {
+        let row = &mat[i * cols..i * cols + cols];
+
+        // Safety: we stay within bounds (cols16 <= cols), and aarch64 NEON is always available.
+        unsafe {
+            let mut acc0 = vdupq_n_f32(0.0);
+            let mut acc1 = vdupq_n_f32(0.0);
+            let mut acc2 = vdupq_n_f32(0.0);
+            let mut acc3 = vdupq_n_f32(0.0);
+
+            let mut j = 0usize;
+            while j < cols16 {
+                let r0 = vld1q_f32(row.as_ptr().add(j));
+                let v0 = vld1q_f32(vec.as_ptr().add(j));
+                acc0 = vfmaq_f32(acc0, r0, v0);
+
+                let r1 = vld1q_f32(row.as_ptr().add(j + 4));
+                let v1 = vld1q_f32(vec.as_ptr().add(j + 4));
+                acc1 = vfmaq_f32(acc1, r1, v1);
+
+                let r2 = vld1q_f32(row.as_ptr().add(j + 8));
+                let v2 = vld1q_f32(vec.as_ptr().add(j + 8));
+                acc2 = vfmaq_f32(acc2, r2, v2);
+
+                let r3 = vld1q_f32(row.as_ptr().add(j + 12));
+                let v3 = vld1q_f32(vec.as_ptr().add(j + 12));
+                acc3 = vfmaq_f32(acc3, r3, v3);
+
+                j += 16;
+            }
+
+            // Reduce 4 accumulators → scalar
+            let sum01 = vaddq_f32(acc0, acc1);
+            let sum23 = vaddq_f32(acc2, acc3);
+            let sum = vaddq_f32(sum01, sum23);
+            let mut scalar = vaddvq_f32(sum);
+
+            // Handle remainder
+            while j < cols {
+                scalar += row[j] * vec[j];
+                j += 1;
+            }
+
+            *out = scalar;
+        }
+    }
+    output
+}
+
+/// Scalar fallback matvec with 4-wide unrolling for auto-vectorization.
+#[cfg(not(target_arch = "aarch64"))]
+fn matvec_scalar(mat: &[f32], vec: &[f32], rows: usize, cols: usize) -> Vec<f32> {
+    let mut output = vec![0.0f32; rows];
+    let cols4 = cols & !3;
 
     for (i, out) in output.iter_mut().enumerate() {
         let row = &mat[i * cols..(i + 1) * cols];
@@ -357,7 +428,6 @@ pub fn matvec(mat: &[f32], vec: &[f32], rows: usize, cols: usize) -> Vec<f32> {
         let mut sum2 = 0.0f32;
         let mut sum3 = 0.0f32;
 
-        // 4-wide unrolled inner loop
         let mut j = 0;
         while j < cols4 {
             sum0 += row[j] * vec[j];
@@ -366,7 +436,6 @@ pub fn matvec(mat: &[f32], vec: &[f32], rows: usize, cols: usize) -> Vec<f32> {
             sum3 += row[j + 3] * vec[j + 3];
             j += 4;
         }
-        // Handle remainder
         while j < cols {
             sum0 += row[j] * vec[j];
             j += 1;
