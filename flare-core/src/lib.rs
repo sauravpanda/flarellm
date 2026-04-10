@@ -30,4 +30,5 @@ pub mod tokenizer;
 pub use config::ModelConfig;
 pub use error::{FlareError, ModelError};
 pub use generate::Generator;
+pub use model::CpuBackend;
 pub use tensor::Tensor;

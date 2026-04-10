@@ -37,9 +37,20 @@ impl MemoryBudget {
 
     /// Native budget: effectively unlimited for small models.
     pub fn native() -> Self {
+        // On wasm32, usize is 32-bit so we cap at safe values; native gets 16GB/8GB.
+        #[cfg(target_pointer_width = "64")]
+        const TOTAL: usize = 16 * 1024 * 1024 * 1024; // 16GB
+        #[cfg(not(target_pointer_width = "64"))]
+        const TOTAL: usize = 3500 * 1024 * 1024; // 3.5GB (max safe on 32-bit)
+
+        #[cfg(target_pointer_width = "64")]
+        const GPU: usize = 8 * 1024 * 1024 * 1024; // 8GB
+        #[cfg(not(target_pointer_width = "64"))]
+        const GPU: usize = 2 * 1024 * 1024 * 1024; // 2GB
+
         Self {
-            total_bytes: 16 * 1024 * 1024 * 1024, // 16GB
-            gpu_bytes: 8 * 1024 * 1024 * 1024,    // 8GB
+            total_bytes: TOTAL,
+            gpu_bytes: GPU,
             label: "Native".into(),
         }
     }
