@@ -1,8 +1,18 @@
 # Flare LLM
 
+[![CI](https://github.com/sauravpanda/flarellm/actions/workflows/ci.yml/badge.svg)](https://github.com/sauravpanda/flarellm/actions/workflows/ci.yml)
+[![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](LICENSE)
+[![Rust](https://img.shields.io/badge/rust-stable-orange.svg)](https://www.rust-lang.org)
+
 A WASM-first LLM inference engine with WebGPU acceleration, built in pure Rust.
 
 Run large language models directly in the browser with zero server costs. Single codebase compiles to both native and WebAssembly.
+
+**Current performance** (M5 Pro, ARM NEON SIMD + rayon parallelism):
+- SmolLM2-135M Q8_0: **~120 tok/s** decode (was 19 at session start, 6.3x faster)
+- Llama-3.2-1B Q8_0: **~25 tok/s** decode
+
+See [`BENCHMARK_HISTORY.md`](BENCHMARK_HISTORY.md) for the full performance log.
 
 ## Why Flare?
 
@@ -29,12 +39,20 @@ Run large language models directly in the browser with zero server costs. Single
 
 ### Installation
 
-Add to your `Cargo.toml`:
+Add the umbrella crate to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-flare-core = "0.1"
-flare-loader = "0.1"
+flarellm = "0.1"
+```
+
+Or pick individual crates:
+
+```toml
+[dependencies]
+flarellm-core = "0.1"     # tensor, model, sampling
+flarellm-loader = "0.1"   # GGUF / SafeTensors loading
+flarellm-gpu = "0.1"      # WebGPU compute backend (optional)
 ```
 
 ### Load and Run a GGUF Model
