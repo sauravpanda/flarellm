@@ -1,0 +1,168 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Flare LLM Browser Demo</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+    }
+    body {
+      max-width: 720px;
+      margin: 2rem auto;
+      padding: 0 1rem;
+      line-height: 1.5;
+    }
+    h1 { margin-bottom: 0.25rem; }
+    .subtitle { opacity: 0.7; margin-top: 0; }
+    .panel {
+      border: 1px solid #8884;
+      border-radius: 8px;
+      padding: 1rem;
+      margin: 1rem 0;
+    }
+    button {
+      font: inherit;
+      padding: 0.5rem 1rem;
+      border: 1px solid #8888;
+      border-radius: 4px;
+      background: #8881;
+      cursor: pointer;
+    }
+    button:disabled { opacity: 0.5; cursor: not-allowed; }
+    button:hover:not(:disabled) { background: #8882; }
+    pre {
+      background: #8881;
+      padding: 0.75rem;
+      border-radius: 4px;
+      overflow-x: auto;
+      font-size: 0.9rem;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+    .stats { font-size: 0.85rem; opacity: 0.8; }
+    .error { color: #d33; }
+    progress { width: 100%; }
+  </style>
+</head>
+<body>
+  <h1>Flare LLM</h1>
+  <p class="subtitle">WASM-first LLM inference, running entirely in your browser.</p>
+
+  <div class="panel">
+    <h3>Status</h3>
+    <p id="status">Initializing WASM module...</p>
+    <p class="stats" id="env"></p>
+  </div>
+
+  <div class="panel">
+    <h3>1. Load a model</h3>
+    <p>Drop a GGUF file here, or click to select. Try SmolLM2-135M Q8_0 (~138MB).</p>
+    <input type="file" id="file-input" accept=".gguf" disabled>
+    <progress id="load-progress" value="0" max="1" hidden></progress>
+    <p class="stats" id="model-info"></p>
+  </div>
+
+  <div class="panel">
+    <h3>2. Generate</h3>
+    <p>Click to generate 30 tokens starting from BOS (token 1).</p>
+    <button id="generate" disabled>Generate</button>
+    <pre id="output"></pre>
+    <p class="stats" id="gen-stats"></p>
+  </div>
+
+  <p class="subtitle" style="text-align:center; margin-top:2rem;">
+    <a href="https://github.com/sauravpanda/flarellm">github.com/sauravpanda/flarellm</a>
+  </p>
+
+  <script type="module">
+    import init, { FlareEngine, webgpu_available, device_info } from '../pkg/flare_web.js';
+
+    const $status = document.getElementById('status');
+    const $env = document.getElementById('env');
+    const $fileInput = document.getElementById('file-input');
+    const $progress = document.getElementById('load-progress');
+    const $modelInfo = document.getElementById('model-info');
+    const $generate = document.getElementById('generate');
+    const $output = document.getElementById('output');
+    const $genStats = document.getElementById('gen-stats');
+
+    let engine = null;
+
+    async function start() {
+      try {
+        await init();
+        $status.textContent = 'WASM module loaded. Ready.';
+        $env.textContent = `WebGPU: ${webgpu_available() ? 'yes' : 'no'}`;
+        $fileInput.disabled = false;
+      } catch (err) {
+        $status.textContent = 'Failed to load WASM: ' + err;
+        $status.classList.add('error');
+      }
+    }
+
+    $fileInput.addEventListener('change', async (e) => {
+      const file = e.target.files[0];
+      if (!file) return;
+
+      $progress.hidden = false;
+      $progress.value = 0;
+      $modelInfo.textContent = `Reading ${(file.size / 1e6).toFixed(1)}MB...`;
+
+      try {
+        const buffer = await file.arrayBuffer();
+        $progress.value = 0.5;
+        $modelInfo.textContent = 'Parsing GGUF and loading weights...';
+
+        // Yield to UI
+        await new Promise(r => setTimeout(r, 10));
+
+        const bytes = new Uint8Array(buffer);
+        const t0 = performance.now();
+        engine = FlareEngine.load(bytes);
+        const loadMs = performance.now() - t0;
+
+        $progress.value = 1;
+        $modelInfo.textContent = `Loaded in ${loadMs.toFixed(0)}ms. ` +
+          `Vocab: ${engine.vocab_size}, Layers: ${engine.num_layers}, Hidden: ${engine.hidden_dim}`;
+        $generate.disabled = false;
+        setTimeout(() => { $progress.hidden = true; }, 500);
+      } catch (err) {
+        $modelInfo.textContent = 'Error: ' + err;
+        $modelInfo.classList.add('error');
+      }
+    });
+
+    $generate.addEventListener('click', async () => {
+      if (!engine) return;
+      $generate.disabled = true;
+      $output.textContent = '...';
+      $genStats.textContent = '';
+
+      // Yield to UI
+      await new Promise(r => setTimeout(r, 10));
+
+      try {
+        engine.reset();
+        const t0 = performance.now();
+        const tokens = engine.generate_tokens(new Uint32Array([1]), 30);
+        const ms = performance.now() - t0;
+        const tokS = tokens.length / (ms / 1000);
+
+        $output.textContent = `Generated tokens (raw IDs): [${Array.from(tokens).join(', ')}]\n\n` +
+          'Note: this demo shows raw token IDs. A real app would decode them with the BPE vocab.';
+        $genStats.textContent = `${tokens.length} tokens in ${ms.toFixed(0)}ms = ${tokS.toFixed(1)} tok/s`;
+      } catch (err) {
+        $output.textContent = 'Error: ' + err;
+        $output.classList.add('error');
+      } finally {
+        $generate.disabled = false;
+      }
+    });
+
+    start();
+  </script>
+</body>
+</html>
