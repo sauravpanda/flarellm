@@ -17,8 +17,8 @@ export type ProgressCallback = (loaded: number, total: number) => void;
 
 /**
  * The Flare inference engine.
- * Load a GGUF model, then call generate_tokens or generate_with_params.
- * Use apply_chat_template to format prompts for instruction-tuned models.
+ * Load a GGUF model, then use the streaming API (begin_stream / next_token)
+ * or the batch API (generate_tokens) to run inference.
  */
 export declare class FlareEngine {
   /** Load a GGUF model from raw bytes. */
@@ -48,9 +48,33 @@ export declare class FlareEngine {
    * Pass an empty string for systemMessage to omit the system turn.
    */
   apply_chat_template(userMessage: string, systemMessage: string): string;
-  /** Generate tokens (greedy, temperature=0). Returns token ID array. */
+
+  // --- Token-by-token streaming API ---
+
+  /**
+   * Prepare for token-by-token streaming.  Runs the prefill pass on
+   * promptTokens and initialises internal streaming state.  Call engine.reset()
+   * first to start a fresh conversation, then call next_token() in a
+   * requestAnimationFrame loop.
+   */
+  begin_stream(promptTokens: Uint32Array, maxTokens: number): void;
+  /**
+   * Generate the next token and return its ID, or undefined when the stream is
+   * complete (EOS reached, maxTokens exhausted, or stop_stream() was called).
+   * Call inside requestAnimationFrame so the browser can update the DOM between
+   * tokens.
+   */
+  next_token(): number | undefined;
+  /** Signal the current stream to stop after the next next_token() call. */
+  stop_stream(): void;
+  /** Whether the current stream has finished. */
+  readonly stream_done: boolean;
+
+  // --- Batch generation API (returns all tokens at once) ---
+
+  /** Generate tokens (greedy, temperature=0). Stops at EOS. Returns token ID array. */
   generate_tokens(promptTokens: Uint32Array, maxTokens: number): Uint32Array;
-  /** Generate tokens with sampling parameters. */
+  /** Generate tokens with sampling parameters. Stops at EOS. */
   generate_with_params(
     promptTokens: Uint32Array,
     maxTokens: number,

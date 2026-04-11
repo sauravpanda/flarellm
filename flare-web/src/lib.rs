@@ -27,7 +27,7 @@ use std::io::Cursor;
 use flare_core::chat::{ChatMessage, ChatTemplate, Role};
 use flare_core::generate::Generator;
 use flare_core::model::Model;
-use flare_core::sampling::SamplingParams;
+use flare_core::sampling::{self, SamplingParams};
 use flare_core::tokenizer::{BpeTokenizer, Tokenizer};
 use flare_loader::gguf::GgufFile;
 use flare_loader::weights::{load_model_weights, load_model_weights_with_progress};
@@ -95,9 +95,17 @@ fn detect_chat_template(gguf: &GgufFile) -> ChatTemplate {
 pub struct FlareEngine {
     model: Model,
     chat_template: ChatTemplate,
-    /// EOS token ID read from GGUF metadata (`tokenizer.ggml.eos_token_id`).
-    /// Passed to the generator so it stops at the model's natural end-of-sequence.
+    /// EOS token ID from GGUF metadata; generation stops when this token is produced.
     eos_token_id: Option<u32>,
+    // --- Token-by-token streaming state ---
+    /// Last token fed to the model (updated by begin_stream / next_token).
+    stream_last_token: u32,
+    /// Current sequence position (prompt length + tokens generated so far).
+    stream_pos: usize,
+    /// Remaining budget of tokens to generate in the current stream.
+    stream_remaining: usize,
+    /// Whether the current stream has finished (EOS reached, budget exhausted, or stopped).
+    stream_done: bool,
 }
 
 #[wasm_bindgen]
@@ -123,6 +131,10 @@ impl FlareEngine {
             model: Model::new(config, weights),
             chat_template,
             eos_token_id,
+            stream_last_token: 0,
+            stream_pos: 0,
+            stream_remaining: 0,
+            stream_done: true,
         })
     }
 
@@ -201,9 +213,91 @@ impl FlareEngine {
         self.eos_token_id
     }
 
+    // -----------------------------------------------------------------------
+    // Token-by-token streaming API
+    // -----------------------------------------------------------------------
+
+    /// Prepare for token-by-token streaming.
+    ///
+    /// Runs the prefill pass on `prompt_tokens`, then initialises internal
+    /// state so that subsequent calls to `next_token()` each produce one
+    /// output token.  Call `engine.reset()` before `begin_stream()` to start
+    /// a fresh conversation.
+    ///
+    /// # JS example
+    /// ```javascript
+    /// engine.reset();
+    /// engine.begin_stream(promptIds, 128);
+    /// function tick() {
+    ///   const id = engine.next_token();
+    ///   if (id === undefined) { /* done */ return; }
+    ///   output.textContent += tokenizer.decode_one(id);
+    ///   requestAnimationFrame(tick);   // yield to browser, then continue
+    /// }
+    /// requestAnimationFrame(tick);
+    /// ```
+    #[wasm_bindgen]
+    pub fn begin_stream(&mut self, prompt_tokens: &[u32], max_tokens: u32) {
+        let mut pos = 0usize;
+        for &tok in prompt_tokens {
+            self.model.forward(tok, pos);
+            pos += 1;
+        }
+        self.stream_pos = pos;
+        self.stream_last_token = *prompt_tokens.last().unwrap_or(&0);
+        self.stream_remaining = max_tokens as usize;
+        self.stream_done = false;
+    }
+
+    /// Generate and return the next token ID, or `undefined` when the stream
+    /// is complete (EOS reached, `max_tokens` exhausted, or `stop_stream()`
+    /// was called).
+    ///
+    /// Uses greedy (temperature=0) sampling.  Call this inside
+    /// `requestAnimationFrame` so the browser can update the DOM between
+    /// tokens and the page remains responsive.
+    #[wasm_bindgen]
+    pub fn next_token(&mut self) -> Option<u32> {
+        if self.stream_done || self.stream_remaining == 0 {
+            self.stream_done = true;
+            return None;
+        }
+
+        let logits_tensor = self.model.forward(self.stream_last_token, self.stream_pos);
+        let token_id = sampling::sample_greedy(logits_tensor.data());
+
+        self.stream_last_token = token_id;
+        self.stream_pos += 1;
+        self.stream_remaining -= 1;
+
+        if self.eos_token_id == Some(token_id) {
+            self.stream_done = true;
+            return None;
+        }
+
+        Some(token_id)
+    }
+
+    /// Signal the current stream to stop after the next `next_token()` call.
+    /// The JS Stop button should call this, then wait for `next_token()` to
+    /// return `undefined` before updating the UI.
+    #[wasm_bindgen]
+    pub fn stop_stream(&mut self) {
+        self.stream_done = true;
+    }
+
+    /// Whether the current stream has finished.
+    #[wasm_bindgen(getter)]
+    pub fn stream_done(&self) -> bool {
+        self.stream_done
+    }
+
+    // -----------------------------------------------------------------------
+    // Batch generation (returns all tokens at once)
+    // -----------------------------------------------------------------------
+
     /// Generate `max_tokens` tokens starting from `prompt_tokens` (greedy).
-    /// Stops early if the model produces the EOS token.
-    /// Returns a Uint32Array of generated token IDs.
+    /// Stops early at EOS. Returns a Uint32Array of generated token IDs.
     #[wasm_bindgen]
     pub fn generate_tokens(&mut self, prompt_tokens: &[u32], max_tokens: u32) -> Vec<u32> {
         let params = SamplingParams {
@@ -398,6 +492,10 @@ impl FlareProgressiveLoader {
             model: Model::new(config, weights),
             chat_template,
             eos_token_id,
+            stream_last_token: 0,
+            stream_pos: 0,
+            stream_remaining: 0,
+            stream_done: true,
         })
     }
 }
