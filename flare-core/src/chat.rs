@@ -28,6 +28,10 @@ pub enum ChatTemplate {
     Llama3,
     /// ChatML format (Qwen, Mistral, many others)
     ChatML,
+    /// Phi-3 / Phi-3.5 instruct format (`<|user|>...<|end|>`)
+    Phi3,
+    /// Gemma 2 instruct format (`<start_of_turn>...<end_of_turn>`)
+    Gemma,
     /// Alpaca-style format
     Alpaca,
     /// Raw — no formatting, just concatenate content
@@ -41,6 +45,8 @@ impl ChatTemplate {
         match arch.to_lowercase().as_str() {
             "llama" => ChatTemplate::Llama3,
             "qwen2" | "mistral" => ChatTemplate::ChatML,
+            "phi3" => ChatTemplate::Phi3,
+            "gemma2" => ChatTemplate::Gemma,
             _ => ChatTemplate::ChatML,
         }
     }
@@ -52,6 +58,10 @@ impl ChatTemplate {
             ChatTemplate::ChatML
         } else if template_str.contains("<|start_header_id|>") {
             ChatTemplate::Llama3
+        } else if template_str.contains("<|user|>") || template_str.contains("<|end|>") {
+            ChatTemplate::Phi3
+        } else if template_str.contains("<start_of_turn>") {
+            ChatTemplate::Gemma
         } else if template_str.contains("### Instruction") {
             ChatTemplate::Alpaca
         } else {
@@ -65,6 +75,8 @@ impl ChatTemplate {
         match self {
             ChatTemplate::Llama3 => format_llama3(messages),
             ChatTemplate::ChatML => format_chatml(messages),
+            ChatTemplate::Phi3 => format_phi3(messages),
+            ChatTemplate::Gemma => format_gemma(messages),
             ChatTemplate::Alpaca => format_alpaca(messages),
             ChatTemplate::Raw => format_raw(messages),
         }
@@ -151,6 +163,52 @@ fn format_alpaca(messages: &[ChatMessage]) -> String {
     out
 }
 
+/// Phi-3 / Phi-3.5 instruct format:
+/// ```text
+/// <|system|>
+/// {system}<|end|>
+/// <|user|>
+/// {user}<|end|>
+/// <|assistant|>
+/// ```
+fn format_phi3(messages: &[ChatMessage]) -> String {
+    let mut out = String::new();
+    for msg in messages {
+        let role_tag = match msg.role {
+            Role::System => "<|system|>",
+            Role::User => "<|user|>",
+            Role::Assistant => "<|assistant|>",
+        };
+        out.push_str(&format!("{role_tag}\n{}<|end|>\n", msg.content));
+    }
+    out.push_str("<|assistant|>\n");
+    out
+}
+
+/// Gemma 2 instruct format:
+/// ```text
+/// <start_of_turn>user
+/// {user}<end_of_turn>
+/// <start_of_turn>model
+/// {assistant}<end_of_turn>
+/// <start_of_turn>model
+/// ```
+fn format_gemma(messages: &[ChatMessage]) -> String {
+    let mut out = String::new();
+    for msg in messages {
+        let role_tag = match msg.role {
+            Role::System | Role::User => "user",
+            Role::Assistant => "model",
+        };
+        out.push_str(&format!(
+            "<start_of_turn>{role_tag}\n{}<end_of_turn>\n",
+            msg.content
+        ));
+    }
+    out.push_str("<start_of_turn>model\n");
+    out
+}
+
 /// Raw format — just concatenate all content.
 fn format_raw(messages: &[ChatMessage]) -> String {
     messages
@@ -217,6 +275,49 @@ mod tests {
         assert_eq!(
             ChatTemplate::from_architecture("mistral"),
             ChatTemplate::ChatML
+        );
+        assert_eq!(ChatTemplate::from_architecture("phi3"), ChatTemplate::Phi3);
+        assert_eq!(
+            ChatTemplate::from_architecture("gemma2"),
+            ChatTemplate::Gemma
+        );
+    }
+
+    #[test]
+    fn test_phi3_format() {
+        let result = ChatTemplate::Phi3.apply(&sample_messages());
+        assert!(result.contains("<|system|>"));
+        assert!(result.contains("You are a helpful assistant."));
+        assert!(result.contains("<|end|>"));
+        assert!(result.contains("<|user|>"));
+        assert!(result.contains("What is Rust?"));
+        assert!(result.ends_with("<|assistant|>\n"));
+    }
+
+    #[test]
+    fn test_gemma_format() {
+        let result = ChatTemplate::Gemma.apply(&sample_messages());
+        assert!(result.contains("<start_of_turn>user\n"));
+        assert!(result.contains("<end_of_turn>"));
+        assert!(result.contains("What is Rust?"));
+        assert!(result.ends_with("<start_of_turn>model\n"));
+    }
+
+    #[test]
+    fn test_from_gguf_template_phi3() {
+        let jinja = "{% for msg in messages %}{{ '<|' + msg['role'] + '|>' }}\n{{ msg['content'] }}<|end|>\n{% endfor %}<|assistant|>";
+        assert_eq!(
+            ChatTemplate::from_gguf_template(jinja, "phi3"),
+            ChatTemplate::Phi3
+        );
+    }
+
+    #[test]
+    fn test_from_gguf_template_gemma() {
+        let jinja = "{% for message in messages %}<start_of_turn>{{ message.role }}\n{{ message.content }}<end_of_turn>\n{% endfor %}";
+        assert_eq!(
+            ChatTemplate::from_gguf_template(jinja, "gemma2"),
+            ChatTemplate::Gemma
         );
     }
 

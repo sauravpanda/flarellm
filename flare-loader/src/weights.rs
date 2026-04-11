@@ -167,6 +167,24 @@ fn load_layer_weights(
     )
     .ok();
 
+    // Post-norms for Gemma 2 (absent in other architectures)
+    let post_attn_norm = find_tensor(
+        tensors,
+        &[
+            &format!("blk.{i}.post_attn_norm.weight"),
+            &format!("model.layers.{i}.post_attention_layernorm.weight"),
+        ],
+    )
+    .ok();
+    let post_ffn_norm = find_tensor(
+        tensors,
+        &[
+            &format!("blk.{i}.post_ffw_norm.weight"),
+            &format!("model.layers.{i}.post_feedforward_layernorm.weight"),
+        ],
+    )
+    .ok();
+
     Ok(LayerWeights {
         attn_norm,
         wq,
@@ -180,6 +198,8 @@ fn load_layer_weights(
         attn_q_bias,
         attn_k_bias,
         attn_v_bias,
+        post_attn_norm,
+        post_ffn_norm,
     })
 }
 

@@ -14,6 +14,14 @@ pub struct ModelConfig {
     pub max_seq_len: usize,
     pub rope_theta: f32,
     pub rms_norm_eps: f32,
+    /// Attention logit soft-cap for Gemma 2 (`tanh(score / cap) * cap`).
+    /// Zero means no capping (Llama, Qwen, Mistral, Phi-3).
+    #[serde(default)]
+    pub attn_logit_softcap: f32,
+    /// Final logit soft-cap for Gemma 2.
+    /// Zero means no capping.
+    #[serde(default)]
+    pub final_logit_softcap: f32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -21,6 +29,10 @@ pub enum Architecture {
     Llama,
     Qwen2,
     Mistral,
+    /// Phi-3 / Phi-3.5 mini — forward pass identical to Llama, different chat template.
+    Phi3,
+    /// Gemma 2 — post-norms, logit soft-capping, GELU activation, alternating attention.
+    Gemma2,
 }
 
 impl ModelConfig {
@@ -68,6 +80,8 @@ impl Default for ModelConfig {
             max_seq_len: 2048,
             rope_theta: 500000.0,
             rms_norm_eps: 1e-5,
+            attn_logit_softcap: 0.0,
+            final_logit_softcap: 0.0,
         }
     }
 }
