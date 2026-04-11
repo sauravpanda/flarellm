@@ -38,6 +38,11 @@ export declare class FlareEngine {
    */
   readonly chat_template_name: string;
   /**
+   * EOS token ID read from the GGUF model metadata, if present.
+   * The generator stops automatically when this token is produced.
+   */
+  readonly eos_token_id: number | undefined;
+  /**
    * Format a user message and optional system prompt using the model's chat
    * template.  Pass the result to FlareTokenizer.encode() before generating.
    * Pass an empty string for systemMessage to omit the system turn.
