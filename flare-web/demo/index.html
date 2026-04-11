@@ -44,6 +44,9 @@
     }
     .badge.ok   { background: #22aa4422; border-color: #22aa4444; color: #4a4; }
     .badge.warn { background: #ffaa0022; border-color: #ffaa0044; color: #a80; }
+    .badge.info { background: #4488ff22; border-color: #4488ff44; color: #48f; }
+    label.checkbox { display: flex; align-items: center; gap: 0.4rem; font-size: 0.9rem; cursor: pointer; }
+    .field-label { font-size: 0.85rem; opacity: 0.8; margin-bottom: 0.25rem; }
   </style>
 </head>
 <body>
@@ -96,7 +99,29 @@
 
   <div class="panel">
     <h3>3. Generate</h3>
-    <textarea id="prompt-input" placeholder="Once upon a time" disabled rows="2"></textarea>
+
+    <div style="margin-bottom:0.75rem;">
+      <label class="checkbox">
+        <input type="checkbox" id="chat-mode" checked>
+        Apply chat template
+        <span class="badge info" id="template-badge" style="display:none"></span>
+      </label>
+      <p class="stats" style="margin:0.2rem 0 0 1.4rem;">
+        Wraps your prompt in the model's instruction format (ChatML, Llama3, etc.).
+        Disable for raw completion.
+      </p>
+    </div>
+
+    <div id="system-prompt-row" style="margin-bottom:0.5rem;">
+      <div class="field-label">System prompt (optional)</div>
+      <textarea id="system-input" placeholder="You are a helpful assistant." disabled rows="2"></textarea>
+    </div>
+
+    <div>
+      <div class="field-label">User message</div>
+      <textarea id="prompt-input" placeholder="Once upon a time" disabled rows="2"></textarea>
+    </div>
+
     <div style="display:flex;gap:0.5rem;align-items:center;flex-wrap:wrap;">
       <button id="generate" disabled>Generate</button>
       <label style="font-size:0.85rem;">
@@ -132,6 +157,10 @@
     const $tokUrlIn    = $('tok-url-input');
     const $tokUrlLoad  = $('tok-url-load');
     const $tokInfo     = $('tok-info');
+    const $chatMode    = $('chat-mode');
+    const $tmplBadge   = $('template-badge');
+    const $systemRow   = $('system-prompt-row');
+    const $systemIn    = $('system-input');
     const $promptIn    = $('prompt-input');
     const $generate    = $('generate');
     const $maxTokens   = $('max-tokens');
@@ -140,6 +169,11 @@
 
     let engine    = null;
     let tokenizer = null;
+
+    // Show/hide system prompt row based on chat-mode checkbox
+    $chatMode.addEventListener('change', () => {
+      $systemRow.style.display = $chatMode.checked ? '' : 'none';
+    });
 
     // Tab switching: each panel has its own set of .tab-btn / .tab-panel pairs
     document.querySelectorAll('.tab-btn').forEach(btn => {
@@ -181,11 +215,17 @@
 
     function onModelLoaded(eng, ms) {
       engine = eng;
+      const tmplName = eng.chat_template_name;
       $modelInfo.textContent =
         `Loaded in ${ms.toFixed(0)} ms — Vocab: ${eng.vocab_size}, ` +
-        `Layers: ${eng.num_layers}, Hidden: ${eng.hidden_dim}`;
+        `Layers: ${eng.num_layers}, Hidden: ${eng.hidden_dim}, ` +
+        `Template: ${tmplName}`;
       $generate.disabled = false;
       $promptIn.disabled = false;
+      $systemIn.disabled = false;
+      // Update template badge
+      $tmplBadge.textContent = tmplName;
+      $tmplBadge.style.display = '';
       hideProgress();
     }
 
@@ -280,19 +320,27 @@
       if (!engine) return;
       $generate.disabled = true;
       $output.textContent = '';
+      $output.classList.remove('error');
       $genStats.textContent = '';
       await new Promise(r => setTimeout(r, 10));
 
       const maxToks = parseInt($maxTokens.value, 10) || 64;
-      const promptText = $promptIn.value.trim() || 'Once upon a time';
+      const userText  = $promptIn.value.trim() || 'Once upon a time';
+      const sysText   = $systemIn.value.trim();
+      const chatMode  = $chatMode.checked;
 
       try {
         engine.reset();
         const t0 = performance.now();
 
-        // Encode prompt (or use BOS fallback)
+        // Format the input: apply chat template when enabled, or pass raw text
+        const inputText = chatMode
+          ? engine.apply_chat_template(userText, sysText)
+          : userText;
+
+        // Encode prompt (or use BOS fallback when no tokenizer)
         const promptIds = tokenizer
-          ? tokenizer.encode(promptText)
+          ? tokenizer.encode(inputText)
           : new Uint32Array([1]);
 
         const outputIds = engine.generate_tokens(promptIds, maxToks);
@@ -308,7 +356,8 @@
         }
 
         $genStats.textContent =
-          `${outputIds.length} tokens in ${ms.toFixed(0)} ms = ${tokS.toFixed(1)} tok/s`;
+          `${outputIds.length} tokens in ${ms.toFixed(0)} ms = ${tokS.toFixed(1)} tok/s` +
+          (chatMode ? ` · template: ${engine.chat_template_name}` : '');
       } catch (err) {
         $output.textContent = 'Error: ' + err;
         $output.classList.add('error');

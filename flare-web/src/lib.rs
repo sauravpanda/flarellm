@@ -16,12 +16,15 @@
 //! const bytes = new Uint8Array(await response.arrayBuffer());
 //! const engine = FlareEngine.load(bytes);
 //!
-//! // Generate
-//! const tokens = engine.generate_tokens(new Uint32Array([1, 2, 3]), 50);
+//! // Apply chat template then generate
+//! const prompt = engine.apply_chat_template('What is Rust?', '');
+//! const ids = tokenizer.encode(prompt);
+//! const tokens = engine.generate_tokens(ids, 50);
 //! ```
 
 use std::io::Cursor;
 
+use flare_core::chat::{ChatMessage, ChatTemplate, Role};
 use flare_core::generate::Generator;
 use flare_core::model::Model;
 use flare_core::sampling::SamplingParams;
@@ -66,12 +69,32 @@ pub fn device_info() -> String {
     )
 }
 
+/// Detect chat template from GGUF metadata.
+/// Prefers the `tokenizer.chat_template` Jinja string when present; falls back
+/// to architecture-based detection.
+fn detect_chat_template(gguf: &GgufFile) -> ChatTemplate {
+    let arch = gguf.architecture().unwrap_or("unknown");
+    if let Some(tmpl_str) = gguf
+        .metadata
+        .get("tokenizer.chat_template")
+        .and_then(|v| v.as_str())
+    {
+        ChatTemplate::from_gguf_template(tmpl_str, arch)
+    } else {
+        ChatTemplate::from_architecture(arch)
+    }
+}
+
 /// Flare LLM inference engine, exported to JS.
 ///
 /// Holds a loaded model and runs greedy/sampled token generation.
+/// The detected chat template is available via `chat_template_name` and
+/// `apply_chat_template` so the browser demo can format prompts correctly
+/// for instruction-tuned models.
 #[wasm_bindgen]
 pub struct FlareEngine {
     model: Model,
+    chat_template: ChatTemplate,
 }
 
 #[wasm_bindgen]
@@ -82,6 +105,7 @@ impl FlareEngine {
         let mut reader = Cursor::new(gguf_bytes);
         let gguf = GgufFile::parse_header(&mut reader)
             .map_err(|e| JsError::new(&format!("GGUF parse error: {e}")))?;
+        let chat_template = detect_chat_template(&gguf);
         let config = gguf
             .to_model_config()
             .map_err(|e| JsError::new(&format!("Model config error: {e}")))?;
@@ -90,6 +114,7 @@ impl FlareEngine {
 
         Ok(FlareEngine {
             model: Model::new(config, weights),
+            chat_template,
         })
     }
 
@@ -115,6 +140,50 @@ impl FlareEngine {
     #[wasm_bindgen(getter)]
     pub fn hidden_dim(&self) -> u32 {
         self.model.config().hidden_dim as u32
+    }
+
+    /// Name of the auto-detected chat template (e.g. `"ChatML"`, `"Llama3"`,
+    /// `"Alpaca"`, `"Raw"`).  Use this to display the template in the UI and
+    /// decide whether to call `apply_chat_template` before encoding.
+    #[wasm_bindgen(getter)]
+    pub fn chat_template_name(&self) -> String {
+        match self.chat_template {
+            ChatTemplate::Llama3 => "Llama3".to_string(),
+            ChatTemplate::ChatML => "ChatML".to_string(),
+            ChatTemplate::Alpaca => "Alpaca".to_string(),
+            ChatTemplate::Raw => "Raw".to_string(),
+        }
+    }
+
+    /// Format a user message (and optional system prompt) using the model's
+    /// auto-detected chat template.  Returns the formatted prompt string ready
+    /// to be passed to `FlareTokenizer.encode()`.
+    ///
+    /// Pass an empty string for `system_message` to omit the system turn.
+    ///
+    /// # JS example
+    /// ```javascript
+    /// const prompt = engine.apply_chat_template(
+    ///   'Explain quantum computing in simple terms.',
+    ///   'You are a helpful assistant.'
+    /// );
+    /// const ids = tokenizer.encode(prompt);
+    /// const output = engine.generate_tokens(ids, 128);
+    /// ```
+    #[wasm_bindgen]
+    pub fn apply_chat_template(&self, user_message: &str, system_message: &str) -> String {
+        let mut messages = Vec::new();
+        if !system_message.is_empty() {
+            messages.push(ChatMessage {
+                role: Role::System,
+                content: system_message.to_string(),
+            });
+        }
+        messages.push(ChatMessage {
+            role: Role::User,
+            content: user_message.to_string(),
+        });
+        self.chat_template.apply(&messages)
     }
 
     /// Generate `max_tokens` tokens starting from `prompt_tokens` (greedy).
@@ -292,6 +361,7 @@ impl FlareProgressiveLoader {
         let mut cursor = Cursor::new(bytes);
         let gguf = GgufFile::parse_header(&mut cursor)
             .map_err(|e| JsError::new(&format!("GGUF parse error: {e}")))?;
+        let chat_template = detect_chat_template(&gguf);
         let config = gguf
             .to_model_config()
             .map_err(|e| JsError::new(&format!("model config error: {e}")))?;
@@ -306,6 +376,7 @@ impl FlareProgressiveLoader {
 
         Ok(FlareEngine {
             model: Model::new(config, weights),
+            chat_template,
         })
     }
 }
