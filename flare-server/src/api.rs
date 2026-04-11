@@ -1,7 +1,5 @@
 //! OpenAI-compatible chat completions API types.
 
-#![allow(dead_code)] // Streaming types used in future SSE implementation
-
 use serde::{Deserialize, Serialize};
 
 /// POST /v1/chat/completions request body.
