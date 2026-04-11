@@ -192,6 +192,8 @@ mod tests {
             max_seq_len: 2048,
             rope_theta: 10000.0,
             rms_norm_eps: 1e-5,
+            attn_logit_softcap: 0.0,
+            final_logit_softcap: 0.0,
         }
     }
 

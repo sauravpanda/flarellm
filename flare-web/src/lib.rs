@@ -170,6 +170,8 @@ impl FlareEngine {
         match self.chat_template {
             ChatTemplate::Llama3 => "Llama3".to_string(),
             ChatTemplate::ChatML => "ChatML".to_string(),
+            ChatTemplate::Phi3 => "Phi3".to_string(),
+            ChatTemplate::Gemma => "Gemma".to_string(),
             ChatTemplate::Alpaca => "Alpaca".to_string(),
             ChatTemplate::Raw => "Raw".to_string(),
         }
