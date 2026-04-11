@@ -24,11 +24,6 @@
       border-radius: 4px; width: 100%; box-sizing: border-box; margin-bottom: 0.5rem;
     }
     textarea { resize: vertical; min-height: 3.5rem; }
-    pre {
-      background: #8881; padding: 0.75rem; border-radius: 4px;
-      overflow-x: auto; font-size: 0.9rem; white-space: pre-wrap;
-      word-break: break-word; min-height: 2rem;
-    }
     .stats { font-size: 0.85rem; opacity: 0.8; }
     .error { color: #d33; }
     progress { width: 100%; height: 8px; }
@@ -47,6 +42,34 @@
     .badge.info { background: #4488ff22; border-color: #4488ff44; color: #48f; }
     label.checkbox { display: flex; align-items: center; gap: 0.4rem; font-size: 0.9rem; cursor: pointer; }
     .field-label { font-size: 0.85rem; opacity: 0.8; margin-bottom: 0.25rem; }
+
+    /* ---- Chat thread ---- */
+    .chat-thread {
+      display: flex; flex-direction: column; gap: 0.75rem;
+      max-height: 420px; overflow-y: auto;
+      padding: 0.5rem 0; margin-bottom: 0.75rem;
+    }
+    .chat-thread:empty::before {
+      content: 'Your conversation will appear here.';
+      opacity: 0.4; font-size: 0.9rem; text-align: center; padding: 1rem 0;
+      display: block;
+    }
+    .msg {
+      max-width: 88%; padding: 0.6rem 0.9rem; border-radius: 12px;
+      font-size: 0.95rem; line-height: 1.5; white-space: pre-wrap; word-break: break-word;
+    }
+    .msg.user {
+      align-self: flex-end;
+      background: #4488ff22; border: 1px solid #4488ff44;
+      border-bottom-right-radius: 3px;
+    }
+    .msg.assistant {
+      align-self: flex-start;
+      background: #8881; border: 1px solid #8884;
+      border-bottom-left-radius: 3px;
+    }
+    .msg.assistant.streaming { border-color: #4488ff66; }
+    .msg-role { font-size: 0.7rem; opacity: 0.55; margin-bottom: 0.2rem; }
   </style>
 </head>
 <body>
@@ -98,7 +121,7 @@
   </div>
 
   <div class="panel">
-    <h3>3. Generate</h3>
+    <h3>3. Chat</h3>
 
     <div style="margin-bottom:0.75rem;">
       <label class="checkbox">
@@ -113,24 +136,27 @@
     </div>
 
     <div id="system-prompt-row" style="margin-bottom:0.5rem;">
-      <div class="field-label">System prompt (optional)</div>
+      <div class="field-label">System prompt (optional, applied on first turn)</div>
       <textarea id="system-input" placeholder="You are a helpful assistant." disabled rows="2"></textarea>
     </div>
 
+    <!-- Conversation thread -->
+    <div class="chat-thread" id="chat"></div>
+
     <div>
-      <div class="field-label">User message</div>
-      <textarea id="prompt-input" placeholder="Once upon a time" disabled rows="2"></textarea>
+      <div class="field-label">Your message</div>
+      <textarea id="prompt-input" placeholder="Ask me anything…" disabled rows="2"></textarea>
     </div>
 
     <div style="display:flex;gap:0.5rem;align-items:center;flex-wrap:wrap;">
-      <button id="generate" disabled>Generate</button>
+      <button id="generate" disabled>Send</button>
       <button id="stop" disabled>Stop</button>
+      <button id="clear" disabled>Clear conversation</button>
       <label style="font-size:0.85rem;">
         Max tokens:&nbsp;<input type="number" id="max-tokens" value="128"
           min="1" max="512" style="width:5rem;margin-bottom:0;">
       </label>
     </div>
-    <pre id="output"></pre>
     <p class="stats" id="gen-stats"></p>
   </div>
 
@@ -165,20 +191,82 @@
     const $promptIn    = $('prompt-input');
     const $generate    = $('generate');
     const $stop        = $('stop');
+    const $clear       = $('clear');
     const $maxTokens   = $('max-tokens');
-    const $output      = $('output');
+    const $chat        = $('chat');
     const $genStats    = $('gen-stats');
 
     let engine    = null;
     let tokenizer = null;
-    let streaming = false;   // true while a stream is running
+    let streaming = false;
 
-    // Show/hide system prompt row based on chat-mode checkbox
+    // Conversation history: [{role: 'user'|'assistant'|'system', content: string}]
+    let history = [];
+
+    // ---------- Template formatting ----------
+    // Build the full prompt from conversation history, formatted for the model's
+    // chat template.  Each turn is included so the model has full context.
+    function buildPrompt(hist, templateName) {
+      switch (templateName) {
+        case 'ChatML': {
+          let out = '';
+          for (const m of hist) {
+            out += `<|im_start|>${m.role}\n${m.content}<|im_end|>\n`;
+          }
+          out += '<|im_start|>assistant\n';
+          return out;
+        }
+        case 'Llama3': {
+          let out = '<|begin_of_text|>';
+          for (const m of hist) {
+            out += `<|start_header_id|>${m.role}<|end_header_id|>\n\n${m.content}<|eot_id|>`;
+          }
+          out += '<|start_header_id|>assistant<|end_header_id|>\n\n';
+          return out;
+        }
+        case 'Alpaca': {
+          const parts = [];
+          for (const m of hist) {
+            if (m.role === 'user')      parts.push(`### Instruction:\n${m.content}`);
+            else if (m.role === 'assistant') parts.push(`### Response:\n${m.content}`);
+          }
+          parts.push('### Response:');
+          return parts.join('\n\n');
+        }
+        default: // 'Raw' — no template; just concatenate user/assistant turns
+          return hist.filter(m => m.role !== 'system').map(m => m.content).join('\n');
+      }
+    }
+
+    // ---------- Chat UI helpers ----------
+    function appendBubble(role, content, isStreaming = false) {
+      const wrap = document.createElement('div');
+      const label = document.createElement('div');
+      label.className = 'msg-role';
+      label.textContent = role === 'user' ? 'You' : 'Assistant';
+      const bubble = document.createElement('div');
+      bubble.className = `msg ${role}` + (isStreaming ? ' streaming' : '');
+      bubble.textContent = content;
+      wrap.appendChild(label);
+      wrap.appendChild(bubble);
+      $chat.appendChild(wrap);
+      $chat.scrollTop = $chat.scrollHeight;
+      return bubble;
+    }
+
+    function clearChat() {
+      $chat.innerHTML = '';
+      history = [];
+      if (engine) engine.reset();
+      $genStats.textContent = '';
+    }
+
+    // ---------- Show/hide system prompt row ----------
     $chatMode.addEventListener('change', () => {
       $systemRow.style.display = $chatMode.checked ? '' : 'none';
     });
 
-    // Tab switching: each panel has its own set of .tab-btn / .tab-panel pairs
+    // ---------- Tab switching ----------
     document.querySelectorAll('.tab-btn').forEach(btn => {
       btn.addEventListener('click', () => {
         const panel = btn.closest('.panel');
@@ -189,7 +277,7 @@
       });
     });
 
-    // Progress bar helpers
+    // ---------- Progress bar ----------
     function showProgress(label) {
       $progress.hidden = false;
       $progressLbl.hidden = false;
@@ -216,6 +304,7 @@
       }, 600);
     }
 
+    // ---------- Model loaded ----------
     function onModelLoaded(eng, ms) {
       engine = eng;
       const tmplName = eng.chat_template_name;
@@ -226,7 +315,7 @@
       $generate.disabled = false;
       $promptIn.disabled = false;
       $systemIn.disabled = false;
-      // Update template badge
+      $clear.disabled = false;
       $tmplBadge.textContent = tmplName;
       $tmplBadge.style.display = '';
       hideProgress();
@@ -242,7 +331,7 @@
         `EOS: ${tok.eos_token_id ?? 'none'}`;
     }
 
-    // WASM init
+    // ---------- WASM init ----------
     async function startWasm() {
       try {
         await init();
@@ -256,7 +345,7 @@
       }
     }
 
-    // Model — file
+    // ---------- Model loaders ----------
     $fileInput.addEventListener('change', async e => {
       const file = e.target.files[0];
       if (!file) return;
@@ -267,14 +356,15 @@
         updateProgress(file.size, file.size, 'Parsing…');
         await new Promise(r => setTimeout(r, 10));
         const t0 = performance.now();
+        clearChat();
         onModelLoaded(FlareEngine.load(new Uint8Array(buffer)), performance.now() - t0);
       } catch (err) {
-        $modelInfo.textContent = 'Error: ' + err; $modelInfo.classList.add('error');
+        $modelInfo.textContent = 'Error: ' + err;
+        $modelInfo.classList.add('error');
         hideProgress();
       }
     });
 
-    // Model — URL
     $urlLoad.addEventListener('click', async () => {
       const url = $urlInput.value.trim();
       if (!url) return;
@@ -283,27 +373,29 @@
       $urlLoad.disabled = true;
       try {
         const t0 = performance.now();
+        clearChat();
         const eng = await new FlareProgressiveLoader(url)
           .load((l, t) => updateProgress(l, t, 'Downloading…'));
         onModelLoaded(eng, performance.now() - t0);
       } catch (err) {
-        $modelInfo.textContent = 'Error: ' + err; $modelInfo.classList.add('error');
+        $modelInfo.textContent = 'Error: ' + err;
+        $modelInfo.classList.add('error');
         hideProgress();
       } finally { $urlLoad.disabled = false; }
     });
 
-    // Tokenizer — file
+    // ---------- Tokenizer loaders ----------
     $tokFileIn.addEventListener('change', async e => {
       const file = e.target.files[0];
       if (!file) return;
       try {
         onTokenizerLoaded(FlareTokenizer.from_json(await file.text()));
       } catch (err) {
-        $tokInfo.textContent = 'Error: ' + err; $tokInfo.classList.add('error');
+        $tokInfo.textContent = 'Error: ' + err;
+        $tokInfo.classList.add('error');
       }
     });
 
-    // Tokenizer — URL
     $tokUrlLoad.addEventListener('click', async () => {
       const url = $tokUrlIn.value.trim();
       if (!url) return;
@@ -314,48 +406,77 @@
         if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
         onTokenizerLoaded(FlareTokenizer.from_json(await resp.text()));
       } catch (err) {
-        $tokInfo.textContent = 'Error: ' + err; $tokInfo.classList.add('error');
+        $tokInfo.textContent = 'Error: ' + err;
+        $tokInfo.classList.add('error');
       } finally { $tokUrlLoad.disabled = false; }
     });
 
-    // Stop button
+    // ---------- Clear conversation ----------
+    $clear.addEventListener('click', () => {
+      clearChat();
+    });
+
+    // ---------- Stop ----------
     $stop.addEventListener('click', () => {
       if (engine && streaming) engine.stop_stream();
       streaming = false;
     });
 
-    // Generate — uses token-by-token streaming via requestAnimationFrame
+    // ---------- Generate (multi-turn streaming) ----------
     $generate.addEventListener('click', async () => {
       if (!engine || streaming) return;
+
+      const userText = $promptIn.value.trim();
+      if (!userText) return;
+
       streaming = true;
       $generate.disabled = true;
       $stop.disabled = false;
-      $output.textContent = '';
-      $output.classList.remove('error');
+      $promptIn.value = '';
       $genStats.textContent = 'Generating…';
       await new Promise(r => setTimeout(r, 10));
 
-      const maxToks  = parseInt($maxTokens.value, 10) || 128;
-      const userText = $promptIn.value.trim() || 'Once upon a time';
-      const sysText  = $systemIn.value.trim();
-      const chatMode = $chatMode.checked;
+      const maxToks   = parseInt($maxTokens.value, 10) || 128;
+      const sysText   = $systemIn.value.trim();
+      const chatMode  = $chatMode.checked;
+
+      // Add user bubble
+      appendBubble('user', userText);
+
+      // Build conversation history for this turn
+      if (chatMode) {
+        // Prepend system message only on the first turn
+        if (history.length === 0 && sysText) {
+          history.push({ role: 'system', content: sysText });
+        }
+        history.push({ role: 'user', content: userText });
+      }
 
       try {
-        engine.reset();
-
-        const inputText = chatMode
-          ? engine.apply_chat_template(userText, sysText)
-          : userText;
+        // Format the full prompt including all prior turns
+        let inputText;
+        if (chatMode) {
+          inputText = buildPrompt(history, engine.chat_template_name);
+        } else {
+          inputText = userText;
+        }
 
         const promptIds = tokenizer
           ? tokenizer.encode(inputText)
           : new Uint32Array([1]);
 
+        // Reset KV cache and re-run prefill over the full context each turn.
+        // For small models this is fast; a KV-cache continuation API can be
+        // added later for larger models.
+        engine.reset();
         engine.begin_stream(promptIds, maxToks);
 
         const t0 = performance.now();
         let count = 0;
-        const tokenIds = [];
+        let assistantText = '';
+
+        // Streaming assistant bubble
+        const bubble = appendBubble('assistant', '', true);
 
         function tick() {
           if (!streaming) {
@@ -369,13 +490,16 @@
             return;
           }
           count++;
-          tokenIds.push(id);
           if (tokenizer) {
-            $output.textContent += tokenizer.decode_one(id);
+            const piece = tokenizer.decode_one(id);
+            assistantText += piece;
+            bubble.textContent = assistantText;
           } else {
-            $output.textContent = `Token IDs: [${tokenIds.join(', ')}]`;
+            assistantText += `[${id}]`;
+            bubble.textContent = assistantText;
           }
-          // Update running stats every 8 tokens
+          $chat.scrollTop = $chat.scrollHeight;
+
           if (count % 8 === 0) {
             const ms = performance.now() - t0;
             $genStats.textContent = `${count} tokens · ${(count / (ms / 1000)).toFixed(1)} tok/s`;
@@ -384,26 +508,42 @@
         }
 
         function finishStream() {
+          bubble.classList.remove('streaming');
+
+          // Save completed assistant response to history
+          const finalText = assistantText ||
+            (!tokenizer ? '(load a tokenizer to see decoded text)' : '');
+          if (chatMode && finalText) {
+            history.push({ role: 'assistant', content: assistantText });
+          }
+          if (!tokenizer && count > 0) {
+            bubble.textContent = `${count} token(s) generated. Load a tokenizer (step 2) to see decoded text.`;
+          }
+
           const ms = performance.now() - t0;
           const tokS = count / (ms / 1000);
-          if (!tokenizer && tokenIds.length > 0) {
-            $output.textContent =
-              `Token IDs: [${tokenIds.join(', ')}]\n\nLoad a tokenizer (step 2) to see decoded text.`;
-          }
           $genStats.textContent =
             `${count} tokens in ${ms.toFixed(0)} ms = ${tokS.toFixed(1)} tok/s` +
             (chatMode ? ` · template: ${engine.chat_template_name}` : '');
+
           $generate.disabled = false;
           $stop.disabled = true;
         }
 
         requestAnimationFrame(tick);
       } catch (err) {
-        $output.textContent = 'Error: ' + err;
-        $output.classList.add('error');
+        appendBubble('assistant', 'Error: ' + err).classList.add('error');
         streaming = false;
         $generate.disabled = false;
         $stop.disabled = true;
+      }
+    });
+
+    // Allow Ctrl+Enter / Cmd+Enter to send
+    $promptIn.addEventListener('keydown', e => {
+      if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+        e.preventDefault();
+        if (!$generate.disabled) $generate.click();
       }
     });
 
