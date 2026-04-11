@@ -226,6 +226,8 @@ impl GgufFile {
             "llama" => Architecture::Llama,
             "qwen2" => Architecture::Qwen2,
             "mistral" => Architecture::Mistral,
+            "phi3" => Architecture::Phi3,
+            "gemma2" => Architecture::Gemma2,
             other => return Err(GgufError::UnsupportedArchitecture(other.to_string())),
         };
 
@@ -270,6 +272,14 @@ impl GgufFile {
             .meta_f32(&format!("{prefix}.attention.layer_norm_rms_epsilon"))
             .unwrap_or(1e-5);
 
+        // Gemma 2 logit soft-capping parameters (absent for other architectures)
+        let attn_logit_softcap = self
+            .meta_f32(&format!("{prefix}.attn_logit_softcapping"))
+            .unwrap_or(0.0);
+        let final_logit_softcap = self
+            .meta_f32(&format!("{prefix}.final_logit_softcapping"))
+            .unwrap_or(0.0);
+
         Ok(ModelConfig {
             architecture,
             vocab_size,
@@ -282,6 +292,8 @@ impl GgufFile {
             max_seq_len,
             rope_theta,
             rms_norm_eps,
+            attn_logit_softcap,
+            final_logit_softcap,
         })
     }
 

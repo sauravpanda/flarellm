@@ -1,4 +1,4 @@
-use crate::config::ModelConfig;
+use crate::config::{Architecture, ModelConfig};
 use crate::kv_cache::KvCache;
 use crate::tensor::Tensor;
 
@@ -128,6 +128,9 @@ pub struct LayerWeights {
     pub attn_q_bias: Option<Tensor>,
     pub attn_k_bias: Option<Tensor>,
     pub attn_v_bias: Option<Tensor>,
+    // Post-norms for Gemma 2 (applied after attention output / FFN output)
+    pub post_attn_norm: Option<Tensor>,
+    pub post_ffn_norm: Option<Tensor>,
 }
 
 /// Complete model weights.
@@ -265,6 +268,7 @@ impl Model {
                 num_kv_heads,
                 head_dim,
                 self.kv_cache.len() + 1, // include current position
+                config.attn_logit_softcap,
             );
 
             // Output projection
@@ -272,10 +276,18 @@ impl Model {
                 self.backend
                     .matvec(layer.wo.data(), &attn_output, dim, num_heads * head_dim);
 
+            // Gemma 2: apply post-attention RMSNorm before the residual add
+            let attn_contrib = if let Some(ref post_norm) = layer.post_attn_norm {
+                self.backend
+                    .rmsnorm_vec(&attn_proj, post_norm.data(), config.rms_norm_eps)
+            } else {
+                attn_proj
+            };
+
             // Residual connection
             let x_data = x.data_mut();
             for i in 0..dim {
-                x_data[i] += attn_proj[i];
+                x_data[i] += attn_contrib[i];
             }
 
             // --- FFN block ---
@@ -291,8 +303,12 @@ impl Model {
                 .backend
                 .matvec(layer.w_up.data(), &normed, config.intermediate_dim, dim);
 
-            // SiLU(gate) * up
-            let ffn_hidden = self.backend.silu_mul_vec(&gate, &up);
+            // Gemma 2 uses GELU activation; Llama / Phi-3 use SiLU
+            let ffn_hidden = if config.architecture == Architecture::Gemma2 {
+                gelu_mul_cpu(&gate, &up)
+            } else {
+                self.backend.silu_mul_vec(&gate, &up)
+            };
 
             // Down projection
             let ffn_out = self.backend.matvec(
@@ -302,10 +318,18 @@ impl Model {
                 config.intermediate_dim,
             );
 
+            // Gemma 2: apply post-FFN RMSNorm before the residual add
+            let ffn_contrib = if let Some(ref post_norm) = layer.post_ffn_norm {
+                self.backend
+                    .rmsnorm_vec(&ffn_out, post_norm.data(), config.rms_norm_eps)
+            } else {
+                ffn_out
+            };
+
             // Residual connection
             let x_data = x.data_mut();
             for i in 0..dim {
-                x_data[i] += ffn_out[i];
+                x_data[i] += ffn_contrib[i];
             }
         }
 
@@ -320,12 +344,20 @@ impl Model {
         );
 
         // Output logits: [vocab_size] = output_weight [vocab_size, dim] x normed [dim]
-        let logits = self.backend.matvec(
+        let mut logits = self.backend.matvec(
             self.weights.output_weight.data(),
             &normed,
             config.vocab_size,
             dim,
         );
+
+        // Gemma 2: apply final logit soft-cap (tanh(x / cap) * cap)
+        if config.final_logit_softcap > 0.0 {
+            let cap = config.final_logit_softcap;
+            for l in &mut logits {
+                *l = (*l / cap).tanh() * cap;
+            }
+        }
 
         Tensor::from_vec(logits, &[config.vocab_size]).unwrap()
     }
@@ -674,6 +706,19 @@ pub fn silu_mul_cpu(gate: &[f32], up: &[f32]) -> Vec<f32> {
         .collect()
 }
 
+/// GELU(gate) * up — used by Gemma 2 FFN (tanh approximation).
+pub fn gelu_mul_cpu(gate: &[f32], up: &[f32]) -> Vec<f32> {
+    gate.iter()
+        .zip(up.iter())
+        .map(|(&g, &u)| {
+            // tanh-approximated GELU: 0.5 * x * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3)))
+            let c = 0.797_884_56_f32; // sqrt(2/pi)
+            let gelu = 0.5 * g * (1.0 + (c * (g + 0.044715 * g * g * g)).tanh());
+            gelu * u
+        })
+        .collect()
+}
+
 /// Apply RoPE to interleaved Q or K vectors (CPU implementation).
 ///
 /// Pre-computes (cos, sin) per dimension index once for the given pos/theta/head_dim,
@@ -715,7 +760,8 @@ fn grouped_query_attention(
     num_heads: usize,
     num_kv_heads: usize,
     head_dim: usize,
-    seq_len: usize, // number of valid KV entries
+    seq_len: usize,    // number of valid KV entries
+    attn_softcap: f32, // 0.0 = no capping (Llama etc); non-zero for Gemma 2
 ) -> Vec<f32> {
     let heads_per_kv = num_heads / num_kv_heads;
     let mut output = vec![0.0f32; num_heads * head_dim];
@@ -739,6 +785,13 @@ fn grouped_query_attention(
                 dot += q[q_offset + d] * k_cache[k_offset + d];
             }
             *score = dot * scale;
+        }
+
+        // Gemma 2: tanh soft-cap on attention logits before softmax
+        if attn_softcap > 0.0 {
+            for s in &mut scores {
+                *s = (*s / attn_softcap).tanh() * attn_softcap;
+            }
         }
 
         // Softmax
@@ -938,6 +991,8 @@ mod tests {
             max_seq_len: 16,
             rope_theta: 10000.0,
             rms_norm_eps: 1e-5,
+            attn_logit_softcap: 0.0,
+            final_logit_softcap: 0.0,
         };
 
         // Deterministic weight init: w[i] = (i % 7 - 3) * 0.1
@@ -964,6 +1019,8 @@ mod tests {
             attn_q_bias: None,
             attn_k_bias: None,
             attn_v_bias: None,
+            post_attn_norm: None,
+            post_ffn_norm: None,
         };
 
         let weights = ModelWeights {
@@ -1052,6 +1109,8 @@ mod tests {
             max_seq_len: 8,
             rope_theta: 10000.0,
             rms_norm_eps: 1e-5,
+            attn_logit_softcap: 0.0,
+            final_logit_softcap: 0.0,
         };
 
         let dim = 4;
@@ -1070,6 +1129,8 @@ mod tests {
             attn_q_bias: None,
             attn_k_bias: None,
             attn_v_bias: None,
+            post_attn_norm: None,
+            post_ffn_norm: None,
         };
 
         // Embedding: token 0 = [1, 2, 3, 4]
@@ -1126,6 +1187,8 @@ mod tests {
             max_seq_len: 8,
             rope_theta: 10000.0,
             rms_norm_eps: 1e-5,
+            attn_logit_softcap: 0.0,
+            final_logit_softcap: 0.0,
         };
 
         let make_w =
@@ -1150,6 +1213,8 @@ mod tests {
             attn_q_bias: None,
             attn_k_bias: None,
             attn_v_bias: None,
+            post_attn_norm: None,
+            post_ffn_norm: None,
         };
 
         let weights = ModelWeights {
@@ -1203,6 +1268,8 @@ mod tests {
             attn_q_bias: None,
             attn_k_bias: None,
             attn_v_bias: None,
+            post_attn_norm: None,
+            post_ffn_norm: None,
         };
 
         let weights = ModelWeights {

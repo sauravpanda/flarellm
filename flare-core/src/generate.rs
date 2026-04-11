@@ -161,6 +161,8 @@ mod tests {
             attn_q_bias: None,
             attn_k_bias: None,
             attn_v_bias: None,
+            post_attn_norm: None,
+            post_ffn_norm: None,
         };
 
         let weights = ModelWeights {

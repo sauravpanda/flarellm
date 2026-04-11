@@ -224,6 +224,25 @@
           out += '<|start_header_id|>assistant<|end_header_id|>\n\n';
           return out;
         }
+        case 'Phi3': {
+          let out = '';
+          for (const m of hist) {
+            const tag = m.role === 'assistant' ? '<|assistant|>' :
+                        m.role === 'system'    ? '<|system|>' : '<|user|>';
+            out += `${tag}\n${m.content}<|end|>\n`;
+          }
+          out += '<|assistant|>\n';
+          return out;
+        }
+        case 'Gemma': {
+          let out = '';
+          for (const m of hist) {
+            const role = m.role === 'assistant' ? 'model' : 'user';
+            out += `<start_of_turn>${role}\n${m.content}<end_of_turn>\n`;
+          }
+          out += '<start_of_turn>model\n';
+          return out;
+        }
         case 'Alpaca': {
           const parts = [];
           for (const m of hist) {
