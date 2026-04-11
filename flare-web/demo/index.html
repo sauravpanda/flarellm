@@ -9,65 +9,41 @@
       color-scheme: light dark;
       font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
     }
-    body {
-      max-width: 720px;
-      margin: 2rem auto;
-      padding: 0 1rem;
-      line-height: 1.5;
-    }
+    body { max-width: 720px; margin: 2rem auto; padding: 0 1rem; line-height: 1.5; }
     h1 { margin-bottom: 0.25rem; }
     .subtitle { opacity: 0.7; margin-top: 0; }
-    .panel {
-      border: 1px solid #8884;
-      border-radius: 8px;
-      padding: 1rem;
-      margin: 1rem 0;
-    }
+    .panel { border: 1px solid #8884; border-radius: 8px; padding: 1rem; margin: 1rem 0; }
     button {
-      font: inherit;
-      padding: 0.5rem 1rem;
-      border: 1px solid #8888;
-      border-radius: 4px;
-      background: #8881;
-      cursor: pointer;
+      font: inherit; padding: 0.5rem 1rem; border: 1px solid #8888;
+      border-radius: 4px; background: #8881; cursor: pointer;
     }
     button:disabled { opacity: 0.5; cursor: not-allowed; }
     button:hover:not(:disabled) { background: #8882; }
-    input[type="text"], input[type="url"] {
-      font: inherit;
-      padding: 0.4rem 0.6rem;
-      border: 1px solid #8888;
-      border-radius: 4px;
-      width: 100%;
-      box-sizing: border-box;
-      margin-bottom: 0.5rem;
+    input[type="text"], input[type="url"], textarea {
+      font: inherit; padding: 0.4rem 0.6rem; border: 1px solid #8888;
+      border-radius: 4px; width: 100%; box-sizing: border-box; margin-bottom: 0.5rem;
     }
+    textarea { resize: vertical; min-height: 3.5rem; }
     pre {
-      background: #8881;
-      padding: 0.75rem;
-      border-radius: 4px;
-      overflow-x: auto;
-      font-size: 0.9rem;
-      white-space: pre-wrap;
-      word-break: break-word;
+      background: #8881; padding: 0.75rem; border-radius: 4px;
+      overflow-x: auto; font-size: 0.9rem; white-space: pre-wrap;
+      word-break: break-word; min-height: 2rem;
     }
     .stats { font-size: 0.85rem; opacity: 0.8; }
     .error { color: #d33; }
     progress { width: 100%; height: 8px; }
-    .progress-label {
-      font-size: 0.8rem;
-      opacity: 0.7;
-      margin-top: 0.25rem;
-    }
+    .progress-label { font-size: 0.8rem; opacity: 0.7; margin-top: 0.25rem; }
     .tabs { display: flex; gap: 0.5rem; margin-bottom: 1rem; }
-    .tab-btn {
-      padding: 0.35rem 0.8rem;
-      font-size: 0.9rem;
-      border-radius: 4px;
-    }
+    .tab-btn { padding: 0.35rem 0.8rem; font-size: 0.9rem; border-radius: 4px; }
     .tab-btn.active { background: #4488ff22; border-color: #4488ff88; }
     .tab-panel { display: none; }
     .tab-panel.active { display: block; }
+    .badge {
+      display: inline-block; font-size: 0.75rem; padding: 0.1rem 0.4rem;
+      border-radius: 3px; background: #8881; border: 1px solid #8884; margin-left: 0.25rem;
+    }
+    .badge.ok   { background: #22aa4422; border-color: #22aa4444; color: #4a4; }
+    .badge.warn { background: #ffaa0022; border-color: #ffaa0044; color: #a80; }
   </style>
 </head>
 <body>
@@ -86,86 +62,114 @@
       <button class="tab-btn active" data-tab="file">Local file</button>
       <button class="tab-btn" data-tab="url">From URL (progressive)</button>
     </div>
-
     <div id="tab-file" class="tab-panel active">
-      <p>Drop a GGUF file here, or click to select. Try SmolLM2-135M Q8_0 (~138 MB).</p>
+      <p>Select a GGUF file. Try SmolLM2-135M Q8_0 (~138 MB).</p>
       <input type="file" id="file-input" accept=".gguf" disabled>
     </div>
-
     <div id="tab-url" class="tab-panel">
-      <p>Enter a direct URL to a GGUF file. The model is fetched with streaming
-         progress — the download bar updates as each chunk arrives.</p>
+      <p>Paste a direct URL to a GGUF file. Download progress updates in real time.</p>
       <input type="url" id="url-input" placeholder="https://example.com/model.gguf" disabled>
       <button id="url-load" disabled>Load from URL</button>
     </div>
-
     <progress id="load-progress" value="0" max="1" hidden></progress>
     <p class="progress-label" id="progress-label" hidden></p>
     <p class="stats" id="model-info"></p>
   </div>
 
   <div class="panel">
-    <h3>2. Generate</h3>
-    <p>Click to generate 30 tokens starting from BOS (token 1).</p>
-    <button id="generate" disabled>Generate</button>
+    <h3>2. Load tokenizer <span class="badge warn" id="tok-badge">not loaded</span></h3>
+    <p>Load a HuggingFace <code>tokenizer.json</code> to see decoded text output.
+       Without it, raw token IDs are shown.</p>
+    <div class="tabs">
+      <button class="tab-btn active" data-tab="tok-file">Local file</button>
+      <button class="tab-btn" data-tab="tok-url">From URL</button>
+    </div>
+    <div id="tab-tok-file" class="tab-panel active">
+      <input type="file" id="tok-file-input" accept=".json" disabled>
+    </div>
+    <div id="tab-tok-url" class="tab-panel">
+      <input type="url" id="tok-url-input" placeholder="https://example.com/tokenizer.json" disabled>
+      <button id="tok-url-load" disabled>Load tokenizer</button>
+    </div>
+    <p class="stats" id="tok-info"></p>
+  </div>
+
+  <div class="panel">
+    <h3>3. Generate</h3>
+    <textarea id="prompt-input" placeholder="Once upon a time" disabled rows="2"></textarea>
+    <div style="display:flex;gap:0.5rem;align-items:center;flex-wrap:wrap;">
+      <button id="generate" disabled>Generate</button>
+      <label style="font-size:0.85rem;">
+        Max tokens:&nbsp;<input type="number" id="max-tokens" value="64"
+          min="1" max="512" style="width:5rem;margin-bottom:0;">
+      </label>
+    </div>
     <pre id="output"></pre>
     <p class="stats" id="gen-stats"></p>
   </div>
 
-  <p class="subtitle" style="text-align:center; margin-top:2rem;">
+  <p class="subtitle" style="text-align:center;margin-top:2rem;">
     <a href="https://github.com/sauravpanda/flarellm">github.com/sauravpanda/flarellm</a>
   </p>
 
   <script type="module">
-    import init, { FlareEngine, FlareProgressiveLoader, webgpu_available, device_info } from '../pkg/flare_web.js';
+    import init, {
+      FlareEngine, FlareProgressiveLoader, FlareTokenizer,
+      webgpu_available
+    } from '../pkg/flare_web.js';
 
-    const $status       = document.getElementById('status');
-    const $env          = document.getElementById('env');
-    const $fileInput    = document.getElementById('file-input');
-    const $urlInput     = document.getElementById('url-input');
-    const $urlLoad      = document.getElementById('url-load');
-    const $progress     = document.getElementById('load-progress');
-    const $progressLbl  = document.getElementById('progress-label');
-    const $modelInfo    = document.getElementById('model-info');
-    const $generate     = document.getElementById('generate');
-    const $output       = document.getElementById('output');
-    const $genStats     = document.getElementById('gen-stats');
+    const $ = id => document.getElementById(id);
+    const $status      = $('status');
+    const $env         = $('env');
+    const $fileInput   = $('file-input');
+    const $urlInput    = $('url-input');
+    const $urlLoad     = $('url-load');
+    const $progress    = $('load-progress');
+    const $progressLbl = $('progress-label');
+    const $modelInfo   = $('model-info');
+    const $tokBadge    = $('tok-badge');
+    const $tokFileIn   = $('tok-file-input');
+    const $tokUrlIn    = $('tok-url-input');
+    const $tokUrlLoad  = $('tok-url-load');
+    const $tokInfo     = $('tok-info');
+    const $promptIn    = $('prompt-input');
+    const $generate    = $('generate');
+    const $maxTokens   = $('max-tokens');
+    const $output      = $('output');
+    const $genStats    = $('gen-stats');
 
-    let engine = null;
+    let engine    = null;
+    let tokenizer = null;
 
-    // --- Tab switching ---
+    // Tab switching: each panel has its own set of .tab-btn / .tab-panel pairs
     document.querySelectorAll('.tab-btn').forEach(btn => {
       btn.addEventListener('click', () => {
-        document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
-        document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
+        const panel = btn.closest('.panel');
+        panel.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+        panel.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
         btn.classList.add('active');
-        document.getElementById('tab-' + btn.dataset.tab).classList.add('active');
+        panel.querySelector('#tab-' + btn.dataset.tab).classList.add('active');
       });
     });
 
-    // --- Progress helpers ---
+    // Progress bar helpers
     function showProgress(label) {
       $progress.hidden = false;
       $progressLbl.hidden = false;
       $progress.value = 0;
       $progressLbl.textContent = label;
     }
-
     function updateProgress(loaded, total, label) {
       if (total > 0) {
         $progress.value = loaded / total;
         const pct = Math.round(loaded / total * 100);
         const mb = (loaded / 1e6).toFixed(1);
-        const totalMb = (total / 1e6).toFixed(1);
-        $progressLbl.textContent = label + ` ${mb} / ${totalMb} MB (${pct}%)`;
+        $progressLbl.textContent = `${label} ${mb} / ${(total/1e6).toFixed(1)} MB (${pct}%)`;
       } else {
-        // Unknown total — show indeterminate style via max=0
         $progress.removeAttribute('value');
-        const mb = (loaded / 1e6).toFixed(1);
-        $progressLbl.textContent = label + ` ${mb} MB received…`;
+        $progressLbl.textContent = `${label} ${(loaded/1e6).toFixed(1)} MB…`;
       }
     }
-
     function hideProgress() {
       setTimeout(() => {
         $progress.hidden = true;
@@ -175,106 +179,136 @@
       }, 600);
     }
 
-    function onModelLoaded(newEngine, loadMs) {
-      engine = newEngine;
+    function onModelLoaded(eng, ms) {
+      engine = eng;
       $modelInfo.textContent =
-        `Loaded in ${loadMs.toFixed(0)} ms. ` +
-        `Vocab: ${engine.vocab_size}, Layers: ${engine.num_layers}, Hidden: ${engine.hidden_dim}`;
+        `Loaded in ${ms.toFixed(0)} ms — Vocab: ${eng.vocab_size}, ` +
+        `Layers: ${eng.num_layers}, Hidden: ${eng.hidden_dim}`;
       $generate.disabled = false;
+      $promptIn.disabled = false;
       hideProgress();
     }
 
-    // --- WASM init ---
-    async function start() {
+    function onTokenizerLoaded(tok) {
+      tokenizer = tok;
+      $tokBadge.textContent = 'loaded';
+      $tokBadge.className = 'badge ok';
+      $tokInfo.textContent =
+        `Vocab: ${tok.vocab_size}  ` +
+        `BOS: ${tok.bos_token_id ?? 'none'}  ` +
+        `EOS: ${tok.eos_token_id ?? 'none'}`;
+    }
+
+    // WASM init
+    async function startWasm() {
       try {
         await init();
         $status.textContent = 'WASM module loaded. Ready.';
         $env.textContent = `WebGPU: ${webgpu_available() ? 'yes' : 'no'}`;
-        $fileInput.disabled = false;
-        $urlInput.disabled = false;
-        $urlLoad.disabled = false;
+        [$fileInput, $urlInput, $urlLoad, $tokFileIn, $tokUrlIn, $tokUrlLoad]
+          .forEach(el => { el.disabled = false; });
       } catch (err) {
         $status.textContent = 'Failed to load WASM: ' + err;
         $status.classList.add('error');
       }
     }
 
-    // --- File upload loading ---
-    $fileInput.addEventListener('change', async (e) => {
+    // Model — file
+    $fileInput.addEventListener('change', async e => {
       const file = e.target.files[0];
       if (!file) return;
-
-      showProgress('Reading file…');
-      $modelInfo.textContent = `Reading ${(file.size / 1e6).toFixed(1)} MB…`;
+      showProgress('Reading…');
       $generate.disabled = true;
-
       try {
         const buffer = await file.arrayBuffer();
-        updateProgress(file.size, file.size, 'Parsing GGUF…');
-
-        await new Promise(r => setTimeout(r, 10)); // yield to UI
-
-        const bytes = new Uint8Array(buffer);
+        updateProgress(file.size, file.size, 'Parsing…');
+        await new Promise(r => setTimeout(r, 10));
         const t0 = performance.now();
-        const newEngine = FlareEngine.load(bytes);
-        onModelLoaded(newEngine, performance.now() - t0);
+        onModelLoaded(FlareEngine.load(new Uint8Array(buffer)), performance.now() - t0);
       } catch (err) {
-        $modelInfo.textContent = 'Error: ' + err;
-        $modelInfo.classList.add('error');
+        $modelInfo.textContent = 'Error: ' + err; $modelInfo.classList.add('error');
         hideProgress();
       }
     });
 
-    // --- URL progressive loading ---
+    // Model — URL
     $urlLoad.addEventListener('click', async () => {
       const url = $urlInput.value.trim();
       if (!url) return;
-
       showProgress('Connecting…');
-      $modelInfo.textContent = '';
       $generate.disabled = true;
       $urlLoad.disabled = true;
-
       try {
-        const loader = new FlareProgressiveLoader(url);
         const t0 = performance.now();
-
-        // on_progress is called with (loaded_bytes, total_bytes) as each chunk arrives
-        const newEngine = await loader.load((loaded, total) => {
-          updateProgress(loaded, total, 'Downloading…');
-        });
-
-        onModelLoaded(newEngine, performance.now() - t0);
+        const eng = await new FlareProgressiveLoader(url)
+          .load((l, t) => updateProgress(l, t, 'Downloading…'));
+        onModelLoaded(eng, performance.now() - t0);
       } catch (err) {
-        $modelInfo.textContent = 'Error: ' + err;
-        $modelInfo.classList.add('error');
+        $modelInfo.textContent = 'Error: ' + err; $modelInfo.classList.add('error');
         hideProgress();
-      } finally {
-        $urlLoad.disabled = false;
+      } finally { $urlLoad.disabled = false; }
+    });
+
+    // Tokenizer — file
+    $tokFileIn.addEventListener('change', async e => {
+      const file = e.target.files[0];
+      if (!file) return;
+      try {
+        onTokenizerLoaded(FlareTokenizer.from_json(await file.text()));
+      } catch (err) {
+        $tokInfo.textContent = 'Error: ' + err; $tokInfo.classList.add('error');
       }
     });
 
-    // --- Generation ---
+    // Tokenizer — URL
+    $tokUrlLoad.addEventListener('click', async () => {
+      const url = $tokUrlIn.value.trim();
+      if (!url) return;
+      $tokUrlLoad.disabled = true;
+      $tokInfo.textContent = 'Fetching…';
+      try {
+        const resp = await fetch(url);
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        onTokenizerLoaded(FlareTokenizer.from_json(await resp.text()));
+      } catch (err) {
+        $tokInfo.textContent = 'Error: ' + err; $tokInfo.classList.add('error');
+      } finally { $tokUrlLoad.disabled = false; }
+    });
+
+    // Generate
     $generate.addEventListener('click', async () => {
       if (!engine) return;
       $generate.disabled = true;
-      $output.textContent = '...';
+      $output.textContent = '';
       $genStats.textContent = '';
-
       await new Promise(r => setTimeout(r, 10));
+
+      const maxToks = parseInt($maxTokens.value, 10) || 64;
+      const promptText = $promptIn.value.trim() || 'Once upon a time';
 
       try {
         engine.reset();
         const t0 = performance.now();
-        const tokens = engine.generate_tokens(new Uint32Array([1]), 30);
-        const ms = performance.now() - t0;
-        const tokS = tokens.length / (ms / 1000);
 
-        $output.textContent =
-          `Generated tokens (raw IDs): [${Array.from(tokens).join(', ')}]\n\n` +
-          'Note: this demo shows raw token IDs. A real app would decode them with the BPE vocab.';
+        // Encode prompt (or use BOS fallback)
+        const promptIds = tokenizer
+          ? tokenizer.encode(promptText)
+          : new Uint32Array([1]);
+
+        const outputIds = engine.generate_tokens(promptIds, maxToks);
+        const ms = performance.now() - t0;
+        const tokS = outputIds.length / (ms / 1000);
+
+        if (tokenizer) {
+          $output.textContent = tokenizer.decode(outputIds) || '(empty output)';
+        } else {
+          $output.textContent =
+            `Token IDs: [${Array.from(outputIds).join(', ')}]\n\n` +
+            'Load a tokenizer (step 2) to see decoded text.';
+        }
+
         $genStats.textContent =
-          `${tokens.length} tokens in ${ms.toFixed(0)} ms = ${tokS.toFixed(1)} tok/s`;
+          `${outputIds.length} tokens in ${ms.toFixed(0)} ms = ${tokS.toFixed(1)} tok/s`;
       } catch (err) {
         $output.textContent = 'Error: ' + err;
         $output.classList.add('error');
@@ -283,7 +317,7 @@
       }
     });
 
-    start();
+    startWasm();
   </script>
 </body>
 </html>
