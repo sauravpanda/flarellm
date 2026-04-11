@@ -124,8 +124,9 @@
 
     <div style="display:flex;gap:0.5rem;align-items:center;flex-wrap:wrap;">
       <button id="generate" disabled>Generate</button>
+      <button id="stop" disabled>Stop</button>
       <label style="font-size:0.85rem;">
-        Max tokens:&nbsp;<input type="number" id="max-tokens" value="64"
+        Max tokens:&nbsp;<input type="number" id="max-tokens" value="128"
           min="1" max="512" style="width:5rem;margin-bottom:0;">
       </label>
     </div>
@@ -163,12 +164,14 @@
     const $systemIn    = $('system-input');
     const $promptIn    = $('prompt-input');
     const $generate    = $('generate');
+    const $stop        = $('stop');
     const $maxTokens   = $('max-tokens');
     const $output      = $('output');
     const $genStats    = $('gen-stats');
 
     let engine    = null;
     let tokenizer = null;
+    let streaming = false;   // true while a stream is running
 
     // Show/hide system prompt row based on chat-mode checkbox
     $chatMode.addEventListener('change', () => {
@@ -315,54 +318,92 @@
       } finally { $tokUrlLoad.disabled = false; }
     });
 
-    // Generate
+    // Stop button
+    $stop.addEventListener('click', () => {
+      if (engine && streaming) engine.stop_stream();
+      streaming = false;
+    });
+
+    // Generate — uses token-by-token streaming via requestAnimationFrame
     $generate.addEventListener('click', async () => {
-      if (!engine) return;
+      if (!engine || streaming) return;
+      streaming = true;
       $generate.disabled = true;
+      $stop.disabled = false;
       $output.textContent = '';
       $output.classList.remove('error');
-      $genStats.textContent = '';
+      $genStats.textContent = 'Generating…';
       await new Promise(r => setTimeout(r, 10));
 
-      const maxToks = parseInt($maxTokens.value, 10) || 64;
-      const userText  = $promptIn.value.trim() || 'Once upon a time';
-      const sysText   = $systemIn.value.trim();
-      const chatMode  = $chatMode.checked;
+      const maxToks  = parseInt($maxTokens.value, 10) || 128;
+      const userText = $promptIn.value.trim() || 'Once upon a time';
+      const sysText  = $systemIn.value.trim();
+      const chatMode = $chatMode.checked;
 
       try {
         engine.reset();
-        const t0 = performance.now();
 
-        // Format the input: apply chat template when enabled, or pass raw text
         const inputText = chatMode
           ? engine.apply_chat_template(userText, sysText)
           : userText;
 
-        // Encode prompt (or use BOS fallback when no tokenizer)
         const promptIds = tokenizer
           ? tokenizer.encode(inputText)
           : new Uint32Array([1]);
 
-        const outputIds = engine.generate_tokens(promptIds, maxToks);
-        const ms = performance.now() - t0;
-        const tokS = outputIds.length / (ms / 1000);
+        engine.begin_stream(promptIds, maxToks);
 
-        if (tokenizer) {
-          $output.textContent = tokenizer.decode(outputIds) || '(empty output)';
-        } else {
-          $output.textContent =
-            `Token IDs: [${Array.from(outputIds).join(', ')}]\n\n` +
-            'Load a tokenizer (step 2) to see decoded text.';
+        const t0 = performance.now();
+        let count = 0;
+        const tokenIds = [];
+
+        function tick() {
+          if (!streaming) {
+            finishStream();
+            return;
+          }
+          const id = engine.next_token();
+          if (id === undefined) {
+            streaming = false;
+            finishStream();
+            return;
+          }
+          count++;
+          tokenIds.push(id);
+          if (tokenizer) {
+            $output.textContent += tokenizer.decode_one(id);
+          } else {
+            $output.textContent = `Token IDs: [${tokenIds.join(', ')}]`;
+          }
+          // Update running stats every 8 tokens
+          if (count % 8 === 0) {
+            const ms = performance.now() - t0;
+            $genStats.textContent = `${count} tokens · ${(count / (ms / 1000)).toFixed(1)} tok/s`;
+          }
+          requestAnimationFrame(tick);
         }
 
-        $genStats.textContent =
-          `${outputIds.length} tokens in ${ms.toFixed(0)} ms = ${tokS.toFixed(1)} tok/s` +
-          (chatMode ? ` · template: ${engine.chat_template_name}` : '');
+        function finishStream() {
+          const ms = performance.now() - t0;
+          const tokS = count / (ms / 1000);
+          if (!tokenizer && tokenIds.length > 0) {
+            $output.textContent =
+              `Token IDs: [${tokenIds.join(', ')}]\n\nLoad a tokenizer (step 2) to see decoded text.`;
+          }
+          $genStats.textContent =
+            `${count} tokens in ${ms.toFixed(0)} ms = ${tokS.toFixed(1)} tok/s` +
+            (chatMode ? ` · template: ${engine.chat_template_name}` : '');
+          $generate.disabled = false;
+          $stop.disabled = true;
+        }
+
+        requestAnimationFrame(tick);
       } catch (err) {
         $output.textContent = 'Error: ' + err;
         $output.classList.add('error');
-      } finally {
+        streaming = false;
         $generate.disabled = false;
+        $stop.disabled = true;
       }
     });
 
