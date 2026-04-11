@@ -712,7 +712,7 @@ pub fn gelu_mul_cpu(gate: &[f32], up: &[f32]) -> Vec<f32> {
         .zip(up.iter())
         .map(|(&g, &u)| {
             // tanh-approximated GELU: 0.5 * x * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3)))
-            let c = 0.797_884_56_f32; // sqrt(2/pi)
+            let c = 0.797_884_6_f32; // sqrt(2/pi)
             let gelu = 0.5 * g * (1.0 + (c * (g + 0.044715 * g * g * g)).tanh());
             gelu * u
         })
@@ -753,6 +753,7 @@ pub fn apply_rope(data: &mut [f32], num_heads: usize, head_dim: usize, pos: usiz
 }
 
 /// Grouped-query attention for a single token position.
+#[allow(clippy::too_many_arguments)]
 fn grouped_query_attention(
     q: &[f32], // [num_heads * head_dim]
     kv_cache: &KvCache,
