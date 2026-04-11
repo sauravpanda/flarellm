@@ -95,6 +95,9 @@ fn detect_chat_template(gguf: &GgufFile) -> ChatTemplate {
 pub struct FlareEngine {
     model: Model,
     chat_template: ChatTemplate,
+    /// EOS token ID read from GGUF metadata (`tokenizer.ggml.eos_token_id`).
+    /// Passed to the generator so it stops at the model's natural end-of-sequence.
+    eos_token_id: Option<u32>,
 }
 
 #[wasm_bindgen]
@@ -106,6 +109,10 @@ impl FlareEngine {
         let gguf = GgufFile::parse_header(&mut reader)
             .map_err(|e| JsError::new(&format!("GGUF parse error: {e}")))?;
         let chat_template = detect_chat_template(&gguf);
+        let eos_token_id = gguf
+            .metadata
+            .get("tokenizer.ggml.eos_token_id")
+            .and_then(|v| v.as_u32());
         let config = gguf
             .to_model_config()
             .map_err(|e| JsError::new(&format!("Model config error: {e}")))?;
@@ -115,6 +122,7 @@ impl FlareEngine {
         Ok(FlareEngine {
             model: Model::new(config, weights),
             chat_template,
+            eos_token_id,
         })
     }
 
@@ -186,7 +194,15 @@ impl FlareEngine {
         self.chat_template.apply(&messages)
     }
 
+    /// EOS (end of sequence) token ID from the GGUF model metadata, if present.
+    /// Generation stops automatically when this token is produced.
+    #[wasm_bindgen(getter)]
+    pub fn eos_token_id(&self) -> Option<u32> {
+        self.eos_token_id
+    }
+
     /// Generate `max_tokens` tokens starting from `prompt_tokens` (greedy).
+    /// Stops early if the model produces the EOS token.
     /// Returns a Uint32Array of generated token IDs.
     #[wasm_bindgen]
     pub fn generate_tokens(&mut self, prompt_tokens: &[u32], max_tokens: u32) -> Vec<u32> {
@@ -198,14 +214,14 @@ impl FlareEngine {
         gen.generate(
             prompt_tokens,
             max_tokens as usize,
-            None,
+            self.eos_token_id,
             || 0.5,
             |_, _| true,
         )
     }
 
-    /// Generate with sampling parameters. Uses a fixed RNG seed for reproducibility
-    /// (browser apps should pass their own RNG via JS-side state).
+    /// Generate with sampling parameters. Stops early at EOS.
+    /// Uses a fixed LCG RNG seed for reproducibility.
     #[wasm_bindgen]
     pub fn generate_with_params(
         &mut self,
@@ -230,7 +246,7 @@ impl FlareEngine {
         gen.generate(
             prompt_tokens,
             max_tokens as usize,
-            None,
+            self.eos_token_id,
             &mut rng,
             |_, _| true,
         )
@@ -362,6 +378,10 @@ impl FlareProgressiveLoader {
         let gguf = GgufFile::parse_header(&mut cursor)
             .map_err(|e| JsError::new(&format!("GGUF parse error: {e}")))?;
         let chat_template = detect_chat_template(&gguf);
+        let eos_token_id = gguf
+            .metadata
+            .get("tokenizer.ggml.eos_token_id")
+            .and_then(|v| v.as_u32());
         let config = gguf
             .to_model_config()
             .map_err(|e| JsError::new(&format!("model config error: {e}")))?;
@@ -377,6 +397,7 @@ impl FlareProgressiveLoader {
         Ok(FlareEngine {
             model: Model::new(config, weights),
             chat_template,
+            eos_token_id,
         })
     }
 }
