@@ -88,4 +88,31 @@ mod tests {
         let err: FlareError = t_err.into();
         assert!(err.to_string().contains("shape mismatch"));
     }
+
+    #[test]
+    fn test_missing_weights_display() {
+        let err = ModelError::MissingWeights("embedding".into());
+        assert_eq!(err.to_string(), "missing model weights: embedding");
+    }
+
+    #[test]
+    fn test_invalid_config_display() {
+        let err = ModelError::InvalidConfig("hidden_dim=0".into());
+        assert_eq!(err.to_string(), "invalid model configuration: hidden_dim=0");
+    }
+
+    #[test]
+    fn test_flare_error_io() {
+        let io_err = std::io::Error::new(std::io::ErrorKind::NotFound, "file not found");
+        let err: FlareError = io_err.into();
+        assert!(err.to_string().contains("file not found"));
+    }
+
+    #[test]
+    fn test_model_error_into_flare_error() {
+        let model_err = ModelError::MissingWeights("wq".into());
+        let flare_err: FlareError = model_err.into();
+        assert!(matches!(flare_err, FlareError::Model(_)));
+        assert!(flare_err.to_string().contains("wq"));
+    }
 }
