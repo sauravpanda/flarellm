@@ -21,6 +21,7 @@ pub enum QuantFormat {
     IQ2XXS,
     IQ2XS,
     IQ3XXS,
+    IQ2S,
     Unknown(u32),
 }
 
@@ -45,6 +46,7 @@ impl QuantFormat {
             17 => QuantFormat::IQ2XS,
             18 => QuantFormat::IQ3XXS,
             20 => QuantFormat::IQ4NL,
+            21 => QuantFormat::IQ2S,
             22 => QuantFormat::IQ4XS,
             26 => QuantFormat::IQ3S,
             other => QuantFormat::Unknown(other),
@@ -68,6 +70,7 @@ impl QuantFormat {
             QuantFormat::IQ2XXS => 2.0625, // 66 bytes per 256 weights
             QuantFormat::IQ2XS => 2.3125, // 74 bytes per 256 weights
             QuantFormat::IQ3XXS => 3.0625, // 98 bytes per 256 weights
+            QuantFormat::IQ2S => 2.5625, // 82 bytes per 256 weights
             QuantFormat::Unknown(_) => 32.0, // assume worst case
         }
     }
@@ -87,7 +90,8 @@ impl QuantFormat {
             | QuantFormat::Q6K
             | QuantFormat::IQ2XXS
             | QuantFormat::IQ2XS
-            | QuantFormat::IQ3XXS => 256,
+            | QuantFormat::IQ3XXS
+            | QuantFormat::IQ2S => 256,
             QuantFormat::Unknown(_) => 1,
         }
     }
@@ -113,6 +117,7 @@ impl QuantFormat {
             QuantFormat::IQ3XXS => 98, // 2 (d) + 64 (qs[64] × u8) + 32 (scales_and_signs[8] × u32)
             QuantFormat::IQ4XS => 136, // 2 (d) + 2 (scales_h) + 4 (scales_l[4]) + 128 (qs[128])
             QuantFormat::IQ3S => 110, // 2 (d) + 64 (qs) + 8 (qh) + 32 (signs) + 4 (scales)
+            QuantFormat::IQ2S => 82, // 2 (d) + 32 (qs_lo) + 32 (signs) + 8 (qh) + 8 (scales)
             QuantFormat::Unknown(_) => 4,
         }
     }
@@ -702,6 +707,52 @@ pub fn dequant_iq3s_block(block: &[u8], grid: &[u32; 512], output: &mut [f32; 25
                     1.0
                 };
                 output[out_base + l * 8 + j + 4] = db * gb2 * sign2;
+            }
+        }
+    }
+}
+
+/// Dequantize an IQ2_S block: 256 weights from a 1024-entry u64 grid with 10-bit indices.
+/// Block layout (82 bytes): 2 (d f16) + 32 (qs_lo) + 32 (signs) + 8 (qh) + 8 (scales)
+/// For each ib32: db = d*(0.5+nibble)*0.25; grid_idx = qs_lo | (2-bit qh << 8).
+pub fn dequant_iq2s_block(block: &[u8], grid: &[u64; 1024], output: &mut [f32; 256]) {
+    if block.len() < 82 {
+        output.fill(0.0);
+        return;
+    }
+    let d = f16_to_f32(u16::from_le_bytes([block[0], block[1]]));
+    for ib32 in 0..8usize {
+        let scale = block[74 + ib32];
+        let db0 = d * (0.5 + (scale & 0xF) as f32) * 0.25;
+        let db1 = d * (0.5 + (scale >> 4) as f32) * 0.25;
+        let qh_byte = block[66 + ib32];
+        let out_base = ib32 * 32;
+        for l in 0..4usize {
+            let dl = if l < 2 { db0 } else { db1 };
+            let qs_lo = block[2 + ib32 * 4 + l] as usize;
+            let signs_byte = block[34 + ib32 * 4 + l];
+            let grid_hi = ((qh_byte >> (2 * l)) & 3) as usize;
+            let grid_idx = qs_lo | (grid_hi << 8);
+            let grid_val = grid[grid_idx];
+            let lo32 = (grid_val & 0xFFFFFFFF) as u32;
+            let hi32 = (grid_val >> 32) as u32;
+            for j in 0..4usize {
+                let gb = ((lo32 >> (j * 8)) & 0xFF) as f32;
+                let sign = if (signs_byte >> j) & 1 != 0 {
+                    -1.0
+                } else {
+                    1.0
+                };
+                output[out_base + l * 8 + j] = dl * gb * sign;
+            }
+            for j in 0..4usize {
+                let gb = ((hi32 >> (j * 8)) & 0xFF) as f32;
+                let sign = if (signs_byte >> (j + 4)) & 1 != 0 {
+                    -1.0
+                } else {
+                    1.0
+                };
+                output[out_base + l * 8 + j + 4] = dl * gb * sign;
             }
         }
     }
@@ -1393,6 +1444,95 @@ mod tests {
         let block = vec![0u8; 10]; // too short
         let mut output = [0.0f32; 256];
         dequant_iq3s_block(&block, &grid, &mut output);
+        assert!(output.iter().all(|&v| v == 0.0));
+    }
+
+    // ── IQ2_S reference dequant tests ─────────────────────────────────────────
+
+    /// Minimal IQ2_S grid fixture: entry 0 = 0x0808080808080808 (all bytes 8).
+    fn iq2s_grid_fixture() -> Box<[u64; 1024]> {
+        let mut g = vec![0u64; 1024];
+        g[0] = 0x0808080808080808u64; // each byte = 8
+        Box::new(g.try_into().unwrap())
+    }
+
+    /// Minimal IQ2_S block (82 bytes): d=1.0, all zeroed except d.
+    /// scale=0 → dl = 1.0*(0.5+0)*0.25 = 0.125; grid[0] all 8; signs all 0 (+1).
+    /// Expected: 0.125 * 8 = 1.0 for all 256 weights.
+    fn make_iq2s_zero_block() -> Vec<u8> {
+        let mut block = vec![0u8; 82];
+        block[0] = 0x00;
+        block[1] = 0x3C; // f16 1.0
+        block
+    }
+
+    #[test]
+    fn test_dequant_iq2s_zeroed() {
+        let grid = iq2s_grid_fixture();
+        let block = make_iq2s_zero_block();
+        let mut output = [0.0f32; 256];
+        dequant_iq2s_block(&block, &grid, &mut output);
+        // dl = 1.0*(0.5+0)*0.25 = 0.125; grid[0] all 8; signs all +1
+        // Expected: 0.125 * 8 = 1.0
+        for (i, &v) in output.iter().enumerate() {
+            assert!(
+                (v - 1.0).abs() < 1e-5,
+                "iq2s zero: weight[{i}] = {v}, expected 1.0"
+            );
+        }
+    }
+
+    #[test]
+    fn test_dequant_iq2s_max_scale() {
+        let grid = iq2s_grid_fixture();
+        let mut block = make_iq2s_zero_block();
+        // lo nibble=15 → dl = 1.0*(0.5+15)*0.25 = 3.875; covers l=0,1 (first 16 weights of ib32=0)
+        block[74] = 0x0F; // scales[0]: lo=15
+        let mut output = [0.0f32; 256];
+        dequant_iq2s_block(&block, &grid, &mut output);
+        let expected = (0.5_f32 + 15.0) * 0.25 * 8.0; // dl * grid_byte
+        for (i, &v) in output[..16].iter().enumerate() {
+            assert!(
+                (v - expected).abs() < 1e-4,
+                "iq2s max scale: weight[{i}] = {v}, expected {expected}"
+            );
+        }
+        // l=2,3 use hi nibble=0 → dl=0.125, output=1.0
+        for &v in &output[16..32] {
+            assert!(
+                (v - 1.0).abs() < 1e-5,
+                "iq2s hi nibble 0: got {v}, expected 1.0"
+            );
+        }
+    }
+
+    #[test]
+    fn test_dequant_iq2s_sign_inversion() {
+        let grid = iq2s_grid_fixture();
+        let mut block = make_iq2s_zero_block();
+        // signs[0] at byte 34 = 0x01: bit0=1 → weight[0] negated
+        block[34] = 0x01;
+        let mut output = [0.0f32; 256];
+        dequant_iq2s_block(&block, &grid, &mut output);
+        // dl=0.125; grid[0][byte 0]=8; sign bit0=1 → -1.0
+        assert!(
+            (output[0] - (-1.0)).abs() < 1e-5,
+            "iq2s sign bit0: got {}",
+            output[0]
+        );
+        assert!(
+            (output[1] - 1.0).abs() < 1e-5,
+            "iq2s weight1: got {}",
+            output[1]
+        );
+    }
+
+    #[test]
+    fn test_dequant_iq2s_short_block() {
+        let grid = iq2s_grid_fixture();
+        let block = vec![0u8; 10]; // too short
+        let mut output = [0.0f32; 256];
+        dequant_iq2s_block(&block, &grid, &mut output);
         assert!(output.iter().all(|&v| v == 0.0));
     }
 }
