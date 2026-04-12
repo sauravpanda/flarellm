@@ -34,6 +34,7 @@ const DEQUANT_Q6K_SHADER: &str = include_str!("../shaders/dequant_q6k.wgsl");
 const PREFILL_ATTENTION_SHADER: &str = include_str!("../shaders/prefill_attention.wgsl");
 const DEQUANT_Q3K_SHADER: &str = include_str!("../shaders/dequant_q3k.wgsl");
 const BATCHED_MATVEC_SHADER: &str = include_str!("../shaders/batched_matvec.wgsl");
+const BATCHED_RMSNORM_SHADER: &str = include_str!("../shaders/batched_rmsnorm.wgsl");
 
 /// WebGPU/wgpu compute backend.
 ///
@@ -729,6 +730,66 @@ impl WebGpuBackend {
 
         self.pool.return_storage(raw_buf);
         self.pool.return_storage(vec_buf);
+        self.pool.return_output(out_buf);
+        self.pool.return_uniform(params_buf);
+
+        result
+    }
+
+    /// Apply RMSNorm to every row in `input` using the given `weight` vector.
+    ///
+    /// - `input`:  f32 batch `[batch × dim]`, row-major
+    /// - `weight`: f32 norm weights `[dim]`
+    /// - Returns:  f32 result `[batch × dim]`, row-major
+    ///
+    /// Dispatches one workgroup per batch row; 64 threads compute a parallel
+    /// sum-of-squares via tree reduction, then each thread writes its outputs.
+    pub fn batched_rmsnorm(
+        &self,
+        input: &[f32],
+        weight: &[f32],
+        dim: usize,
+        batch: usize,
+        eps: f32,
+    ) -> Vec<f32> {
+        let output_size = (batch * dim) as u64 * 4;
+
+        let inp_buf = self
+            .pool
+            .get_storage(&self.device, &self.queue, bytemuck::cast_slice(input));
+        let wt_buf = self
+            .pool
+            .get_storage(&self.device, &self.queue, bytemuck::cast_slice(weight));
+        let out_buf = self.pool.get_output(&self.device, output_size);
+
+        let params: [u32; 3] = [dim as u32, batch as u32, eps.to_bits()];
+        let params_buf =
+            self.pool
+                .get_uniform(&self.device, &self.queue, bytemuck::cast_slice(&params));
+
+        let layout_entries = Self::standard_layout();
+        let result = self.cache.with_pipeline(
+            &self.device,
+            "batched_rmsnorm",
+            BATCHED_RMSNORM_SHADER,
+            "batched_rmsnorm",
+            &layout_entries,
+            |cached| {
+                let bind_group =
+                    self.make_bind_group(cached, &inp_buf, &wt_buf, &out_buf, &params_buf);
+                // One workgroup per batch row.
+                self.dispatch_and_readback(
+                    &cached.pipeline,
+                    &bind_group,
+                    [batch as u32, 1, 1],
+                    &out_buf,
+                    output_size,
+                )
+            },
+        );
+
+        self.pool.return_storage(inp_buf);
+        self.pool.return_storage(wt_buf);
         self.pool.return_output(out_buf);
         self.pool.return_uniform(params_buf);
 
@@ -1460,6 +1521,17 @@ impl ComputeBackend for WebGpuBackend {
     ) -> Vec<f32> {
         self.batched_matvec(weight, input, out_rows, in_cols, batch)
     }
+
+    fn batched_rmsnorm(
+        &self,
+        input: &[f32],
+        weight: &[f32],
+        dim: usize,
+        batch: usize,
+        eps: f32,
+    ) -> Vec<f32> {
+        WebGpuBackend::batched_rmsnorm(self, input, weight, dim, batch, eps)
+    }
 }
 
 // WASM is single-threaded; wgpu's JS-backed types don't impl Send/Sync but it's
@@ -2069,6 +2141,46 @@ mod tests {
             assert!(
                 (v - expected).abs() < 1e-1,
                 "row {i}: got {v}, expected {expected}"
+            );
+        }
+    }
+
+    /// Verify GPU batched_rmsnorm matches CPU rmsnorm for a 3-row × 4-dim batch.
+    ///
+    /// Input rows: [1,2,3,4], [2,2,2,2], [3,3,3,3].
+    /// Weight: [1,1,1,1] (identity scaling).
+    /// Expected: each row normalised to unit RMS.
+    ///
+    /// Requires a GPU adapter; run with: `cargo test -p flarellm-gpu -- --ignored`
+    #[test]
+    #[ignore]
+    fn test_batched_rmsnorm_matches_cpu() {
+        use flare_core::model::rmsnorm;
+
+        let dim = 4usize;
+        let batch = 3usize;
+        let eps = 1e-5f32;
+        let weight = [1.0f32; 4];
+
+        let input: Vec<f32> = vec![
+            1.0, 2.0, 3.0, 4.0, // row 0
+            2.0, 2.0, 2.0, 2.0, // row 1
+            3.0, 3.0, 3.0, 3.0, // row 2
+        ];
+
+        // CPU reference.
+        let expected: Vec<f32> = (0..batch)
+            .flat_map(|b| rmsnorm(&input[b * dim..(b + 1) * dim], &weight, eps))
+            .collect();
+
+        let backend = pollster::block_on(WebGpuBackend::new()).expect("GPU backend unavailable");
+        let result = backend.batched_rmsnorm(&input, &weight, dim, batch, eps);
+
+        assert_eq!(result.len(), batch * dim);
+        for (i, (&got, &exp)) in result.iter().zip(expected.iter()).enumerate() {
+            assert!(
+                (got - exp).abs() < 1e-4,
+                "index {i}: got {got}, expected {exp}"
             );
         }
     }
