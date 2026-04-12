@@ -917,6 +917,204 @@ mod tests {
     }
 
     #[test]
+    fn test_dequant_q4_0_short_block() {
+        // block shorter than 18 bytes → output must not be modified
+        let block = vec![0x00, 0x3C, 0x88u8]; // only 3 bytes
+        let mut output = [99.0f32; 32];
+        dequant_q4_0_block(&block, &mut output);
+        assert!(
+            output.iter().all(|&v| (v - 99.0).abs() < 1e-6),
+            "short block must leave output unchanged"
+        );
+    }
+
+    #[test]
+    fn test_dequant_q4_0_zero_scale() {
+        // scale = 0.0 → all outputs must be 0.0 regardless of nibble values
+        let mut block = vec![0x00u8, 0x00]; // f16 0.0
+        block.extend_from_slice(&[0xF0u8; 16]); // all max nibbles
+        let mut output = [0.0f32; 32];
+        dequant_q4_0_block(&block, &mut output);
+        for (i, &val) in output.iter().enumerate() {
+            assert!(
+                val.abs() < 1e-6,
+                "zero scale: expected 0.0 at {i}, got {val}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_dequant_q4_0_nonzero_nibbles() {
+        // scale=1.0, block[2]=0xF0: lo nibble=0 → 0-8=-8, hi nibble=0xF=15 → 15-8=7
+        let mut block = vec![0x00u8, 0x3C]; // f16 1.0
+        block.push(0xF0); // lo=0, hi=15
+        block.extend_from_slice(&[0x88u8; 15]);
+        let mut output = [0.0f32; 32];
+        dequant_q4_0_block(&block, &mut output);
+        assert!(
+            (output[0] - (-8.0)).abs() < 1e-4,
+            "lo nibble=0: expected -8.0, got {}",
+            output[0]
+        );
+        assert!(
+            (output[1] - 7.0).abs() < 1e-4,
+            "hi nibble=15: expected 7.0, got {}",
+            output[1]
+        );
+        // remaining bytes are 0x88 → nibble 8-8=0
+        for (i, &v) in output[2..].iter().enumerate() {
+            assert!(v.abs() < 1e-5, "expected 0.0 at {}, got {}", i + 2, v);
+        }
+    }
+
+    #[test]
+    fn test_dequant_q4_0_negative_scale() {
+        // scale=-1.0 (f16 0xBC00), block[2]=0xF9: lo=9→9-8=1, hi=0xF=15→7
+        // output[0]= 1*(-1.0)=-1.0; output[1]= 7*(-1.0)=-7.0
+        let mut block = vec![0x00u8, 0xBC]; // f16 -1.0
+        block.push(0xF9); // lo=9, hi=15
+        block.extend_from_slice(&[0x88u8; 15]);
+        let mut output = [0.0f32; 32];
+        dequant_q4_0_block(&block, &mut output);
+        assert!(
+            (output[0] - (-1.0)).abs() < 1e-4,
+            "expected -1.0, got {}",
+            output[0]
+        );
+        assert!(
+            (output[1] - (-7.0)).abs() < 1e-4,
+            "expected -7.0, got {}",
+            output[1]
+        );
+    }
+
+    #[test]
+    fn test_dequant_q4_0_all_nibbles_min() {
+        // all qs=0x00: nibble 0-8=-8; scale=1.0 → all outputs=-8.0
+        let mut block = vec![0x00u8, 0x3C]; // f16 1.0
+        block.extend_from_slice(&[0x00u8; 16]);
+        let mut output = [0.0f32; 32];
+        dequant_q4_0_block(&block, &mut output);
+        for (i, &val) in output.iter().enumerate() {
+            assert!(
+                (val - (-8.0)).abs() < 1e-4,
+                "all-zero nibble: expected -8.0 at {i}, got {val}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_dequant_q4_0_max_nibble() {
+        // all qs=0xFF: nibble 15-8=7; scale=2.0 (f16 0x4000) → all outputs=14.0
+        let mut block = vec![0x00u8, 0x40]; // f16 2.0
+        block.extend_from_slice(&[0xFFu8; 16]);
+        let mut output = [0.0f32; 32];
+        dequant_q4_0_block(&block, &mut output);
+        for (i, &val) in output.iter().enumerate() {
+            assert!(
+                (val - 14.0).abs() < 1e-4,
+                "max nibble: expected 14.0 at {i}, got {val}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_dequant_q8_0_short_block() {
+        // block < 34 bytes → output must not be modified
+        let block = vec![0x00u8, 0x3C, 0x01, 0x02]; // only 4 bytes
+        let mut output = [55.0f32; 32];
+        dequant_q8_0_block(&block, &mut output);
+        assert!(
+            output.iter().all(|&v| (v - 55.0).abs() < 1e-6),
+            "short block must leave output unchanged"
+        );
+    }
+
+    #[test]
+    fn test_dequant_q8_0_zero_scale() {
+        // scale=0.0 → all outputs 0.0 regardless of int8 values
+        let mut block = vec![0x00u8, 0x00]; // f16 0.0
+        block.extend_from_slice(&[0x7Fu8; 32]); // all i8=127
+        let mut output = [0.0f32; 32];
+        dequant_q8_0_block(&block, &mut output);
+        for (i, &val) in output.iter().enumerate() {
+            assert!(
+                val.abs() < 1e-6,
+                "zero scale: expected 0.0 at {i}, got {val}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_dequant_q8_0_positive_values() {
+        // scale=1.0, first byte i8=42 → output[0]=42.0
+        let mut block = vec![0x00u8, 0x3C]; // f16 1.0
+        block.push(42);
+        block.extend_from_slice(&[0u8; 31]);
+        let mut output = [0.0f32; 32];
+        dequant_q8_0_block(&block, &mut output);
+        assert!(
+            (output[0] - 42.0).abs() < 1e-4,
+            "expected 42.0, got {}",
+            output[0]
+        );
+        for (i, &v) in output[1..].iter().enumerate() {
+            assert!(v.abs() < 1e-5, "expected 0.0 at {}, got {}", i + 1, v);
+        }
+    }
+
+    #[test]
+    fn test_dequant_q8_0_negative_values() {
+        // scale=1.0, byte=0x80 → i8=-128 → output[0]=-128.0
+        let mut block = vec![0x00u8, 0x3C]; // f16 1.0
+        block.push(0x80); // i8 = -128
+        block.extend_from_slice(&[0u8; 31]);
+        let mut output = [0.0f32; 32];
+        dequant_q8_0_block(&block, &mut output);
+        assert!(
+            (output[0] - (-128.0)).abs() < 1e-4,
+            "expected -128.0, got {}",
+            output[0]
+        );
+    }
+
+    #[test]
+    fn test_dequant_q8_0_mixed_signs() {
+        // scale=1.0, qs[0]=1 (i8=1), qs[1]=0xFF (i8=-1)
+        let mut block = vec![0x00u8, 0x3C]; // f16 1.0
+        block.push(0x01);
+        block.push(0xFF); // i8 = -1
+        block.extend_from_slice(&[0u8; 30]);
+        let mut output = [0.0f32; 32];
+        dequant_q8_0_block(&block, &mut output);
+        assert!(
+            (output[0] - 1.0).abs() < 1e-4,
+            "expected 1.0, got {}",
+            output[0]
+        );
+        assert!(
+            (output[1] - (-1.0)).abs() < 1e-4,
+            "expected -1.0, got {}",
+            output[1]
+        );
+    }
+
+    #[test]
+    fn test_dequant_q8_0_negative_scale() {
+        // scale=-2.0 (f16 0xC000), qs[0]=2 (i8) → output[0]=2*(-2.0)=-4.0
+        let mut block = vec![0x00u8, 0xC0]; // f16 -2.0
+        block.push(0x02);
+        block.extend_from_slice(&[0u8; 31]);
+        let mut output = [0.0f32; 32];
+        dequant_q8_0_block(&block, &mut output);
+        assert!(
+            (output[0] - (-4.0)).abs() < 1e-4,
+            "expected -4.0, got {}",
+            output[0]
+        );
+    }
+
+    #[test]
     fn test_dequant_q6k_zeroed() {
         // Q6_K block with all zeros should produce all zeros
         let block = vec![0u8; 210];
