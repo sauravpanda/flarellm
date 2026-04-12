@@ -235,4 +235,55 @@ mod tests {
         assert_eq!(t.numel(), 24);
         assert!(t.data().iter().all(|&v| v == 0.0));
     }
+
+    #[test]
+    fn test_zeros_scalar() {
+        // Empty shape → scalar tensor with 1 element (empty product = 1)
+        let t = Tensor::zeros(&[]);
+        assert_eq!(t.shape(), &[] as &[usize]);
+        assert_eq!(t.numel(), 1);
+        assert_eq!(t.ndim(), 0);
+        assert_eq!(t.data(), &[0.0]);
+    }
+
+    #[test]
+    fn test_from_vec_scalar() {
+        let t = Tensor::from_vec(vec![42.0], &[]).unwrap();
+        assert_eq!(t.shape(), &[] as &[usize]);
+        assert_eq!(t.numel(), 1);
+        assert_eq!(t.data(), &[42.0]);
+    }
+
+    #[test]
+    fn test_add_inplace_single_element() {
+        let mut a = Tensor::from_vec(vec![1.0], &[1]).unwrap();
+        let b = Tensor::from_vec(vec![2.0], &[1]).unwrap();
+        a.add_inplace(&b).unwrap();
+        assert_eq!(a.data(), &[3.0]);
+    }
+
+    #[test]
+    fn test_scale_one_is_noop() {
+        let original = vec![1.0, 2.5, -3.0, 0.0];
+        let mut t = Tensor::from_vec(original.clone(), &[4]).unwrap();
+        t.scale(1.0);
+        assert_eq!(t.data(), original.as_slice());
+    }
+
+    #[test]
+    fn test_reshape_to_flat() {
+        let mut t = Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3]).unwrap();
+        t.reshape(&[6]).unwrap();
+        assert_eq!(t.shape(), &[6]);
+        assert_eq!(t.ndim(), 1);
+        assert_eq!(t.strides(), &[1]);
+        assert_eq!(t.data(), &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+    }
+
+    #[test]
+    fn test_strides_1d() {
+        // 1D tensor always has stride [1]
+        let t = Tensor::zeros(&[10]);
+        assert_eq!(t.strides(), &[1]);
+    }
 }
