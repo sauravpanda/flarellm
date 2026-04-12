@@ -504,26 +504,74 @@
       clearChat();
     });
 
-    // ---------- Quick test (generate_text — no tokenizer.json needed) ----------
+    // ---------- Quick test (streaming via embedded GGUF tokenizer, no tokenizer.json needed) ----------
     $quickTest.addEventListener('click', () => {
       if (!engine || streaming) return;
       const prompt = $promptIn.value.trim() || 'Hello';
-      $genStats.textContent = 'Running quick test…';
-      const t0 = performance.now();
-      engine.reset();
-      const result = engine.generate_text(prompt, parseInt($maxTokens.value, 10) || 64);
-      const ms = performance.now() - t0;
-      if (result) {
-        appendBubble('user', prompt);
-        appendBubble('assistant', result);
-        history.push({ role: 'user', content: prompt });
-        history.push({ role: 'assistant', content: result });
-        $promptIn.value = '';
-        $tokenCounter.textContent = '';
-        $genStats.textContent = `Quick test done in ${ms.toFixed(0)} ms (embedded GGUF tokenizer)`;
-      } else {
+      const maxToks = parseInt($maxTokens.value, 10) || 64;
+
+      // Check embedded vocab is available by encoding 1 token
+      const testEncode = engine.encode_text(prompt);
+      if (!testEncode || testEncode.length === 0) {
         $genStats.textContent = 'Quick test unavailable: no embedded GGUF tokenizer in this model.';
+        return;
       }
+
+      streaming = true;
+      $generate.disabled = true;
+      $stop.disabled = false;
+      $promptIn.value = '';
+      $tokenCounter.textContent = '';
+      $genStats.textContent = 'Generating…';
+
+      appendBubble('user', prompt);
+      history.push({ role: 'user', content: prompt });
+
+      engine.reset();
+      engine.begin_stream(testEncode, maxToks);
+
+      const t0 = performance.now();
+      let count = 0;
+      let assistantText = '';
+      const bubble = appendBubble('assistant', '', true);
+
+      function quickTick() {
+        if (!streaming) {
+          finishQuick();
+          return;
+        }
+        const id = engine.next_token();
+        if (id === undefined) {
+          streaming = false;
+          finishQuick();
+          return;
+        }
+        count++;
+        assistantText += engine.decode_ids(new Uint32Array([id]));
+        bubble.textContent = assistantText;
+        $chat.scrollTop = $chat.scrollHeight;
+
+        if (count % 8 === 0) {
+          const ms = performance.now() - t0;
+          $genStats.textContent = `${count} tokens · ${(count / (ms / 1000)).toFixed(1)} tok/s`;
+        }
+        requestAnimationFrame(quickTick);
+      }
+
+      function finishQuick() {
+        bubble.classList.remove('streaming');
+        if (assistantText) {
+          history.push({ role: 'assistant', content: assistantText });
+        }
+        const ms = performance.now() - t0;
+        $genStats.textContent =
+          `${count} tokens in ${ms.toFixed(0)} ms = ${(count / (ms / 1000)).toFixed(1)} tok/s ` +
+          `(embedded GGUF tokenizer)`;
+        $generate.disabled = false;
+        $stop.disabled = true;
+      }
+
+      requestAnimationFrame(quickTick);
     });
 
     // ---------- Stop ----------
