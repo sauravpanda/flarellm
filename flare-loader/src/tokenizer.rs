@@ -149,9 +149,88 @@ impl GgufVocab {
         result
     }
 
-    /// Look up a token string to get its ID.
+    /// Look up a single token string by exact match.
     pub fn encode_token(&self, token: &str) -> Option<u32> {
         self.token_to_id.get(token).copied()
+    }
+
+    /// Encode text to token IDs using the BPE-merge algorithm over the
+    /// embedded GGUF vocabulary.
+    ///
+    /// This implements the "llama.cpp"-style SentencePiece BPE tokenizer:
+    /// 1. Normalize: replace spaces with the ▁ marker (U+2581) and prepend ▁.
+    /// 2. Split into per-character symbols; unknown chars fall back to
+    ///    `<0xXX>` byte tokens.
+    /// 3. Repeatedly merge the adjacent pair with the highest vocabulary score
+    ///    until no more merges exist.
+    ///
+    /// Does not prepend BOS — the caller (chat template / server) is
+    /// responsible for that.
+    pub fn encode(&self, text: &str) -> Vec<u32> {
+        if text.is_empty() {
+            return Vec::new();
+        }
+
+        // Step 1: normalize — prepend ▁ and replace spaces with ▁
+        let normalized = format!("\u{2581}{}", text.replace(' ', "\u{2581}"));
+
+        // Step 2: seed symbols — one unicode scalar at a time; fall back to bytes
+        let mut symbols: Vec<u32> = Vec::with_capacity(normalized.len());
+        for ch in normalized.chars() {
+            let s = ch.to_string();
+            if let Some(&id) = self.token_to_id.get(&s) {
+                symbols.push(id);
+            } else {
+                // UTF-8 byte fallback
+                for byte in s.as_bytes() {
+                    let byte_tok = format!("<0x{byte:02X}>");
+                    let id = self.token_to_id.get(&byte_tok).copied().unwrap_or(0);
+                    symbols.push(id);
+                }
+            }
+        }
+
+        // Step 3: greedy BPE merge — O(n²) but sufficient for typical prompt lengths
+        loop {
+            let mut best_score = f32::NEG_INFINITY;
+            let mut best_pos: Option<usize> = None;
+            let mut best_id: Option<u32> = None;
+
+            for i in 0..symbols.len().saturating_sub(1) {
+                let left = match self.id_to_token.get(symbols[i] as usize) {
+                    Some(s) => s.as_str(),
+                    None => continue,
+                };
+                let right = match self.id_to_token.get(symbols[i + 1] as usize) {
+                    Some(s) => s.as_str(),
+                    None => continue,
+                };
+                // Avoid heap allocation for the common case where concat is long
+                let merged = format!("{left}{right}");
+                if let Some(&id) = self.token_to_id.get(&merged) {
+                    let score = self
+                        .scores
+                        .get(id as usize)
+                        .copied()
+                        .unwrap_or(f32::NEG_INFINITY);
+                    if score > best_score {
+                        best_score = score;
+                        best_pos = Some(i);
+                        best_id = Some(id);
+                    }
+                }
+            }
+
+            match (best_pos, best_id) {
+                (Some(pos), Some(id)) => {
+                    symbols[pos] = id;
+                    symbols.remove(pos + 1);
+                }
+                _ => break,
+            }
+        }
+
+        symbols
     }
 
     /// Get all control tokens.
@@ -283,5 +362,87 @@ mod tests {
             tensor_data_offset: 0,
         };
         assert!(GgufVocab::from_gguf(&gguf).is_err());
+    }
+
+    /// Build a vocab that can encode a few words via BPE merges.
+    fn make_merge_vocab() -> GgufVocab {
+        // Tokens: index 0=<unk>, 1=▁, 2=h, 3=e, 4=l, 5=o, 6=▁h, 7=▁he, 8=▁hel, 9=▁hell, 10=▁hello
+        let tokens = vec![
+            "<unk>".to_string(),
+            "\u{2581}".to_string(), // ▁
+            "h".to_string(),
+            "e".to_string(),
+            "l".to_string(),
+            "o".to_string(),
+            "\u{2581}h".to_string(),     // ▁h
+            "\u{2581}he".to_string(),    // ▁he
+            "\u{2581}hel".to_string(),   // ▁hel
+            "\u{2581}hell".to_string(),  // ▁hell
+            "\u{2581}hello".to_string(), // ▁hello
+        ];
+        // Scores: higher = preferred merge. Each multi-char token gets its index as score.
+        let scores: Vec<f32> = (0..tokens.len()).map(|i| i as f32).collect();
+        let vocab_size = tokens.len();
+        let mut token_to_id = HashMap::new();
+        for (i, t) in tokens.iter().enumerate() {
+            token_to_id.insert(t.clone(), i as u32);
+        }
+        GgufVocab {
+            id_to_token: tokens,
+            token_to_id,
+            scores,
+            token_types: vec![TokenType::Normal; vocab_size],
+            bos_id: None,
+            eos_id: None,
+            vocab_size,
+        }
+    }
+
+    #[test]
+    fn test_encode_bpe_merges() {
+        let vocab = make_merge_vocab();
+        // "hello" → normalize to "▁hello" → should merge all the way to token 10
+        let ids = vocab.encode("hello");
+        assert_eq!(
+            ids,
+            vec![10],
+            "expected single ▁hello token (id=10), got {ids:?}"
+        );
+    }
+
+    #[test]
+    fn test_encode_empty() {
+        let vocab = make_merge_vocab();
+        assert_eq!(vocab.encode(""), Vec::<u32>::new());
+    }
+
+    #[test]
+    fn test_encode_byte_fallback() {
+        // A vocab with only byte tokens should encode unknown chars as bytes.
+        let mut tokens = vec!["<unk>".to_string()];
+        // Add all 256 byte tokens
+        for b in 0u8..=255 {
+            tokens.push(format!("<0x{b:02X}>"));
+        }
+        let vocab_size = tokens.len();
+        let mut token_to_id = HashMap::new();
+        for (i, t) in tokens.iter().enumerate() {
+            token_to_id.insert(t.clone(), i as u32);
+        }
+        let vocab = GgufVocab {
+            id_to_token: tokens,
+            token_to_id,
+            scores: vec![0.0; vocab_size],
+            token_types: vec![TokenType::Normal; vocab_size],
+            bos_id: None,
+            eos_id: None,
+            vocab_size,
+        };
+        // "A" = 0x41 = byte index 0x41+1 = 66th entry (1-indexed because <unk> is 0)
+        let ids = vocab.encode("A");
+        // ▁ (0xE2 0x96 0x81 in UTF-8) + A (0x41) encoded as bytes
+        assert!(!ids.is_empty());
+        // Last token should correspond to 'A' = 0x41
+        assert_eq!(*ids.last().unwrap(), 0x42); // 1-based byte token index
     }
 }

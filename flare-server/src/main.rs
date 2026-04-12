@@ -11,7 +11,10 @@ use axum::{
 use clap::Parser;
 use std::fs::File;
 use std::io::BufReader;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use std::time::Duration;
+use tokio::sync::Mutex;
+use tokio::time::timeout;
 use tower_http::cors::{Any, CorsLayer};
 
 use flare_core::chat::{ChatMessage, ChatTemplate, Role};
@@ -231,6 +234,9 @@ fn model_not_loaded_error() -> Response {
         .into_response()
 }
 
+/// How long a request will wait for the model lock before returning 503.
+const INFERENCE_TIMEOUT: Duration = Duration::from_secs(30);
+
 async fn chat_completions(
     State(state): State<Arc<AppState>>,
     Json(req): Json<ChatCompletionRequest>,
@@ -257,9 +263,9 @@ async fn chat_completions(
         .to_string();
 
     if req.stream {
-        stream_response(&model_name, &req, model_mutex, tokenizer, template)
+        stream_response(&model_name, &req, model_mutex, tokenizer, template).await
     } else {
-        non_stream_response(&model_name, &req, model_mutex, tokenizer, template)
+        non_stream_response(&model_name, &req, model_mutex, tokenizer, template).await
     }
 }
 
@@ -289,15 +295,7 @@ fn encode_prompt(text: &str, tokenizer: &TokenizerState) -> Vec<u32> {
                 text.bytes().map(|b| b as u32).collect()
             }
         },
-        TokenizerState::Gguf(vocab) => {
-            // Byte-level fallback: look up each byte in GGUF vocab
-            text.bytes()
-                .map(|b| {
-                    let byte_token = format!("<0x{b:02X}>");
-                    vocab.encode_token(&byte_token).unwrap_or(b as u32)
-                })
-                .collect()
-        }
+        TokenizerState::Gguf(vocab) => vocab.encode(text),
     }
 }
 
@@ -332,6 +330,21 @@ fn make_rng() -> impl FnMut() -> f32 {
     }
 }
 
+fn server_busy_error() -> Response {
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        [(header::RETRY_AFTER, "5")],
+        Json(serde_json::json!({
+            "error": {
+                "message": "Model is busy — another request is in progress. Retry shortly.",
+                "type": "server_busy",
+                "code": 503,
+            }
+        })),
+    )
+        .into_response()
+}
+
 fn lock_error_response(err: &str) -> Response {
     (
         StatusCode::INTERNAL_SERVER_ERROR,
@@ -345,16 +358,16 @@ fn lock_error_response(err: &str) -> Response {
         .into_response()
 }
 
-fn non_stream_response(
+async fn non_stream_response(
     model_name: &str,
     req: &ChatCompletionRequest,
     model_mutex: &Mutex<Model>,
     tokenizer: &TokenizerState,
     template: &ChatTemplate,
 ) -> Response {
-    let mut model = match model_mutex.lock() {
+    let mut model = match timeout(INFERENCE_TIMEOUT, model_mutex.lock()).await {
         Ok(guard) => guard,
-        Err(e) => return lock_error_response(&e.to_string()),
+        Err(_) => return server_busy_error(),
     };
 
     let prompt = format_prompt(&req.messages, template);
@@ -398,16 +411,16 @@ fn non_stream_response(
     .into_response()
 }
 
-fn stream_response(
+async fn stream_response(
     model_name: &str,
     req: &ChatCompletionRequest,
     model_mutex: &Mutex<Model>,
     tokenizer: &TokenizerState,
     template: &ChatTemplate,
 ) -> Response {
-    let mut model = match model_mutex.lock() {
+    let mut model = match timeout(INFERENCE_TIMEOUT, model_mutex.lock()).await {
         Ok(guard) => guard,
-        Err(e) => return lock_error_response(&e.to_string()),
+        Err(_) => return server_busy_error(),
     };
 
     let model_name_owned = model_name.to_string();

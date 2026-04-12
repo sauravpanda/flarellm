@@ -395,6 +395,55 @@
       }
     });
 
+    // Cache name — bump version to invalidate all cached models on format change.
+    const MODEL_CACHE = 'flare-models-v1';
+
+    async function loadModelFromUrl(url) {
+      // 1. Check browser Cache API for a previously downloaded copy.
+      if ('caches' in window) {
+        try {
+          const cache = await caches.open(MODEL_CACHE);
+          const cached = await cache.match(url);
+          if (cached) {
+            updateProgress(1, 1, 'Loading from cache…');
+            const buf = new Uint8Array(await cached.arrayBuffer());
+            return { bytes: buf, fromCache: true };
+          }
+        } catch (_) { /* Cache API unavailable in this context — fall through */ }
+      }
+
+      // 2. Fresh download: stream the response body to show progress.
+      const resp = await fetch(url);
+      if (!resp.ok) throw new Error(`HTTP ${resp.status} ${resp.statusText}`);
+      const total = parseInt(resp.headers.get('Content-Length') || '0', 10);
+      const reader = resp.body.getReader();
+      const chunks = [];
+      let loaded = 0;
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        chunks.push(value);
+        loaded += value.byteLength;
+        updateProgress(loaded, total || loaded, 'Downloading…');
+      }
+      // Concatenate chunks
+      const buf = new Uint8Array(loaded);
+      let offset = 0;
+      for (const chunk of chunks) { buf.set(chunk, offset); offset += chunk.byteLength; }
+
+      // 3. Store in Cache API for next visit (best-effort).
+      if ('caches' in window) {
+        try {
+          const cache = await caches.open(MODEL_CACHE);
+          await cache.put(url, new Response(buf, {
+            headers: { 'Content-Type': 'application/octet-stream', 'Content-Length': String(loaded) }
+          }));
+        } catch (_) { /* Quota exceeded or private browsing — ignore */ }
+      }
+
+      return { bytes: buf, fromCache: false };
+    }
+
     $urlLoad.addEventListener('click', async () => {
       const url = $urlInput.value.trim();
       if (!url) return;
@@ -404,8 +453,10 @@
       try {
         const t0 = performance.now();
         clearChat();
-        const eng = await new FlareProgressiveLoader(url)
-          .load((l, t) => updateProgress(l, t, 'Downloading…'));
+        const { bytes, fromCache } = await loadModelFromUrl(url);
+        updateProgress(bytes.length, bytes.length, fromCache ? 'Parsing (cached)…' : 'Parsing…');
+        await new Promise(r => setTimeout(r, 10)); // yield so progress renders
+        const eng = FlareEngine.load(bytes);
         await onModelLoaded(eng, performance.now() - t0);
       } catch (err) {
         $modelInfo.textContent = 'Error: ' + err;
