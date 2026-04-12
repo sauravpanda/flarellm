@@ -962,12 +962,8 @@ mod tests {
             output[1]
         );
         // remaining bytes are 0x88 → nibble 8-8=0
-        for i in 2..32 {
-            assert!(
-                output[i].abs() < 1e-5,
-                "expected 0.0 at {i}, got {}",
-                output[i]
-            );
+        for (i, &v) in output[2..].iter().enumerate() {
+            assert!(v.abs() < 1e-5, "expected 0.0 at {}, got {}", i + 2, v);
         }
     }
 
@@ -1062,12 +1058,8 @@ mod tests {
             "expected 42.0, got {}",
             output[0]
         );
-        for i in 1..32 {
-            assert!(
-                output[i].abs() < 1e-5,
-                "expected 0.0 at {i}, got {}",
-                output[i]
-            );
+        for (i, &v) in output[1..].iter().enumerate() {
+            assert!(v.abs() < 1e-5, "expected 0.0 at {}, got {}", i + 1, v);
         }
     }
 
