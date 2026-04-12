@@ -144,7 +144,10 @@
     <div class="chat-thread" id="chat"></div>
 
     <div>
-      <div class="field-label">Your message</div>
+      <div class="field-label" style="display:flex;justify-content:space-between;align-items:baseline;">
+        <span>Your message</span>
+        <span id="token-counter" style="font-size:0.8rem;color:#888;"></span>
+      </div>
       <textarea id="prompt-input" placeholder="Ask me anything…" disabled rows="2"></textarea>
     </div>
 
@@ -188,13 +191,14 @@
     const $tmplBadge   = $('template-badge');
     const $systemRow   = $('system-prompt-row');
     const $systemIn    = $('system-input');
-    const $promptIn    = $('prompt-input');
-    const $generate    = $('generate');
-    const $stop        = $('stop');
-    const $clear       = $('clear');
-    const $maxTokens   = $('max-tokens');
-    const $chat        = $('chat');
-    const $genStats    = $('gen-stats');
+    const $promptIn      = $('prompt-input');
+    const $tokenCounter  = $('token-counter');
+    const $generate      = $('generate');
+    const $stop          = $('stop');
+    const $clear         = $('clear');
+    const $maxTokens     = $('max-tokens');
+    const $chat          = $('chat');
+    const $genStats      = $('gen-stats');
 
     let engine    = null;
     let tokenizer = null;
@@ -514,6 +518,7 @@
       $generate.disabled = true;
       $stop.disabled = false;
       $promptIn.value = '';
+      $tokenCounter.textContent = '';
       $genStats.textContent = 'Generating…';
       await new Promise(r => setTimeout(r, 10));
 
@@ -618,6 +623,18 @@
         $generate.disabled = false;
         $stop.disabled = true;
       }
+    });
+
+    // Live token counter — updates as the user types
+    $promptIn.addEventListener('input', () => {
+      if (!engine || !$promptIn.value) {
+        $tokenCounter.textContent = '';
+        return;
+      }
+      const count = engine.count_tokens($promptIn.value);
+      const max   = engine.max_seq_len;
+      $tokenCounter.textContent = `${count} / ${max} tokens`;
+      $tokenCounter.style.color = count > max * 0.85 ? '#c00' : '#888';
     });
 
     // Allow Ctrl+Enter / Cmd+Enter to send

@@ -31,6 +31,7 @@ use flare_core::sampling::{self, SamplingParams};
 use flare_core::tokenizer::{BpeTokenizer, Tokenizer};
 use flare_gpu::WebGpuBackend;
 use flare_loader::gguf::GgufFile;
+use flare_loader::tokenizer::GgufVocab;
 use flare_loader::weights::{load_model_weights, load_model_weights_with_progress};
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
@@ -96,6 +97,8 @@ fn detect_chat_template(gguf: &GgufFile) -> ChatTemplate {
 pub struct FlareEngine {
     model: Model,
     chat_template: ChatTemplate,
+    /// GGUF vocabulary for token counting (optional: absent for non-GGUF models).
+    gguf_vocab: Option<GgufVocab>,
     /// EOS token ID from GGUF metadata; generation stops when this token is produced.
     eos_token_id: Option<u32>,
     // --- Token-by-token streaming state ---
@@ -122,6 +125,7 @@ impl FlareEngine {
             .metadata
             .get("tokenizer.ggml.eos_token_id")
             .and_then(|v| v.as_u32());
+        let gguf_vocab = GgufVocab::from_gguf(&gguf).ok();
         let config = gguf
             .to_model_config()
             .map_err(|e| JsError::new(&format!("Model config error: {e}")))?;
@@ -131,6 +135,7 @@ impl FlareEngine {
         Ok(FlareEngine {
             model: Model::new(config, weights),
             chat_template,
+            gguf_vocab,
             eos_token_id,
             stream_last_token: 0,
             stream_pos: 0,
@@ -241,6 +246,31 @@ impl FlareEngine {
     #[wasm_bindgen(getter)]
     pub fn eos_token_id(&self) -> Option<u32> {
         self.eos_token_id
+    }
+
+    /// Maximum sequence length (context window size) of the loaded model.
+    ///
+    /// Use this to warn users when their prompt is approaching the limit.
+    #[wasm_bindgen(getter)]
+    pub fn max_seq_len(&self) -> u32 {
+        self.model.config().max_seq_len as u32
+    }
+
+    /// Count the number of tokens in `text` using the model's embedded GGUF vocabulary.
+    ///
+    /// Returns 0 if the model was not loaded from a GGUF file (e.g. SafeTensors only).
+    ///
+    /// # JS example
+    /// ```javascript
+    /// const n = engine.count_tokens(textarea.value);
+    /// counter.textContent = `${n} / ${engine.max_seq_len} tokens`;
+    /// ```
+    #[wasm_bindgen]
+    pub fn count_tokens(&self, text: &str) -> u32 {
+        match &self.gguf_vocab {
+            Some(vocab) => vocab.encode(text).len() as u32,
+            None => 0,
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -506,6 +536,7 @@ impl FlareProgressiveLoader {
             .metadata
             .get("tokenizer.ggml.eos_token_id")
             .and_then(|v| v.as_u32());
+        let gguf_vocab = GgufVocab::from_gguf(&gguf).ok();
         let config = gguf
             .to_model_config()
             .map_err(|e| JsError::new(&format!("model config error: {e}")))?;
@@ -521,6 +552,7 @@ impl FlareProgressiveLoader {
         Ok(FlareEngine {
             model: Model::new(config, weights),
             chat_template,
+            gguf_vocab,
             eos_token_id,
             stream_last_token: 0,
             stream_pos: 0,
