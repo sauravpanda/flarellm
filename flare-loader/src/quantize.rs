@@ -1806,6 +1806,98 @@ mod tests {
     }
 
     #[test]
+    fn test_dequant_q2k_negative_d() {
+        // d=-1.0, dmin=0.0, scales[64]=0x01 (scale=1, min=0), qs[0]=0x01 (q2=1 at shift 0)
+        // output[0] = (-1)*1*1 - 0 = -1.0
+        let mut block = vec![0u8; 84];
+        block[0] = 0x01; // qs[0]: q2=1 at shift 0
+        block[64] = 0x01; // scales[0]: lo nibble=1 (scale), hi nibble=0 (min)
+        block[80] = 0x00;
+        block[81] = 0xBC; // d = f16 -1.0
+        let mut output = [0.0f32; 256];
+        dequant_q2k_block(&block, &mut output);
+        assert!(
+            (output[0] - (-1.0)).abs() < 1e-4,
+            "negative d: expected -1.0, got {}",
+            output[0]
+        );
+    }
+
+    #[test]
+    fn test_dequant_q2k_nonzero_dmin() {
+        // d=0.0, dmin=1.0, scales[64]=0x30 (lo=0, hi=3), qs irrelevant (q2*0=0)
+        // output[0] = 0 - 1*3 = -3.0
+        let mut block = vec![0u8; 84];
+        block[64] = 0x30; // scales[0]: lo nibble=0 (scale), hi nibble=3 (min)
+                          // d stays 0.0
+        block[82] = 0x00;
+        block[83] = 0x3C; // dmin = 1.0
+        let mut output = [0.0f32; 256];
+        dequant_q2k_block(&block, &mut output);
+        assert!(
+            (output[0] - (-3.0)).abs() < 1e-4,
+            "nonzero dmin: expected -3.0, got {}",
+            output[0]
+        );
+    }
+
+    #[test]
+    fn test_dequant_q2k_max_q2() {
+        // All qs=0xFF: each 2-bit field=3 (max). d=1.0, scale=1, dmin=0
+        // output[0] = 1*1*3 = 3.0
+        let mut block = vec![0u8; 84];
+        block[0..64].fill(0xFF); // all q2=3
+        block[64] = 0x01; // scales[0]: scale=1, min=0
+        block[80] = 0x00;
+        block[81] = 0x3C; // d = 1.0
+        let mut output = [0.0f32; 256];
+        dequant_q2k_block(&block, &mut output);
+        assert!(
+            (output[0] - 3.0).abs() < 1e-4,
+            "max q2: expected 3.0, got {}",
+            output[0]
+        );
+    }
+
+    #[test]
+    fn test_dequant_q2k_second_subblock() {
+        // i=64 → sub=64/16=4 → uses scales[4]; qs[64/4]=qs[16], shift=(64%4)*2=0
+        // scales[68]=0x02 (scale=2), d=1.0, dmin=0, qs[16]=0x01 (q2=1)
+        // output[64] = 1*2*1 = 2.0
+        let mut block = vec![0u8; 84];
+        block[16] = 0x01; // qs[16]: q2=1 at shift 0 (for i=64)
+        block[68] = 0x02; // scales[4]: lo=2 (scale), hi=0 (min)
+        block[80] = 0x00;
+        block[81] = 0x3C; // d = 1.0
+        let mut output = [0.0f32; 256];
+        dequant_q2k_block(&block, &mut output);
+        assert!(
+            (output[64] - 2.0).abs() < 1e-4,
+            "second subblock: expected 2.0, got {}",
+            output[64]
+        );
+    }
+
+    #[test]
+    fn test_dequant_q2k_hi_nibble_min() {
+        // scales[0]=0x20 (lo=0, hi=2): min_nibble=2
+        // d=1.0, dmin=1.0, qs[0]=0 (q2=0) → output[0] = 1*0*0 - 1*2 = -2.0
+        let mut block = vec![0u8; 84];
+        block[64] = 0x20; // scales[0]: scale=0, min=2
+        block[80] = 0x00;
+        block[81] = 0x3C; // d = 1.0
+        block[82] = 0x00;
+        block[83] = 0x3C; // dmin = 1.0
+        let mut output = [0.0f32; 256];
+        dequant_q2k_block(&block, &mut output);
+        assert!(
+            (output[0] - (-2.0)).abs() < 1e-4,
+            "hi nibble min: expected -2.0, got {}",
+            output[0]
+        );
+    }
+
+    #[test]
     fn test_dequant_q4_1_zeroed() {
         // All-zero block: all weights should be 0.0 (d=0, m=0, q=0)
         let block = vec![0u8; 20];
