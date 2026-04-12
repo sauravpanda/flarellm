@@ -394,6 +394,237 @@ impl Model {
 
         Tensor::from_vec(logits, &[config.vocab_size]).unwrap()
     }
+
+    /// Batched forward pass for a full prompt sequence.
+    ///
+    /// Processes all `tokens` in one shot:
+    /// - Embeds the entire sequence up front.
+    /// - For each transformer layer, computes Q/K/V for all positions with
+    ///   individual matvec calls (in-order, so future work can batch them into
+    ///   a single matmul), then does causal self-attention using the locally
+    ///   computed K/V (bypassing the KV cache during attention).
+    /// - After all layers, writes the computed K/V into the KV cache and
+    ///   advances the position counter once per token.
+    ///
+    /// Returns logits for the **last** token position — suitable for picking
+    /// the first generated token after prefill.
+    ///
+    /// For a single-token prompt this is equivalent to `forward()`.
+    pub fn forward_prefill(&mut self, tokens: &[u32]) -> Tensor {
+        assert!(
+            !tokens.is_empty(),
+            "forward_prefill requires at least one token"
+        );
+
+        let config = self.config.clone();
+        let dim = config.hidden_dim;
+        let head_dim = config.head_dim;
+        let num_heads = config.num_heads;
+        let num_kv_heads = config.num_kv_heads;
+        let kv_dim = num_kv_heads * head_dim;
+        let q_dim = num_heads * head_dim;
+        let seq_len = tokens.len();
+
+        // Embed all tokens: x_batch [seq_len * dim], row-major (row = token position)
+        let mut x_batch: Vec<f32> = {
+            let embed_data = self.weights.token_embedding.data();
+            tokens
+                .iter()
+                .flat_map(|&tok| {
+                    let off = tok as usize * dim;
+                    embed_data[off..off + dim].iter().copied()
+                })
+                .collect()
+        };
+
+        // Per-layer K/V tensors computed locally (used for causal attention;
+        // written to the KV cache at the end).
+        let num_layers = config.num_layers;
+        let mut k_all: Vec<Vec<f32>> = vec![vec![0.0; seq_len * kv_dim]; num_layers];
+        let mut v_all: Vec<Vec<f32>> = vec![vec![0.0; seq_len * kv_dim]; num_layers];
+
+        for layer_idx in 0..num_layers {
+            // --- Attention block ---
+
+            // RMSNorm all rows
+            let normed_batch: Vec<f32> = {
+                let attn_norm: Vec<f32> = self.weights.layers[layer_idx].attn_norm.data().to_vec();
+                (0..seq_len)
+                    .flat_map(|t| {
+                        let row = &x_batch[t * dim..(t + 1) * dim];
+                        rmsnorm(row, &attn_norm, config.rms_norm_eps)
+                    })
+                    .collect()
+            };
+
+            // Q/K/V projections, biases, RoPE — one token at a time
+            let mut q_batch = vec![0.0f32; seq_len * q_dim];
+            {
+                let wq: Vec<f32> = self.weights.layers[layer_idx].wq.data().to_vec();
+                let wk: Vec<f32> = self.weights.layers[layer_idx].wk.data().to_vec();
+                let wv: Vec<f32> = self.weights.layers[layer_idx].wv.data().to_vec();
+                let q_bias: Option<Vec<f32>> = self.weights.layers[layer_idx]
+                    .attn_q_bias
+                    .as_ref()
+                    .map(|t| t.data().to_vec());
+                let k_bias: Option<Vec<f32>> = self.weights.layers[layer_idx]
+                    .attn_k_bias
+                    .as_ref()
+                    .map(|t| t.data().to_vec());
+                let v_bias: Option<Vec<f32>> = self.weights.layers[layer_idx]
+                    .attn_v_bias
+                    .as_ref()
+                    .map(|t| t.data().to_vec());
+
+                for t in 0..seq_len {
+                    let normed = &normed_batch[t * dim..(t + 1) * dim];
+                    let mut q = self.backend.matvec(&wq, normed, q_dim, dim);
+                    let mut k = self.backend.matvec(&wk, normed, kv_dim, dim);
+                    let mut v = self.backend.matvec(&wv, normed, kv_dim, dim);
+
+                    if let Some(ref b) = q_bias {
+                        for (qi, &bi) in q.iter_mut().zip(b.iter()) {
+                            *qi += bi;
+                        }
+                    }
+                    if let Some(ref b) = k_bias {
+                        for (ki, &bi) in k.iter_mut().zip(b.iter()) {
+                            *ki += bi;
+                        }
+                    }
+                    if let Some(ref b) = v_bias {
+                        for (vi, &bi) in v.iter_mut().zip(b.iter()) {
+                            *vi += bi;
+                        }
+                    }
+
+                    // RoPE at absolute position t (position within the prompt)
+                    apply_rope(&mut q, num_heads, head_dim, t, config.rope_theta);
+                    apply_rope(&mut k, num_kv_heads, head_dim, t, config.rope_theta);
+
+                    q_batch[t * q_dim..(t + 1) * q_dim].copy_from_slice(&q);
+                    k_all[layer_idx][t * kv_dim..(t + 1) * kv_dim].copy_from_slice(&k);
+                    v_all[layer_idx][t * kv_dim..(t + 1) * kv_dim].copy_from_slice(&v);
+                }
+            }
+
+            // Causal self-attention: position t attends to positions 0..=t
+            let mut attn_out_batch = vec![0.0f32; seq_len * q_dim];
+            for t in 0..seq_len {
+                let q_t = &q_batch[t * q_dim..(t + 1) * q_dim];
+                let k_t = &k_all[layer_idx][0..(t + 1) * kv_dim];
+                let v_t = &v_all[layer_idx][0..(t + 1) * kv_dim];
+                let attn_t = cpu_grouped_query_attention(
+                    q_t,
+                    k_t,
+                    v_t,
+                    num_heads,
+                    num_kv_heads,
+                    head_dim,
+                    t + 1,
+                    config.attn_logit_softcap,
+                );
+                attn_out_batch[t * q_dim..(t + 1) * q_dim].copy_from_slice(&attn_t);
+            }
+
+            // Output projection + optional post-attention norm + residual
+            {
+                let wo: Vec<f32> = self.weights.layers[layer_idx].wo.data().to_vec();
+                let post_attn_norm: Option<Vec<f32>> = self.weights.layers[layer_idx]
+                    .post_attn_norm
+                    .as_ref()
+                    .map(|t| t.data().to_vec());
+
+                for t in 0..seq_len {
+                    let attn_t = &attn_out_batch[t * q_dim..(t + 1) * q_dim];
+                    let proj = self.backend.matvec(&wo, attn_t, dim, q_dim);
+                    let contrib = match &post_attn_norm {
+                        Some(n) => rmsnorm(&proj, n, config.rms_norm_eps),
+                        None => proj,
+                    };
+                    for i in 0..dim {
+                        x_batch[t * dim + i] += contrib[i];
+                    }
+                }
+            }
+
+            // --- FFN block ---
+            let normed_batch2: Vec<f32> = {
+                let ffn_norm: Vec<f32> = self.weights.layers[layer_idx].ffn_norm.data().to_vec();
+                (0..seq_len)
+                    .flat_map(|t| {
+                        let row = &x_batch[t * dim..(t + 1) * dim];
+                        rmsnorm(row, &ffn_norm, config.rms_norm_eps)
+                    })
+                    .collect()
+            };
+
+            {
+                let w_gate: Vec<f32> = self.weights.layers[layer_idx].w_gate.data().to_vec();
+                let w_up: Vec<f32> = self.weights.layers[layer_idx].w_up.data().to_vec();
+                let w_down: Vec<f32> = self.weights.layers[layer_idx].w_down.data().to_vec();
+                let inter = config.intermediate_dim;
+                let post_ffn_norm: Option<Vec<f32>> = self.weights.layers[layer_idx]
+                    .post_ffn_norm
+                    .as_ref()
+                    .map(|t| t.data().to_vec());
+
+                for t in 0..seq_len {
+                    let normed_t = &normed_batch2[t * dim..(t + 1) * dim];
+                    let gate = self.backend.matvec(&w_gate, normed_t, inter, dim);
+                    let up = self.backend.matvec(&w_up, normed_t, inter, dim);
+                    let ffn_hidden = if config.architecture == Architecture::Gemma2 {
+                        gelu_mul_cpu(&gate, &up)
+                    } else {
+                        self.backend.silu_mul_vec(&gate, &up)
+                    };
+                    let down = self.backend.matvec(&w_down, &ffn_hidden, dim, inter);
+                    let contrib = match &post_ffn_norm {
+                        Some(n) => rmsnorm(&down, n, config.rms_norm_eps),
+                        None => down,
+                    };
+                    for i in 0..dim {
+                        x_batch[t * dim + i] += contrib[i];
+                    }
+                }
+            }
+        }
+
+        // Write computed K/V to cache and advance position for each token
+        for t in 0..seq_len {
+            for layer_idx in 0..num_layers {
+                self.kv_cache.write(
+                    layer_idx,
+                    &k_all[layer_idx][t * kv_dim..(t + 1) * kv_dim],
+                    &v_all[layer_idx][t * kv_dim..(t + 1) * kv_dim],
+                );
+            }
+            self.kv_cache.advance();
+        }
+
+        // Final RMSNorm + output projection on the last token only
+        let last = seq_len - 1;
+        let last_x = &x_batch[last * dim..(last + 1) * dim];
+        let normed_final =
+            self.backend
+                .rmsnorm_vec(last_x, self.weights.output_norm.data(), config.rms_norm_eps);
+
+        let mut logits = self.backend.matvec(
+            self.weights.output_weight.data(),
+            &normed_final,
+            config.vocab_size,
+            dim,
+        );
+
+        if config.final_logit_softcap > 0.0 {
+            let cap = config.final_logit_softcap;
+            for l in &mut logits {
+                *l = (*l / cap).tanh() * cap;
+            }
+        }
+
+        Tensor::from_vec(logits, &[config.vocab_size]).unwrap()
+    }
 }
 
 /// RMSNorm: normalize and scale (CPU implementation).
