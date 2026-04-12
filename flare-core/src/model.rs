@@ -110,9 +110,9 @@ pub trait ComputeBackend: Send + Sync {
     /// Grouped-query attention using GPU-resident KV cache buffers.
     ///
     /// Avoids re-uploading the KV cache from CPU on each forward pass —
-    /// the data written by [`gpu_kv_write`] is used directly.
+    /// the data written by `gpu_kv_write` is used directly.
     ///
-    /// Only valid after [`init_gpu_kv_cache`] has been called
+    /// Only valid after `init_gpu_kv_cache` has been called
     /// (`has_gpu_kv_cache()` returns `true`).
     #[allow(clippy::too_many_arguments)]
     fn grouped_query_attention_from_gpu_cache(
