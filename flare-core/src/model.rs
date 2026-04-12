@@ -28,10 +28,7 @@ impl WeightFormat {
             | WeightFormat::Q4K
             | WeightFormat::Q5K
             | WeightFormat::Q6K => 256,
-            WeightFormat::Q4_0
-            | WeightFormat::Q4_1
-            | WeightFormat::Q5_0
-            | WeightFormat::Q8_1 => 32,
+            WeightFormat::Q4_0 | WeightFormat::Q4_1 | WeightFormat::Q5_0 | WeightFormat::Q8_1 => 32,
         }
     }
 }

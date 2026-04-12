@@ -3054,8 +3054,8 @@ mod tests {
         let mut block = [0u8; 110];
         block[108] = 0x00;
         block[109] = 0x3C; // d = 1.0
-        // All other bytes zero: scale decodes to -32, hmask=0 → sub=4, qs=0 → q=-4
-        // w = 1 * (-32) * (-4) = 128 per weight; dot with 1-vec = 128 * 256 = 32768
+                           // All other bytes zero: scale decodes to -32, hmask=0 → sub=4, qs=0 → q=-4
+                           // w = 1 * (-32) * (-4) = 128 per weight; dot with 1-vec = 128 * 256 = 32768
 
         let mut dequant_out = [0.0f32; 256];
         dequant_q3k_block(&block, &mut dequant_out);
@@ -3128,7 +3128,7 @@ mod tests {
         let mut block = [0u8; 22];
         block[0] = 0x00;
         block[1] = 0x3C; // scale = 1.0
-        // qh: bits 0-15 set → xh_0=1; bits 16-31 = 0 → xh_1=0
+                         // qh: bits 0-15 set → xh_0=1; bits 16-31 = 0 → xh_1=0
         block[2] = 0xFF;
         block[3] = 0xFF;
         block[4] = 0x00;
