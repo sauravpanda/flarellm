@@ -599,4 +599,54 @@ mod tests {
         };
         assert_eq!(info.byte_len(), 24);
     }
+
+    #[test]
+    fn test_safe_tensor_info_byte_len_zero() {
+        // start == end means no data stored (e.g. scalar placeholder)
+        let info = SafeTensorInfo {
+            name: "empty".into(),
+            dtype: Dtype::F32,
+            shape: vec![],
+            start: 0,
+            end: 0,
+        };
+        assert_eq!(info.byte_len(), 0);
+    }
+
+    #[test]
+    fn test_find_tensor_returns_none_for_missing() {
+        // find_tensor should return None (not panic/error) for unknown names
+        let file_bytes = build_safetensors(&[], None);
+        let mut cursor = Cursor::new(file_bytes);
+        let st = SafeTensorsFile::parse_header(&mut cursor).unwrap();
+        assert!(st.find_tensor("does_not_exist").is_none());
+    }
+
+    #[test]
+    fn test_f16_positive_infinity() {
+        // f16 positive infinity: sign=0, exp=31, mant=0 → 0x7C00
+        let val = f16_to_f32(0x7C00);
+        assert!(val.is_infinite() && val > 0.0, "expected +inf, got {val}");
+    }
+
+    #[test]
+    fn test_f16_nan_is_nan() {
+        // f16 NaN: exp=31, mant≠0 → 0x7E00 (one common NaN encoding)
+        let val = f16_to_f32(0x7E00);
+        assert!(val.is_nan(), "expected NaN, got {val}");
+    }
+
+    #[test]
+    fn test_truncated_header_returns_io_error() {
+        // Header size claims 1000 bytes, but only a few bytes follow → IO error
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&1000u64.to_le_bytes());
+        buf.extend_from_slice(&[b'{', b'}', 0u8, 0u8]); // only 4 bytes, not 1000
+        let mut cursor = Cursor::new(buf);
+        let err = SafeTensorsFile::parse_header(&mut cursor).unwrap_err();
+        assert!(
+            matches!(err, SafeTensorsError::Io(_)),
+            "expected IO error, got {err:?}"
+        );
+    }
 }
