@@ -876,7 +876,7 @@ impl FlareEngine {
     ///
     /// SentencePiece tokenizers encode non-ASCII characters as consecutive
     /// byte-level tokens such as `<0xE4>`, `<0xB8>`, `<0xAD>` (the UTF-8
-    /// encoding of `中`).  The basic [`decode_token`] function returns incorrect
+    /// encoding of `中`).  The basic `decode_token` function returns incorrect
     /// Latin-1 characters in these cases because it treats each byte as an
     /// independent Unicode scalar.
     ///
