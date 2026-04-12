@@ -21,6 +21,8 @@ const MATMUL_SHADER: &str = include_str!("../shaders/matmul.wgsl");
 const SILU_MUL_SHADER: &str = include_str!("../shaders/silu_mul.wgsl");
 const SOFTMAX_SHADER: &str = include_str!("../shaders/softmax.wgsl");
 const ATTENTION_SHADER: &str = include_str!("../shaders/attention.wgsl");
+const DEQUANT_Q4_1_SHADER: &str = include_str!("../shaders/dequant_q4_1.wgsl");
+const DEQUANT_Q4K_SHADER: &str = include_str!("../shaders/dequant_q4k.wgsl");
 
 /// WebGPU/wgpu compute backend.
 ///
@@ -230,6 +232,92 @@ impl WebGpuBackend {
                 },
             ],
         })
+    }
+
+    /// Dequantize Q4_1 blocks on GPU.
+    ///
+    /// `raw_bytes` is the packed GGUF tensor data (num_blocks × 20 bytes).
+    /// Returns a flat `Vec<f32>` of num_blocks × 32 dequantized weights.
+    pub fn dequant_q4_1(&self, raw_bytes: &[u8], num_blocks: usize) -> Vec<f32> {
+        let output_size = (num_blocks * 32) as u64 * 4;
+
+        let raw_buf = self.pool.get_storage(&self.device, &self.queue, raw_bytes);
+        let out_buf = self.pool.get_output(&self.device, output_size);
+
+        let params: [u32; 1] = [num_blocks as u32];
+        let params_buf =
+            self.pool
+                .get_uniform(&self.device, &self.queue, bytemuck::cast_slice(&params));
+
+        let layout_entries = Self::single_input_layout();
+        let result = self.cache.with_pipeline(
+            &self.device,
+            "dequant_q4_1",
+            DEQUANT_Q4_1_SHADER,
+            "dequant_q4_1",
+            &layout_entries,
+            |cached| {
+                let bind_group =
+                    self.make_single_input_bind_group(cached, &raw_buf, &out_buf, &params_buf);
+                let dispatch_x = (num_blocks as u32).div_ceil(64);
+                self.dispatch_and_readback(
+                    &cached.pipeline,
+                    &bind_group,
+                    [dispatch_x, 1, 1],
+                    &out_buf,
+                    output_size,
+                )
+            },
+        );
+
+        self.pool.return_storage(raw_buf);
+        self.pool.return_output(out_buf);
+        self.pool.return_uniform(params_buf);
+
+        result
+    }
+
+    /// Dequantize Q4_K blocks on GPU.
+    ///
+    /// `raw_bytes` is the packed GGUF tensor data (num_blocks × 144 bytes).
+    /// Returns a flat `Vec<f32>` of num_blocks × 256 dequantized weights.
+    pub fn dequant_q4k(&self, raw_bytes: &[u8], num_blocks: usize) -> Vec<f32> {
+        let output_size = (num_blocks * 256) as u64 * 4;
+
+        let raw_buf = self.pool.get_storage(&self.device, &self.queue, raw_bytes);
+        let out_buf = self.pool.get_output(&self.device, output_size);
+
+        let params: [u32; 1] = [num_blocks as u32];
+        let params_buf =
+            self.pool
+                .get_uniform(&self.device, &self.queue, bytemuck::cast_slice(&params));
+
+        let layout_entries = Self::single_input_layout();
+        let result = self.cache.with_pipeline(
+            &self.device,
+            "dequant_q4k",
+            DEQUANT_Q4K_SHADER,
+            "dequant_q4k",
+            &layout_entries,
+            |cached| {
+                let bind_group =
+                    self.make_single_input_bind_group(cached, &raw_buf, &out_buf, &params_buf);
+                let dispatch_x = (num_blocks as u32).div_ceil(64);
+                self.dispatch_and_readback(
+                    &cached.pipeline,
+                    &bind_group,
+                    [dispatch_x, 1, 1],
+                    &out_buf,
+                    output_size,
+                )
+            },
+        );
+
+        self.pool.return_storage(raw_buf);
+        self.pool.return_output(out_buf);
+        self.pool.return_uniform(params_buf);
+
+        result
     }
 
     /// Build a 4-entry bind group from the standard layout.
@@ -790,5 +878,93 @@ mod tests {
             (sum - 1.0).abs() < 1e-5,
             "softmax output sum should be 1.0, got {sum}"
         );
+    }
+
+    /// Verify GPU Q4_1 dequantization against a known reference.
+    ///
+    /// One block: d=1.0 (f16 0x3C00), m=0.0 (f16 0x0000), all qs bytes = 0x12
+    /// → 16 pairs of (lo=2, hi=1) → output = [2, 1, 2, 1, …] (32 floats).
+    ///
+    /// Requires a GPU adapter; run with: `cargo test -p flarellm-gpu -- --ignored`
+    #[test]
+    #[ignore]
+    fn test_dequant_q4_1_matches_cpu() {
+        let mut raw = vec![0u8; 20];
+        // d = 1.0 as f16 LE: 0x3C00 → bytes [0x00, 0x3C]
+        raw[0] = 0x00;
+        raw[1] = 0x3C;
+        // m = 0.0 as f16 LE: 0x0000 → bytes [0x00, 0x00] (already zero)
+        // qs[16]: lo nibble = 2, hi nibble = 1 → byte = 0x12
+        for b in raw[4..20].iter_mut() {
+            *b = 0x12;
+        }
+
+        let backend = pollster::block_on(WebGpuBackend::new()).expect("GPU backend unavailable");
+        let result = backend.dequant_q4_1(&raw, 1);
+
+        assert_eq!(result.len(), 32, "expected 32 weights");
+        for i in 0..16 {
+            assert!(
+                (result[i * 2] - 2.0).abs() < 1e-3,
+                "q4_1 lo mismatch at [{}]: got {}, expected 2.0",
+                i * 2,
+                result[i * 2]
+            );
+            assert!(
+                (result[i * 2 + 1] - 1.0).abs() < 1e-3,
+                "q4_1 hi mismatch at [{}]: got {}, expected 1.0",
+                i * 2 + 1,
+                result[i * 2 + 1]
+            );
+        }
+    }
+
+    /// Verify GPU Q4_K dequantization against a known reference.
+    ///
+    /// One block: d=1.0, dmin=0.0, all sc[*]=1, mn[*]=0, all qs bytes = 0x12
+    /// → output[0..128]=2.0, output[128..256]=1.0.
+    ///
+    /// Scale encoding: scales_raw[0..4] = 0x41 sets sc[0..4]=1 and sc[4..8]=1
+    /// (upper 2 bits of 0x41 are 01, so (0x41>>6)=1; scales_raw[8..12]=0 so
+    /// (0 & 0x0F)<<2=0; sc[i+4] = 1|0 = 1). mn[*]=0 since scales_raw[4..8]=0.
+    ///
+    /// Requires a GPU adapter; run with: `cargo test -p flarellm-gpu -- --ignored`
+    #[test]
+    #[ignore]
+    fn test_dequant_q4k_matches_cpu() {
+        let mut raw = vec![0u8; 144];
+        // d = 1.0 as f16 LE
+        raw[0] = 0x00;
+        raw[1] = 0x3C;
+        // dmin = 0.0 (already zero)
+        // scales_raw[0..4] = 0x41: sc[i]=1, bits[7:6]=01 → sc[i+4]=1
+        for b in raw[4..8].iter_mut() {
+            *b = 0x41;
+        }
+        // scales_raw[4..8] = 0x00: mn[*]=0 (already zero)
+        // scales_raw[8..12] = 0x00 (already zero): lower nibble=0 → sc[i+4] unchanged
+        // qs[128]: lo=2, hi=1 → byte = 0x12
+        for b in raw[16..144].iter_mut() {
+            *b = 0x12;
+        }
+
+        let backend = pollster::block_on(WebGpuBackend::new()).expect("GPU backend unavailable");
+        let result = backend.dequant_q4k(&raw, 1);
+
+        assert_eq!(result.len(), 256, "expected 256 weights");
+        for j in 0..128 {
+            assert!(
+                (result[j] - 2.0).abs() < 1e-3,
+                "q4k lo mismatch at [{}]: got {}, expected 2.0",
+                j,
+                result[j]
+            );
+            assert!(
+                (result[j + 128] - 1.0).abs() < 1e-3,
+                "q4k hi mismatch at [{}]: got {}, expected 1.0",
+                j + 128,
+                result[j + 128]
+            );
+        }
     }
 }
