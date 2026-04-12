@@ -2054,6 +2054,119 @@ mod tests {
     }
 
     #[test]
+    fn test_dequant_q4_1_negative_d() {
+        // d=-1.0 (0xBC00), m=0.0, all nibbles=3 → output = -1.0*3 + 0.0 = -3.0
+        let mut block = vec![0u8; 20];
+        block[0] = 0x00;
+        block[1] = 0xBC; // f16 -1.0 for d
+        block[4..20].fill(0x33); // nibble=3
+        let mut output = [0.0f32; 32];
+        dequant_q4_1_block(&block, &mut output);
+        for (i, &val) in output.iter().enumerate() {
+            assert!(
+                (val - (-3.0)).abs() < 1e-4,
+                "q4_1 neg_d: expected -3.0 at {i}, got {val}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_dequant_q4_1_negative_m() {
+        // d=1.0, m=-2.0 (0xC000), all nibbles=0 → output = 1.0*0 + (-2.0) = -2.0
+        let mut block = vec![0u8; 20];
+        block[0] = 0x00;
+        block[1] = 0x3C; // f16 1.0 for d
+        block[2] = 0x00;
+        block[3] = 0xC0; // f16 -2.0 for m
+        block[4..20].fill(0x00); // all nibbles=0
+        let mut output = [0.0f32; 32];
+        dequant_q4_1_block(&block, &mut output);
+        for (i, &val) in output.iter().enumerate() {
+            assert!(
+                (val - (-2.0)).abs() < 1e-4,
+                "q4_1 neg_m: expected -2.0 at {i}, got {val}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_dequant_q4_1_max_nibble() {
+        // d=1.0, m=0.0, all nibbles=15 → output = 15.0
+        let mut block = vec![0u8; 20];
+        block[0] = 0x00;
+        block[1] = 0x3C; // f16 1.0
+        block[4..20].fill(0xFF); // both nibbles=15
+        let mut output = [0.0f32; 32];
+        dequant_q4_1_block(&block, &mut output);
+        for (i, &val) in output.iter().enumerate() {
+            assert!(
+                (val - 15.0).abs() < 1e-4,
+                "q4_1 max_nibble: expected 15.0 at {i}, got {val}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_dequant_q4_1_min_nibble_with_m() {
+        // d=1.0, m=5.0 (0x4500), all nibbles=0 → output = 1.0*0 + 5.0 = 5.0
+        let mut block = vec![0u8; 20];
+        block[0] = 0x00;
+        block[1] = 0x3C; // f16 1.0 for d
+        block[2] = 0x00;
+        block[3] = 0x45; // f16 5.0 for m
+        block[4..20].fill(0x00); // all nibbles=0
+        let mut output = [0.0f32; 32];
+        dequant_q4_1_block(&block, &mut output);
+        for (i, &val) in output.iter().enumerate() {
+            assert!(
+                (val - 5.0).abs() < 1e-4,
+                "q4_1 min_nibble_m: expected 5.0 at {i}, got {val}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_dequant_q4_1_split_nibbles() {
+        // d=1.0, m=0.0, block[4]=0x12 → lo nibble=2, hi nibble=1
+        // Q4_1 layout: output[i*2]=d*lo+m, output[i*2+1]=d*hi+m
+        // → output[0]=2.0, output[1]=1.0
+        let mut block = vec![0u8; 20];
+        block[0] = 0x00;
+        block[1] = 0x3C; // f16 1.0
+        block[4] = 0x12; // lo nibble=2, hi nibble=1
+        let mut output = [0.0f32; 32];
+        dequant_q4_1_block(&block, &mut output);
+        assert!(
+            (output[0] - 2.0).abs() < 1e-4,
+            "q4_1 split: output[0] = {}, expected 2.0",
+            output[0]
+        );
+        assert!(
+            (output[1] - 1.0).abs() < 1e-4,
+            "q4_1 split: output[1] = {}, expected 1.0",
+            output[1]
+        );
+    }
+
+    #[test]
+    fn test_dequant_q4_1_zero_d_nonzero_m() {
+        // d=0.0, m=4.0 (0x4400), all nibbles=7 → output = 0*7 + 4.0 = 4.0
+        let mut block = vec![0u8; 20];
+        // d stays 0.0 (bytes 0-1 = 0)
+        block[2] = 0x00;
+        block[3] = 0x44; // f16 4.0 for m
+        block[4..20].fill(0x77); // nibbles=7, but d=0 so irrelevant
+        let mut output = [0.0f32; 32];
+        dequant_q4_1_block(&block, &mut output);
+        for (i, &val) in output.iter().enumerate() {
+            assert!(
+                (val - 4.0).abs() < 1e-4,
+                "q4_1 zero_d: expected 4.0 at {i}, got {val}"
+            );
+        }
+    }
+
+    #[test]
     fn test_dequant_q8_1_zeroed() {
         // All-zero block: d=0, qs=0 → all outputs = 0.0
         let block = vec![0u8; 36];
