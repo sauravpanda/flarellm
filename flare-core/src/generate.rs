@@ -305,4 +305,59 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn test_generate_callback_early_stop() {
+        let mut model = tiny_model();
+        let params = SamplingParams {
+            temperature: 0.0,
+            ..Default::default()
+        };
+        let mut gen = Generator::new(&mut model, params);
+        let prompt = vec![1u32];
+
+        // Callback returns false after the 2nd generated token (step 1)
+        let generated = gen.generate(&prompt, 10, None, || 0.5, |_tok, step| step < 1);
+
+        // step 0: callback returns true (0 < 1), step 1: callback returns false
+        // So we get 2 tokens generated
+        assert_eq!(
+            generated.len(),
+            2,
+            "should stop when callback returns false"
+        );
+    }
+
+    #[test]
+    fn test_prefill_empty_returns_empty() {
+        let mut model = tiny_model();
+        let params = SamplingParams::default();
+        let mut gen = Generator::new(&mut model, params);
+
+        let logits = gen.prefill(&[]);
+        assert!(
+            logits.is_empty(),
+            "empty prefill should return empty logits"
+        );
+        assert_eq!(gen.position(), 0);
+        assert!(gen.tokens().is_empty());
+    }
+
+    #[test]
+    fn test_position_and_tokens_after_generation() {
+        let mut model = tiny_model();
+        let params = SamplingParams {
+            temperature: 0.0,
+            ..Default::default()
+        };
+        let mut gen = Generator::new(&mut model, params);
+        let prompt = vec![1u32, 2u32];
+
+        let generated = gen.generate(&prompt, 3, None, || 0.5, |_, _| true);
+
+        assert_eq!(gen.position(), prompt.len() + generated.len());
+        assert_eq!(gen.tokens().len(), prompt.len() + generated.len());
+        // First tokens are the prompt
+        assert_eq!(&gen.tokens()[..prompt.len()], &prompt[..]);
+    }
 }
