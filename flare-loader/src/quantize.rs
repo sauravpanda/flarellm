@@ -945,6 +945,116 @@ mod tests {
     }
 
     #[test]
+    fn test_dequant_q4k_short_block() {
+        // block < 144 bytes → zero-fill output
+        let block = vec![0u8; 100];
+        let mut output = [1.0f32; 256];
+        dequant_q4k_block(&block, &mut output);
+        assert!(
+            output.iter().all(|&v| v == 0.0),
+            "short block must zero output"
+        );
+    }
+
+    #[test]
+    fn test_dequant_q4k_unit_scale_zero_min() {
+        // d=1.0, dmin=0.0, sc[0]=2 (scales_raw[0]=0x02), qs[0]=0x04 (lo=4)
+        // output[0] = 1*2*4 - 0 = 8.0
+        let mut block = vec![0u8; 144];
+        block[0] = 0x00;
+        block[1] = 0x3C; // d = f16 1.0
+                         // dmin = 0.0 (default)
+        block[4] = 0x02; // scales_raw[0]: sc[0] = 2
+        block[16] = 0x04; // qs[0] = lo nibble 4
+        let mut output = [0.0f32; 256];
+        dequant_q4k_block(&block, &mut output);
+        assert!(
+            (output[0] - 8.0).abs() < 1e-4,
+            "expected 8.0, got {}",
+            output[0]
+        );
+    }
+
+    #[test]
+    fn test_dequant_q4k_nonzero_dmin() {
+        // d=1.0, dmin=1.0, sc[0]=2 (scales_raw[0]=0x02), mn[0]=3 (scales_raw[4]=0x03)
+        // qs[0]=0x00 (lo=0) → output[0] = 1*2*0 - 1*3 = -3.0
+        let mut block = vec![0u8; 144];
+        block[0] = 0x00;
+        block[1] = 0x3C; // d = 1.0
+        block[2] = 0x00;
+        block[3] = 0x3C; // dmin = 1.0
+        block[4] = 0x02; // scales_raw[0]: sc[0] = 2
+        block[8] = 0x03; // scales_raw[4]: mn[0] = 3
+                         // qs[0] = 0 → lo nibble = 0
+        let mut output = [0.0f32; 256];
+        dequant_q4k_block(&block, &mut output);
+        assert!(
+            (output[0] - (-3.0)).abs() < 1e-4,
+            "expected -3.0, got {}",
+            output[0]
+        );
+    }
+
+    #[test]
+    fn test_dequant_q4k_scale_upper_bits() {
+        // Test sc[i+4] decoding: sc[4] = (scales_raw[0]>>6) | ((scales_raw[8]&0x0F)<<2)
+        // scales_raw[0]=0x40 → sc[0]=0, upper 2 bits → 1; scales_raw[8]=0x01 → (0x01&0x0F)<<2=4
+        // sc[4] = 1 | 4 = 5
+        // d=1.0, dmin=0.0, qs[0]=0x30 (hi nibble=3) → output[128] = 1*5*3 = 15.0
+        let mut block = vec![0u8; 144];
+        block[0] = 0x00;
+        block[1] = 0x3C; // d = 1.0
+        block[4] = 0x40; // scales_raw[0]: upper 2 bits = 01 → contributes 1 to sc[4]
+        block[12] = 0x01; // scales_raw[8]: low 4 bits = 1 → contributes 4 to sc[4]
+        block[16] = 0x30; // qs[0]: hi nibble = 3
+        let mut output = [0.0f32; 256];
+        dequant_q4k_block(&block, &mut output);
+        assert!(
+            (output[128] - 15.0).abs() < 1e-4,
+            "upper-bits sc[4]: expected 15.0, got {}",
+            output[128]
+        );
+    }
+
+    #[test]
+    fn test_dequant_q4k_negative_d() {
+        // d=-1.0, dmin=0.0, sc[0]=3 (scales_raw[0]=0x03), qs[0]=0x02 (lo=2)
+        // output[0] = (-1)*3*2 - 0 = -6.0
+        let mut block = vec![0u8; 144];
+        block[0] = 0x00;
+        block[1] = 0xBC; // d = f16 -1.0
+        block[4] = 0x03; // scales_raw[0]: sc[0] = 3
+        block[16] = 0x02; // qs[0] lo nibble = 2
+        let mut output = [0.0f32; 256];
+        dequant_q4k_block(&block, &mut output);
+        assert!(
+            (output[0] - (-6.0)).abs() < 1e-4,
+            "negative d: expected -6.0, got {}",
+            output[0]
+        );
+    }
+
+    #[test]
+    fn test_dequant_q4k_second_block_idx() {
+        // sc[1] from scales_raw[1]=0x04 → sc[1]=4; d=1.0, dmin=0.0
+        // qs[32]=0x05 (lo nibble=5, block_idx=32/32=1)
+        // output[32] = 1*4*5 = 20.0
+        let mut block = vec![0u8; 144];
+        block[0] = 0x00;
+        block[1] = 0x3C; // d = 1.0
+        block[5] = 0x04; // scales_raw[1]: sc[1] = 4
+        block[48] = 0x05; // qs[32] lo nibble = 5
+        let mut output = [0.0f32; 256];
+        dequant_q4k_block(&block, &mut output);
+        assert!(
+            (output[32] - 20.0).abs() < 1e-4,
+            "second block_idx: expected 20.0, got {}",
+            output[32]
+        );
+    }
+
+    #[test]
     fn test_dequant_q5k_zeroed() {
         let block = vec![0u8; 176];
         let mut output = [0.0f32; 256];
