@@ -524,7 +524,7 @@ pub fn bf16_to_f32(bits: u16) -> f32 {
     f32::from_bits((bits as u32) << 16)
 }
 
-/// ksigns_iq2xs[128]: 7-bit sign index → 8-bit sign mask (bit=1 means −1.0).
+/// Maps a 7-bit sign index to an 8-bit sign mask (bit=1 means −1.0).
 /// Source: llama.cpp ggml-common.h ksigns_iq2xs table.
 pub const KSIGNS_IQ2XS: [u8; 128] = [
     0x00, 0x81, 0x82, 0x03, 0x84, 0x05, 0x06, 0x87, 0x88, 0x09, 0x0a, 0x8b, 0x0c, 0x8d, 0x8e, 0x0f,
@@ -541,11 +541,11 @@ pub const KSIGNS_IQ2XS: [u8; 128] = [
 ///
 /// IQ2_XS block layout (GGUF type 17):
 ///   bytes 0-1:   d (f16 LE)
-///   bytes 2-65:  qs[32] (u16 LE each): bits[8:0]=grid index, bits[15:9]=sign index
-///   bytes 66-73: scales[8] (u8): lo nibble=dl1, hi nibble=dl2 per ib32 group
+///   bytes 2-65:  qs\[32\] (u16 LE each): bits 8:0 = grid index, bits 15:9 = sign index
+///   bytes 66-73: scales\[8\] (u8): lo nibble=dl1, hi nibble=dl2 per ib32 group
 ///
-/// Grid lookup: iq2xs_grid[512] (u64 each, 8 weight bytes per entry).
-/// Sign lookup: KSIGNS_IQ2XS[128] (8 sign bits per byte).
+/// Grid lookup: 512-entry u64 grid (8 weight bytes per entry).
+/// Sign lookup: `KSIGNS_IQ2XS` (8 sign bits per byte).
 pub fn dequant_iq2xs_block(block: &[u8], grid: &[u64; 512], output: &mut [f32; 256]) {
     if block.len() < 74 {
         output.fill(0.0);
@@ -588,12 +588,12 @@ pub fn dequant_iq2xs_block(block: &[u8], grid: &[u64; 512], output: &mut [f32; 2
 ///
 /// IQ3_XXS block layout (GGUF type 18):
 ///   bytes 0-1:   d (f16 LE)
-///   bytes 2-65:  qs[64] (u8): grid indices
-///   bytes 66-97: scales_and_signs[32] (u8, read as 8 × u32 LE):
-///                bits[31:28]=sub-scale, bits[27:0]=4×7-bit sign indices
+///   bytes 2-65:  qs\[64\] (u8): grid indices
+///   bytes 66-97: scales_and_signs\[32\] (u8, read as 8 × u32 LE):
+///                bits 31:28 = sub-scale, bits 27:0 = 4×7-bit sign indices
 ///
-/// Grid lookup: iq3xxs_grid[256] (u32 each, 4 weight bytes per entry).
-/// Sign lookup: KSIGNS_IQ2XS[128] (8 sign bits per byte).
+/// Grid lookup: 256-entry u32 grid (4 weight bytes per entry).
+/// Sign lookup: `KSIGNS_IQ2XS` (8 sign bits per byte).
 pub fn dequant_iq3xxs_block(block: &[u8], grid: &[u32; 256], output: &mut [f32; 256]) {
     if block.len() < 98 {
         output.fill(0.0);
@@ -640,8 +640,8 @@ pub fn dequant_iq3xxs_block(block: &[u8], grid: &[u32; 256], output: &mut [f32; 
 }
 
 /// Dequantize an IQ4_XS block: 256 weights with 4-bit indices into KVALUES_IQ4NL + 6-bit per-group scale.
-/// Block layout (136 bytes): 2 (d f16) + 2 (scales_h u16) + 4 (scales_l[4]) + 128 (qs[128])
-/// For each ib32 in [0,7]: ls = scales_l nibble | (scales_h 2-bit << 4), dl = d*(ls-32).
+/// Block layout (136 bytes): 2 (d f16) + 2 (scales_h u16) + 4 (scales_l\[4\]) + 128 (qs\[128\])
+/// For each ib32 in 0..8: ls = scales_l nibble | (scales_h 2-bit << 4), dl = d*(ls-32).
 pub fn dequant_iq4xs_block(block: &[u8], output: &mut [f32; 256]) {
     if block.len() < 136 {
         output.fill(0.0);
@@ -1244,9 +1244,7 @@ mod tests {
         block[2] = 0x02;
         block[3] = 0x00; // scales_h: ib32=0 hi-bits = 2
         block[4] = 0x01; // scales_l: ib32=0 lo-nibble = 1
-        for i in 8..24usize {
-            block[i] = 0x88; // nibble 8 → KVALUES_IQ4NL[8] = 1
-        }
+        block[8..24].fill(0x88); // nibble 8 → KVALUES_IQ4NL[8] = 1
         block
     }
 
@@ -1256,11 +1254,10 @@ mod tests {
         let mut output = [0.0f32; 256];
         dequant_iq4xs_block(&block, &mut output);
         // ib32=0: ls=33, dl=1.0; nibble=8 → KVALUES_IQ4NL[8]=1 → 1.0*1=1.0
-        for i in 0..32 {
+        for (i, &v) in output[..32].iter().enumerate() {
             assert!(
-                (output[i] - 1.0).abs() < 1e-5,
-                "iq4xs unit: weight[{i}] = {}, expected 1.0",
-                output[i]
+                (v - 1.0).abs() < 1e-5,
+                "iq4xs unit: weight[{i}] = {v}, expected 1.0"
             );
         }
     }
@@ -1274,16 +1271,13 @@ mod tests {
         block[1] = 0x3C; // d = 1.0
         block[2] = 0x02;
         block[3] = 0x00; // scales_h: ib32=0 hi=2; ls = 0|(2<<4)=32
-        for i in 8..24usize {
-            block[i] = 0xFF; // max nibbles, but dl=0 → output=0
-        }
+        block[8..24].fill(0xFF); // max nibbles, but dl=0 → output=0
         let mut output = [0.0f32; 256];
         dequant_iq4xs_block(&block, &mut output);
-        for i in 0..32 {
+        for (i, &v) in output[..32].iter().enumerate() {
             assert!(
-                output[i].abs() < 1e-5,
-                "iq4xs zero dl: weight[{i}] = {}, expected 0.0",
-                output[i]
+                v.abs() < 1e-5,
+                "iq4xs zero dl: weight[{i}] = {v}, expected 0.0"
             );
         }
     }
@@ -1298,16 +1292,13 @@ mod tests {
         block[2] = 0x01;
         block[3] = 0x00; // scales_h: ib32=0 hi=1
         block[4] = 0x0F; // scales_l: ib32=0 lo=15
-        for i in 8..24usize {
-            block[i] = 0x88; // nibble 8 → KVALUES_IQ4NL[8]=1
-        }
+        block[8..24].fill(0x88); // nibble 8 → KVALUES_IQ4NL[8]=1
         let mut output = [0.0f32; 256];
         dequant_iq4xs_block(&block, &mut output);
-        for i in 0..32 {
+        for (i, &v) in output[..32].iter().enumerate() {
             assert!(
-                (output[i] - (-1.0)).abs() < 1e-5,
-                "iq4xs neg scale: weight[{i}] = {}, expected -1.0",
-                output[i]
+                (v - (-1.0)).abs() < 1e-5,
+                "iq4xs neg scale: weight[{i}] = {v}, expected -1.0"
             );
         }
     }
@@ -1361,11 +1352,10 @@ mod tests {
         let mut output = [0.0f32; 256];
         dequant_iq3s_block(&block, &grid, &mut output);
         let expected = 31.0_f32 * 5.0;
-        for i in 0..32 {
+        for (i, &v) in output[..32].iter().enumerate() {
             assert!(
-                (output[i] - expected).abs() < 1e-4,
-                "iq3s max scale: got {}, expected {expected}",
-                output[i]
+                (v - expected).abs() < 1e-4,
+                "iq3s max scale: weight[{i}] got {v}, expected {expected}"
             );
         }
         // Groups 2..7 have nibble=0 → db=1.0 → output=5.0
