@@ -28,6 +28,7 @@ const DEQUANT_Q4_1_SHADER: &str = include_str!("../shaders/dequant_q4_1.wgsl");
 const DEQUANT_Q4K_SHADER: &str = include_str!("../shaders/dequant_q4k.wgsl");
 const DEQUANT_MATVEC_Q4K_SHADER: &str = include_str!("../shaders/dequant_matvec_q4k.wgsl");
 const DEQUANT_MATVEC_Q5K_SHADER: &str = include_str!("../shaders/dequant_matvec_q5k.wgsl");
+const DEQUANT_MATVEC_Q6K_SHADER: &str = include_str!("../shaders/dequant_matvec_q6k.wgsl");
 const DEQUANT_Q5K_SHADER: &str = include_str!("../shaders/dequant_q5k.wgsl");
 const DEQUANT_Q6K_SHADER: &str = include_str!("../shaders/dequant_q6k.wgsl");
 const PREFILL_ATTENTION_SHADER: &str = include_str!("../shaders/prefill_attention.wgsl");
@@ -662,6 +663,72 @@ impl WebGpuBackend {
 
         self.pool.return_storage(weight_buf);
         self.pool.return_storage(input_buf);
+        self.pool.return_output(out_buf);
+        self.pool.return_uniform(params_buf);
+
+        result
+    }
+
+    /// Fused Q6_K dequantize + matrix-vector multiply.
+    ///
+    /// Reads packed Q6_K weight data, dequantizes each 210-byte block on-the-fly,
+    /// and accumulates the dot product with `input` in the same kernel.
+    ///
+    /// - `raw_bytes`: packed GGUF data — `num_rows × num_blocks_per_row × 210` bytes
+    ///   (padded to 4-byte multiple by caller if needed)
+    /// - `input`: f32 input vector of length `num_blocks_per_row × 256`
+    /// - Returns `num_rows` f32 dot products
+    pub fn dequant_matvec_q6k(
+        &self,
+        raw_bytes: &[u8],
+        input: &[f32],
+        num_rows: usize,
+        num_blocks_per_row: usize,
+    ) -> Vec<f32> {
+        let output_size = num_rows as u64 * 4;
+
+        // Q6_K blocks are 210 bytes — pad to next multiple of 4 for wgpu.
+        #[allow(clippy::manual_is_multiple_of)]
+        let raw_buf = if raw_bytes.len() % 4 == 0 {
+            self.pool.get_storage(&self.device, &self.queue, raw_bytes)
+        } else {
+            let mut padded = raw_bytes.to_vec();
+            padded.resize((padded.len() + 3) & !3, 0);
+            self.pool.get_storage(&self.device, &self.queue, &padded)
+        };
+        let vec_buf = self
+            .pool
+            .get_storage(&self.device, &self.queue, bytemuck::cast_slice(input));
+        let out_buf = self.pool.get_output(&self.device, output_size);
+
+        let params: [u32; 2] = [num_rows as u32, num_blocks_per_row as u32];
+        let params_buf =
+            self.pool
+                .get_uniform(&self.device, &self.queue, bytemuck::cast_slice(&params));
+
+        let layout_entries = Self::standard_layout();
+        let result = self.cache.with_pipeline(
+            &self.device,
+            "dequant_matvec_q6k",
+            DEQUANT_MATVEC_Q6K_SHADER,
+            "dequant_matvec_q6k",
+            &layout_entries,
+            |cached| {
+                let bind_group =
+                    self.make_bind_group(cached, &raw_buf, &vec_buf, &out_buf, &params_buf);
+                // One workgroup per output row.
+                self.dispatch_and_readback(
+                    &cached.pipeline,
+                    &bind_group,
+                    [num_rows as u32, 1, 1],
+                    &out_buf,
+                    output_size,
+                )
+            },
+        );
+
+        self.pool.return_storage(raw_buf);
+        self.pool.return_storage(vec_buf);
         self.pool.return_output(out_buf);
         self.pool.return_uniform(params_buf);
 
@@ -1920,6 +1987,89 @@ mod tests {
         assert_eq!(result.len(), num_rows);
         for (i, &v) in result.iter().enumerate() {
             assert!((v - 384.0).abs() < 1e-1, "row {i}: got {v}, expected 384.0");
+        }
+    }
+
+    /// Verify Q6_K GPU fused dequant+matvec matches CPU reference (dequant then dot product).
+    ///
+    /// Block setup: d=1.0, scales[0..16]=1 (signed i8), ql all 0x22 (both nibbles = 2),
+    /// qh all 0x00 (upper 2 bits = 0).  This gives raw q = (2 | 0) - 32 = -30 for every
+    /// weight.  With input = 1.0 everywhere, expected = 256 * 1.0 * 1 * (-30) = -7680.0.
+    ///
+    /// Requires a GPU adapter; run with: `cargo test -p flarellm-gpu -- --ignored`
+    #[test]
+    #[ignore]
+    fn test_dequant_matvec_q6k_matches_cpu() {
+        use flare_loader::quantize::dequant_q6k_block;
+
+        let mut raw = [0u8; 210];
+        // d = 1.0 as f16 LE at bytes 208-209
+        raw[208] = 0x00;
+        raw[209] = 0x3C;
+        // scales[16] at bytes 192-207 = 1 as signed i8
+        for b in raw[192..208].iter_mut() {
+            *b = 1;
+        }
+        // ql[128] at bytes 0-127 = 0x22: both nibbles = 2
+        for b in raw[0..128].iter_mut() {
+            *b = 0x22;
+        }
+        // qh[64] at bytes 128-191 = 0x00: all upper 2 bits = 0
+
+        // CPU reference: dequant then dot product with all-1 input.
+        let mut dequant_out = [0.0f32; 256];
+        dequant_q6k_block(&raw, &mut dequant_out);
+        let expected: f32 = dequant_out.iter().sum(); // input is all 1.0
+
+        let input = [1.0f32; 256];
+        let backend = pollster::block_on(WebGpuBackend::new()).expect("GPU backend unavailable");
+        let result = backend.dequant_matvec_q6k(&raw, &input, 1, 1);
+
+        assert_eq!(result.len(), 1, "expected one output value");
+        assert!(
+            (result[0] - expected).abs() < 1e-1,
+            "dequant_matvec_q6k mismatch: got {}, expected {}",
+            result[0],
+            expected
+        );
+    }
+
+    /// Multi-row test: 3 rows × 1 Q6_K block, input = all 1.0.
+    /// All rows should produce the same dot product as the CPU reference.
+    ///
+    /// Requires a GPU adapter; run with: `cargo test -p flarellm-gpu -- --ignored`
+    #[test]
+    #[ignore]
+    fn test_dequant_matvec_q6k_multi_row() {
+        use flare_loader::quantize::dequant_q6k_block;
+
+        let mut block = [0u8; 210];
+        block[208] = 0x00;
+        block[209] = 0x3C; // d = 1.0
+        for b in block[192..208].iter_mut() {
+            *b = 1; // scale = 1
+        }
+        for b in block[0..128].iter_mut() {
+            *b = 0x22; // ql nibbles = 2
+        }
+
+        let mut dequant_out = [0.0f32; 256];
+        dequant_q6k_block(&block, &mut dequant_out);
+        let expected: f32 = dequant_out.iter().sum();
+
+        let num_rows = 3usize;
+        let raw: Vec<u8> = block.iter().copied().cycle().take(210 * num_rows).collect();
+        let input = [1.0f32; 256];
+
+        let backend = pollster::block_on(WebGpuBackend::new()).expect("GPU backend unavailable");
+        let result = backend.dequant_matvec_q6k(&raw, &input, num_rows, 1);
+
+        assert_eq!(result.len(), num_rows);
+        for (i, &v) in result.iter().enumerate() {
+            assert!(
+                (v - expected).abs() < 1e-1,
+                "row {i}: got {v}, expected {expected}"
+            );
         }
     }
 
