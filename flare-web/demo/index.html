@@ -162,6 +162,7 @@
       </label>
     </div>
     <p class="stats" id="gen-stats"></p>
+    <p class="stats" id="perf" style="font-variant-numeric:tabular-nums;letter-spacing:0.01em;"></p>
   </div>
 
   <p class="subtitle" style="text-align:center;margin-top:2rem;">
@@ -201,6 +202,7 @@
     const $maxTokens     = $('max-tokens');
     const $chat          = $('chat');
     const $genStats      = $('gen-stats');
+    const $perf          = $('perf');
 
     let engine    = null;
     let tokenizer = null;
@@ -284,6 +286,7 @@
       history = [];
       if (engine) engine.reset();
       $genStats.textContent = '';
+      $perf.textContent = '';
     }
 
     // ---------- Show/hide system prompt row ----------
@@ -543,14 +546,16 @@
       $promptIn.value = '';
       $tokenCounter.textContent = '';
       $genStats.textContent = 'Generating…';
+      $perf.textContent = '';
 
       appendBubble('user', prompt);
       history.push({ role: 'user', content: prompt });
 
       engine.reset();
       engine.begin_stream(testEncode, maxToks);
+      const prefillMs = engine.last_prefill_ms;
+      $perf.textContent = `Prefill: ${prefillMs.toFixed(0)} ms`;
 
-      const t0 = performance.now();
       let count = 0;
       let assistantText = '';
       const bubble = appendBubble('assistant', '', true);
@@ -571,10 +576,7 @@
         bubble.textContent = assistantText;
         $chat.scrollTop = $chat.scrollHeight;
 
-        if (count % 8 === 0) {
-          const ms = performance.now() - t0;
-          $genStats.textContent = `${count} tokens · ${(count / (ms / 1000)).toFixed(1)} tok/s`;
-        }
+        $perf.textContent = `Prefill: ${prefillMs.toFixed(0)} ms | ${count} token${count === 1 ? '' : 's'}…`;
         requestAnimationFrame(quickTick);
       }
 
@@ -583,10 +585,16 @@
         if (assistantText) {
           history.push({ role: 'assistant', content: assistantText });
         }
-        const ms = performance.now() - t0;
-        $genStats.textContent =
-          `${count} tokens in ${ms.toFixed(0)} ms = ${(count / (ms / 1000)).toFixed(1)} tok/s ` +
-          `(embedded GGUF tokenizer)`;
+        try {
+          const s = JSON.parse(engine.performance_summary());
+          $perf.textContent =
+            `✓ ${s.tokens_generated} token${s.tokens_generated === 1 ? '' : 's'} | ` +
+            `TTFT: ${s.prefill_ms.toFixed(0)} ms | ` +
+            `${s.tokens_per_second.toFixed(1)} tok/s`;
+        } catch (_) {
+          $perf.textContent = `✓ ${count} tokens generated`;
+        }
+        $genStats.textContent = `(embedded GGUF tokenizer)`;
         $generate.disabled = false;
         $stop.disabled = true;
       }
@@ -613,6 +621,7 @@
       $promptIn.value = '';
       $tokenCounter.textContent = '';
       $genStats.textContent = 'Generating…';
+      $perf.textContent = '';
       await new Promise(r => setTimeout(r, 10));
 
       const maxToks   = parseInt($maxTokens.value, 10) || 128;
@@ -649,8 +658,9 @@
         // added later for larger models.
         engine.reset();
         engine.begin_stream(promptIds, maxToks);
+        const prefillMs = engine.last_prefill_ms;
+        $perf.textContent = `Prefill: ${prefillMs.toFixed(0)} ms`;
 
-        const t0 = performance.now();
         let count = 0;
         let assistantText = '';
 
@@ -679,10 +689,8 @@
           }
           $chat.scrollTop = $chat.scrollHeight;
 
-          if (count % 8 === 0) {
-            const ms = performance.now() - t0;
-            $genStats.textContent = `${count} tokens · ${(count / (ms / 1000)).toFixed(1)} tok/s`;
-          }
+          $perf.textContent =
+            `Prefill: ${prefillMs.toFixed(0)} ms | ${count} token${count === 1 ? '' : 's'}…`;
           requestAnimationFrame(tick);
         }
 
@@ -699,11 +707,17 @@
             bubble.textContent = `${count} token(s) generated. Load a tokenizer (step 2) to see decoded text.`;
           }
 
-          const ms = performance.now() - t0;
-          const tokS = count / (ms / 1000);
-          $genStats.textContent =
-            `${count} tokens in ${ms.toFixed(0)} ms = ${tokS.toFixed(1)} tok/s` +
-            (chatMode ? ` · template: ${engine.chat_template_name}` : '');
+          // Show final performance summary line
+          try {
+            const s = JSON.parse(engine.performance_summary());
+            $perf.textContent =
+              `✓ ${s.tokens_generated} token${s.tokens_generated === 1 ? '' : 's'} | ` +
+              `TTFT: ${s.prefill_ms.toFixed(0)} ms | ` +
+              `${s.tokens_per_second.toFixed(1)} tok/s`;
+          } catch (_) {
+            $perf.textContent = `✓ ${count} tokens generated`;
+          }
+          $genStats.textContent = chatMode ? `template: ${engine.chat_template_name}` : '';
 
           $generate.disabled = false;
           $stop.disabled = true;
