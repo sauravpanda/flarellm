@@ -28,6 +28,7 @@ pub enum WeightFormat {
     IQ2XS,
     IQ3XXS,
     IQ2S,
+    IQ1S,
 }
 
 impl WeightFormat {
@@ -44,7 +45,8 @@ impl WeightFormat {
             | WeightFormat::IQ3XXS
             | WeightFormat::IQ4XS
             | WeightFormat::IQ3S
-            | WeightFormat::IQ2S => 256,
+            | WeightFormat::IQ2S
+            | WeightFormat::IQ1S => 256,
             WeightFormat::Q4_0
             | WeightFormat::Q4_1
             | WeightFormat::Q5_0
