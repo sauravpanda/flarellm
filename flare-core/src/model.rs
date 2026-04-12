@@ -16,6 +16,7 @@ pub enum WeightFormat {
     Q5_0,
     Q5K,
     Q6K,
+    Q8_0,
     Q8_1,
 }
 
@@ -28,7 +29,11 @@ impl WeightFormat {
             | WeightFormat::Q4K
             | WeightFormat::Q5K
             | WeightFormat::Q6K => 256,
-            WeightFormat::Q4_0 | WeightFormat::Q4_1 | WeightFormat::Q5_0 | WeightFormat::Q8_1 => 32,
+            WeightFormat::Q4_0
+            | WeightFormat::Q4_1
+            | WeightFormat::Q5_0
+            | WeightFormat::Q8_0
+            | WeightFormat::Q8_1 => 32,
         }
     }
 }

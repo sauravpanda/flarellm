@@ -31,6 +31,7 @@ const DEQUANT_MATVEC_Q3K_SHADER: &str = include_str!("../shaders/dequant_matvec_
 const DEQUANT_MATVEC_Q4_0_SHADER: &str = include_str!("../shaders/dequant_matvec_q4_0.wgsl");
 const DEQUANT_MATVEC_Q4_1_SHADER: &str = include_str!("../shaders/dequant_matvec_q4_1.wgsl");
 const DEQUANT_MATVEC_Q5_0_SHADER: &str = include_str!("../shaders/dequant_matvec_q5_0.wgsl");
+const DEQUANT_MATVEC_Q8_0_SHADER: &str = include_str!("../shaders/dequant_matvec_q8_0.wgsl");
 const DEQUANT_MATVEC_Q8_1_SHADER: &str = include_str!("../shaders/dequant_matvec_q8_1.wgsl");
 const DEQUANT_MATVEC_Q4K_SHADER: &str = include_str!("../shaders/dequant_matvec_q4k.wgsl");
 const DEQUANT_MATVEC_Q5K_SHADER: &str = include_str!("../shaders/dequant_matvec_q5k.wgsl");
@@ -670,6 +671,75 @@ impl WebGpuBackend {
                 let bind_group =
                     self.make_bind_group(cached, &raw_buf, &vec_buf, &out_buf, &params_buf);
                 // One workgroup per output row.
+                self.dispatch_and_readback(
+                    &cached.pipeline,
+                    &bind_group,
+                    [num_rows as u32, batch as u32, 1],
+                    &out_buf,
+                    output_size,
+                )
+            },
+        );
+
+        self.pool.return_storage(raw_buf);
+        self.pool.return_storage(vec_buf);
+        self.pool.return_output(out_buf);
+        self.pool.return_uniform(params_buf);
+
+        result
+    }
+
+    /// Fused Q8_0 dequantize + batched matrix-vector multiply.
+    ///
+    /// Reads packed Q8_0 weight data, dequantizes each 34-byte block on-the-fly,
+    /// and accumulates the dot products with `input` in the same kernel.
+    ///
+    /// Q8_0 blocks are 34 bytes each (not u32-aligned). The raw bytes are
+    /// padded to the nearest 4-byte multiple before upload.
+    ///
+    /// - `raw_bytes`: packed GGUF data — `num_rows × num_blocks_per_row × 34` bytes
+    ///   (padded to 4-byte multiple by caller if needed)
+    /// - `input`: f32 input matrix of length `batch × num_blocks_per_row × 32`
+    /// - Returns `batch × num_rows` f32 dot products
+    pub fn dequant_matvec_q8_0(
+        &self,
+        raw_bytes: &[u8],
+        input: &[f32],
+        num_rows: usize,
+        num_blocks_per_row: usize,
+        batch: usize,
+    ) -> Vec<f32> {
+        let output_size = num_rows as u64 * batch as u64 * 4;
+
+        // Q8_0 blocks are 34 bytes — pad to next multiple of 4 for wgpu.
+        #[allow(clippy::manual_is_multiple_of)]
+        let raw_buf = if raw_bytes.len() % 4 == 0 {
+            self.pool.get_storage(&self.device, &self.queue, raw_bytes)
+        } else {
+            let mut padded = raw_bytes.to_vec();
+            padded.resize((padded.len() + 3) & !3, 0);
+            self.pool.get_storage(&self.device, &self.queue, &padded)
+        };
+        let vec_buf = self
+            .pool
+            .get_storage(&self.device, &self.queue, bytemuck::cast_slice(input));
+        let out_buf = self.pool.get_output(&self.device, output_size);
+
+        let params: [u32; 3] = [num_rows as u32, num_blocks_per_row as u32, batch as u32];
+        let params_buf =
+            self.pool
+                .get_uniform(&self.device, &self.queue, bytemuck::cast_slice(&params));
+
+        let layout_entries = Self::standard_layout();
+        let result = self.cache.with_pipeline(
+            &self.device,
+            "dequant_matvec_q8_0",
+            DEQUANT_MATVEC_Q8_0_SHADER,
+            "dequant_matvec_q8_0",
+            &layout_entries,
+            |cached| {
+                let bind_group =
+                    self.make_bind_group(cached, &raw_buf, &vec_buf, &out_buf, &params_buf);
                 self.dispatch_and_readback(
                     &cached.pipeline,
                     &bind_group,
@@ -2017,6 +2087,13 @@ impl ComputeBackend for WebGpuBackend {
                 weight.blocks_per_row,
                 batch,
             ),
+            WeightFormat::Q8_0 => self.dequant_matvec_q8_0(
+                &weight.data,
+                input,
+                num_rows,
+                weight.blocks_per_row,
+                batch,
+            ),
             WeightFormat::Q8_1 => self.dequant_matvec_q8_1(
                 &weight.data,
                 input,
@@ -2414,6 +2491,70 @@ mod tests {
                 v
             );
         }
+    }
+
+    /// Verify GPU Q8_0 fused dequant+matvec matches CPU reference dequantization.
+    ///
+    /// One block: scale=1.0, qs = [0, 1, 2, ..., 31] (ascending int8).
+    /// Input: all 1.0. Expected dot product = 0+1+…+31 = 496.
+    ///
+    /// Requires a GPU adapter; run with: `cargo test -p flarellm-gpu -- --ignored`
+    #[test]
+    #[ignore]
+    fn test_dequant_matvec_q8_0_matches_cpu() {
+        use flare_loader::quantize::dequant_q8_0_block;
+
+        let mut raw = [0u8; 34];
+        // scale = 1.0 as f16 LE
+        raw[0] = 0x00;
+        raw[1] = 0x3C;
+        // qs[32] = 0, 1, 2, ..., 31
+        for i in 0..32usize {
+            raw[2 + i] = i as u8;
+        }
+
+        let mut dequant_out = [0.0f32; 32];
+        dequant_q8_0_block(&raw, &mut dequant_out);
+        let expected: f32 = dequant_out.iter().sum();
+
+        let input = [1.0f32; 32];
+        let backend = pollster::block_on(WebGpuBackend::new()).expect("GPU backend unavailable");
+        let result = backend.dequant_matvec_q8_0(&raw, &input, 1, 1, 1);
+
+        assert_eq!(result.len(), 1, "expected one output value");
+        assert!(
+            (result[0] - expected).abs() < 1e-3,
+            "dequant_matvec_q8_0 mismatch: got {}, expected {}",
+            result[0],
+            expected
+        );
+    }
+
+    /// Verify GPU Q8_0 fused dequant+matvec handles negative weights correctly.
+    ///
+    /// All qs = -1 (0xFF as u8), scale = 1.0. Expected dot product = -1 * 32 = -32.
+    ///
+    /// Requires a GPU adapter; run with: `cargo test -p flarellm-gpu -- --ignored`
+    #[test]
+    #[ignore]
+    fn test_dequant_matvec_q8_0_negative_weights() {
+        let mut raw = [0u8; 34];
+        raw[0] = 0x00;
+        raw[1] = 0x3C; // scale = 1.0
+        for b in raw[2..34].iter_mut() {
+            *b = 0xFF; // -1 as i8
+        }
+
+        let input = [1.0f32; 32];
+        let backend = pollster::block_on(WebGpuBackend::new()).expect("GPU backend unavailable");
+        let result = backend.dequant_matvec_q8_0(&raw, &input, 1, 1, 1);
+
+        assert_eq!(result.len(), 1);
+        assert!(
+            (result[0] - (-32.0f32)).abs() < 1e-3,
+            "expected -32.0, got {}",
+            result[0]
+        );
     }
 
     /// Verify GPU Q8_1 fused dequant+matvec against CPU reference.
