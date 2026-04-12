@@ -19,6 +19,7 @@ pub enum GpuError {
 
 const MATMUL_SHADER: &str = include_str!("../shaders/matmul.wgsl");
 const SILU_MUL_SHADER: &str = include_str!("../shaders/silu_mul.wgsl");
+const SOFTMAX_SHADER: &str = include_str!("../shaders/softmax.wgsl");
 
 /// WebGPU/wgpu compute backend.
 ///
@@ -143,6 +144,40 @@ impl WebGpuBackend {
         self.pool.return_staging(staging);
 
         result
+    }
+
+    /// 3-binding layout: 1 read-only storage, 1 read-write storage, 1 uniform.
+    /// Used by kernels that take a single input (e.g. softmax).
+    fn single_input_layout() -> [wgpu::BindGroupLayoutEntry; 3] {
+        [storage_ro_entry(0), storage_rw_entry(1), uniform_entry(2)]
+    }
+
+    /// Build a 3-entry bind group for single-input kernels.
+    fn make_single_input_bind_group(
+        &self,
+        cached: &CachedPipeline,
+        input: &wgpu::Buffer,
+        out: &wgpu::Buffer,
+        params: &wgpu::Buffer,
+    ) -> wgpu::BindGroup {
+        self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: None,
+            layout: &cached.layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: input.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: out.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: params.as_entire_binding(),
+                },
+            ],
+        })
     }
 
     /// Build a 4-entry bind group from the standard layout.
@@ -393,17 +428,49 @@ impl ComputeBackend for WebGpuBackend {
     }
 
     fn softmax(&self, input: &mut Tensor) {
-        // CPU fallback — softmax over a single vector is fast
-        let data = input.data_mut();
-        let max = data.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-        let mut sum = 0.0f32;
-        for v in data.iter_mut() {
-            *v = (*v - max).exp();
-            sum += *v;
-        }
-        for v in data.iter_mut() {
-            *v /= sum;
-        }
+        let size = input.numel() as u32;
+
+        let in_buf = self.pool.get_storage(
+            &self.device,
+            &self.queue,
+            bytemuck::cast_slice(input.data()),
+        );
+        let output_size = size as u64 * 4;
+        let out_buf = self.pool.get_output(&self.device, output_size);
+
+        let params: [u32; 1] = [size];
+        let params_buf =
+            self.pool
+                .get_uniform(&self.device, &self.queue, bytemuck::cast_slice(&params));
+
+        let layout_entries = Self::single_input_layout();
+        let result = self.cache.with_pipeline(
+            &self.device,
+            "softmax",
+            SOFTMAX_SHADER,
+            "softmax",
+            &layout_entries,
+            |cached| {
+                let bind_group =
+                    self.make_single_input_bind_group(cached, &in_buf, &out_buf, &params_buf);
+                // The shader uses a single workgroup — all work is done cooperatively
+                // via workgroup shared memory (thread 0 computes max and sum, then all
+                // threads normalise in parallel).
+                self.dispatch_and_readback(
+                    &cached.pipeline,
+                    &bind_group,
+                    [1, 1, 1],
+                    &out_buf,
+                    output_size,
+                )
+            },
+        );
+
+        input.data_mut()[..result.len()].copy_from_slice(&result);
+
+        self.pool.return_storage(in_buf);
+        self.pool.return_output(out_buf);
+        self.pool.return_uniform(params_buf);
     }
 
     fn silu_mul(&self, gate: &Tensor, up: &Tensor, output: &mut Tensor) {
@@ -506,5 +573,62 @@ fn uniform_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
             min_binding_size: None,
         },
         count: None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use flare_core::tensor::Tensor;
+
+    /// CPU reference softmax — used as the ground truth in comparison tests.
+    fn cpu_softmax(data: &[f32]) -> Vec<f32> {
+        let max = data.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+        let mut out: Vec<f32> = data.iter().map(|v| (v - max).exp()).collect();
+        let sum: f32 = out.iter().sum();
+        for v in out.iter_mut() {
+            *v /= sum;
+        }
+        out
+    }
+
+    /// Compare GPU softmax against the CPU reference.
+    ///
+    /// Marked `#[ignore]` because it requires a GPU adapter (not available in CI).
+    /// Run manually with: `cargo test -p flarellm-gpu -- --ignored`
+    #[test]
+    #[ignore]
+    fn test_softmax_matches_cpu_reference() {
+        let backend = pollster::block_on(WebGpuBackend::new()).expect("GPU backend unavailable");
+
+        let data: Vec<f32> = vec![1.0, 2.0, 3.0, 4.0, 1.0, 2.0, 3.0, 4.0];
+        let expected = cpu_softmax(&data);
+
+        let mut tensor = Tensor::from_vec(data, &[8]).unwrap();
+        backend.softmax(&mut tensor);
+
+        for (i, (&got, &exp)) in tensor.data().iter().zip(expected.iter()).enumerate() {
+            assert!(
+                (got - exp).abs() < 1e-4,
+                "softmax mismatch at [{i}]: got {got}, expected {exp}"
+            );
+        }
+    }
+
+    /// Verify GPU softmax output sums to 1.0.
+    #[test]
+    #[ignore]
+    fn test_softmax_sums_to_one() {
+        let backend = pollster::block_on(WebGpuBackend::new()).expect("GPU backend unavailable");
+
+        let data: Vec<f32> = vec![0.5, -1.2, 3.3, 2.1, -0.4, 1.6, 0.0, 4.2];
+        let mut tensor = Tensor::from_vec(data, &[8]).unwrap();
+        backend.softmax(&mut tensor);
+
+        let sum: f32 = tensor.data().iter().sum();
+        assert!(
+            (sum - 1.0).abs() < 1e-5,
+            "softmax output sum should be 1.0, got {sum}"
+        );
     }
 }
