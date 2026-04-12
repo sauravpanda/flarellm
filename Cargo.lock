@@ -403,6 +403,7 @@ dependencies = [
  "bytemuck",
  "byteorder",
  "flarellm-core",
+ "flarellm-loader",
  "log",
  "pollster",
  "thiserror 2.0.18",

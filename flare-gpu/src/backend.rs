@@ -27,6 +27,8 @@ const ATTENTION_SHADER: &str = include_str!("../shaders/attention.wgsl");
 const DEQUANT_Q4_1_SHADER: &str = include_str!("../shaders/dequant_q4_1.wgsl");
 const DEQUANT_Q4K_SHADER: &str = include_str!("../shaders/dequant_q4k.wgsl");
 const DEQUANT_MATVEC_Q4K_SHADER: &str = include_str!("../shaders/dequant_matvec_q4k.wgsl");
+const DEQUANT_Q5K_SHADER: &str = include_str!("../shaders/dequant_q5k.wgsl");
+const DEQUANT_Q6K_SHADER: &str = include_str!("../shaders/dequant_q6k.wgsl");
 
 /// WebGPU/wgpu compute backend.
 ///
@@ -311,6 +313,103 @@ impl WebGpuBackend {
             "dequant_q4k",
             DEQUANT_Q4K_SHADER,
             "dequant_q4k",
+            &layout_entries,
+            |cached| {
+                let bind_group =
+                    self.make_single_input_bind_group(cached, &raw_buf, &out_buf, &params_buf);
+                let dispatch_x = (num_blocks as u32).div_ceil(64);
+                self.dispatch_and_readback(
+                    &cached.pipeline,
+                    &bind_group,
+                    [dispatch_x, 1, 1],
+                    &out_buf,
+                    output_size,
+                )
+            },
+        );
+
+        self.pool.return_storage(raw_buf);
+        self.pool.return_output(out_buf);
+        self.pool.return_uniform(params_buf);
+
+        result
+    }
+
+    /// Dequantize Q5_K blocks on GPU.
+    ///
+    /// `raw_bytes` is the packed GGUF tensor data (num_blocks × 176 bytes).
+    /// Returns a flat `Vec<f32>` of num_blocks × 256 dequantized weights.
+    pub fn dequant_q5k(&self, raw_bytes: &[u8], num_blocks: usize) -> Vec<f32> {
+        let output_size = (num_blocks * 256) as u64 * 4;
+
+        let raw_buf = self.pool.get_storage(&self.device, &self.queue, raw_bytes);
+        let out_buf = self.pool.get_output(&self.device, output_size);
+
+        let params: [u32; 1] = [num_blocks as u32];
+        let params_buf =
+            self.pool
+                .get_uniform(&self.device, &self.queue, bytemuck::cast_slice(&params));
+
+        let layout_entries = Self::single_input_layout();
+        let result = self.cache.with_pipeline(
+            &self.device,
+            "dequant_q5k",
+            DEQUANT_Q5K_SHADER,
+            "dequant_q5k",
+            &layout_entries,
+            |cached| {
+                let bind_group =
+                    self.make_single_input_bind_group(cached, &raw_buf, &out_buf, &params_buf);
+                let dispatch_x = (num_blocks as u32).div_ceil(64);
+                self.dispatch_and_readback(
+                    &cached.pipeline,
+                    &bind_group,
+                    [dispatch_x, 1, 1],
+                    &out_buf,
+                    output_size,
+                )
+            },
+        );
+
+        self.pool.return_storage(raw_buf);
+        self.pool.return_output(out_buf);
+        self.pool.return_uniform(params_buf);
+
+        result
+    }
+
+    /// Dequantize Q6_K blocks on GPU.
+    ///
+    /// `raw_bytes` is the packed GGUF tensor data (num_blocks × 210 bytes).
+    /// Returns a flat `Vec<f32>` of num_blocks × 256 dequantized weights.
+    ///
+    /// Q6_K blocks are 210 bytes each (not u32-aligned).  The raw bytes are
+    /// padded to the nearest 4-byte multiple before upload so that the wgpu
+    /// storage buffer size requirement is satisfied.
+    pub fn dequant_q6k(&self, raw_bytes: &[u8], num_blocks: usize) -> Vec<f32> {
+        let output_size = (num_blocks * 256) as u64 * 4;
+
+        // Q6_K blocks are 210 bytes — pad to next multiple of 4 for wgpu.
+        let raw_buf = if raw_bytes.len().is_multiple_of(4) {
+            self.pool.get_storage(&self.device, &self.queue, raw_bytes)
+        } else {
+            let mut padded = raw_bytes.to_vec();
+            padded.resize((padded.len() + 3) & !3, 0);
+            self.pool.get_storage(&self.device, &self.queue, &padded)
+        };
+        let out_buf = self.pool.get_output(&self.device, output_size);
+
+        let params: [u32; 1] = [num_blocks as u32];
+        let params_buf =
+            self.pool
+                .get_uniform(&self.device, &self.queue, bytemuck::cast_slice(&params));
+
+        let layout_entries = Self::single_input_layout();
+        let result = self.cache.with_pipeline(
+            &self.device,
+            "dequant_q6k",
+            DEQUANT_Q6K_SHADER,
+            "dequant_q6k",
             &layout_entries,
             |cached| {
                 let bind_group =
@@ -1259,6 +1358,119 @@ mod tests {
         assert_eq!(result.len(), num_rows);
         for (i, &v) in result.iter().enumerate() {
             assert!((v - 384.0).abs() < 1e-1, "row {i}: got {v}, expected 384.0");
+        }
+    }
+
+    /// Verify Q5_K GPU dequant matches the CPU reference.
+    ///
+    /// Block setup: d=1.0, dmin=0.0, all sc[*]=1 (scales_raw[0..4]=0x41),
+    /// mn[*]=0, qh=0 (no high bit), ql all 0x12 (lo=2, hi=1).
+    /// Expected: output[0..128]=2.0, output[128..256]=1.0
+    ///
+    /// Requires a GPU adapter; run with: `cargo test -p flarellm-gpu -- --ignored`
+    #[test]
+    #[ignore]
+    fn test_dequant_q5k_matches_cpu() {
+        use flare_loader::quantize::dequant_q5k_block;
+
+        let mut raw = [0u8; 176];
+        // d = 1.0 as f16 LE
+        raw[0] = 0x00;
+        raw[1] = 0x3C;
+        // dmin = 0.0 (already zero)
+        // scales_raw[0..4] = 0x41: sc[i]=1 (bits[5:0]=1), bits[7:6]=01 → sc[i+4]=1
+        for b in raw[4..8].iter_mut() {
+            *b = 0x41;
+        }
+        // scales_raw[4..12] = 0x00: mn[*]=0 (already zero)
+        // qh[0..32] = 0x00: no high bits → lo/hi nibbles are the full 4-bit value
+        // ql[128] at bytes 48-175: lo=2, hi=1 → byte = 0x12
+        for b in raw[48..176].iter_mut() {
+            *b = 0x12;
+        }
+
+        // CPU reference
+        let mut cpu_out = [0.0f32; 256];
+        dequant_q5k_block(&raw, &mut cpu_out);
+
+        let backend = pollster::block_on(WebGpuBackend::new()).expect("GPU backend unavailable");
+        let result = backend.dequant_q5k(&raw, 1);
+
+        assert_eq!(result.len(), 256, "expected 256 weights");
+        for (j, (&gpu, &cpu)) in result.iter().zip(cpu_out.iter()).enumerate() {
+            assert!(
+                (gpu - cpu).abs() < 1e-3,
+                "q5k mismatch at [{j}]: gpu={gpu}, cpu={cpu}"
+            );
+        }
+    }
+
+    /// Verify Q6_K GPU dequant matches the CPU reference.
+    ///
+    /// Block setup: all-zero block (d=0.0 → all outputs = 0.0).
+    ///
+    /// Requires a GPU adapter; run with: `cargo test -p flarellm-gpu -- --ignored`
+    #[test]
+    #[ignore]
+    fn test_dequant_q6k_zeroed() {
+        use flare_loader::quantize::dequant_q6k_block;
+
+        let raw = [0u8; 210];
+
+        let mut cpu_out = [0.0f32; 256];
+        dequant_q6k_block(&raw, &mut cpu_out);
+
+        let backend = pollster::block_on(WebGpuBackend::new()).expect("GPU backend unavailable");
+        let result = backend.dequant_q6k(&raw, 1);
+
+        assert_eq!(result.len(), 256);
+        for (j, (&gpu, &cpu)) in result.iter().zip(cpu_out.iter()).enumerate() {
+            assert!(
+                (gpu - cpu).abs() < 1e-3,
+                "q6k zeroed mismatch at [{j}]: gpu={gpu}, cpu={cpu}"
+            );
+        }
+    }
+
+    /// Verify Q6_K GPU dequant with d=1.0, non-trivial scales and qh bits.
+    ///
+    /// Requires a GPU adapter; run with: `cargo test -p flarellm-gpu -- --ignored`
+    #[test]
+    #[ignore]
+    fn test_dequant_q6k_matches_cpu() {
+        use flare_loader::quantize::dequant_q6k_block;
+
+        let mut raw = [0u8; 210];
+        // d = 1.0 as f16 LE at bytes 208-209
+        raw[208] = 0x00;
+        raw[209] = 0x3C;
+        // scales[16] at bytes 192-207: set all to 1 (0x01 as signed i8)
+        for b in raw[192..208].iter_mut() {
+            *b = 0x01;
+        }
+        // ql[128] at bytes 0-127: lo nibble = 1, hi nibble = 2 → byte = 0x21
+        for b in raw[0..128].iter_mut() {
+            *b = 0x21;
+        }
+        // qh[64] at bytes 128-191: set upper 2 bits to 0b01 per group of 4
+        // qh byte = 0x55 = 0b01010101: bits [1:0]=01, [3:2]=01, [5:4]=01, [7:6]=01
+        for b in raw[128..192].iter_mut() {
+            *b = 0x55;
+        }
+
+        // CPU reference
+        let mut cpu_out = [0.0f32; 256];
+        dequant_q6k_block(&raw, &mut cpu_out);
+
+        let backend = pollster::block_on(WebGpuBackend::new()).expect("GPU backend unavailable");
+        let result = backend.dequant_q6k(&raw, 1);
+
+        assert_eq!(result.len(), 256);
+        for (j, (&gpu, &cpu)) in result.iter().zip(cpu_out.iter()).enumerate() {
+            assert!(
+                (gpu - cpu).abs() < 1e-3,
+                "q6k mismatch at [{j}]: gpu={gpu}, cpu={cpu}"
+            );
         }
     }
 }
