@@ -265,6 +265,11 @@ pub struct FlareEngine {
     /// Pre-built JSON string of scalar GGUF metadata (large vocabulary arrays excluded).
     /// Empty string `"{}"` for non-GGUF models.
     metadata_json: String,
+    // --- Last-step logits ---
+    /// Raw pre-temperature logits from the most recent forward pass.
+    /// Populated by `next_token()` and the batch `generate_*` methods.
+    /// Empty before any inference; cleared by `reset()`.
+    last_logits: Vec<f32>,
 }
 
 #[wasm_bindgen]
@@ -338,6 +343,7 @@ impl FlareEngine {
             stream_text_accum: String::new(),
             rng_seed: 0x12345678,
             metadata_json,
+            last_logits: Vec::new(),
         })
     }
 
@@ -493,6 +499,7 @@ impl FlareEngine {
         self.stop_sequences.clear();
         self.stream_text_accum.clear();
         self.rng_seed = 0x12345678;
+        self.last_logits.clear();
     }
 
     /// Get the vocabulary size of the loaded model.
@@ -1104,6 +1111,8 @@ impl FlareEngine {
         }
 
         let logits_tensor = self.model.forward(self.stream_last_token, self.stream_pos);
+        // Capture raw pre-temperature logits for last_logits() getter.
+        self.last_logits = logits_tensor.data().to_vec();
         let token_id = if self.stream_params.temperature == 0.0 {
             sampling::sample_greedy(logits_tensor.data())
         } else {
@@ -1346,6 +1355,36 @@ impl FlareEngine {
         self.last_tokens_generated = result.len() as u32;
         self.kv_pos = effective.len() + result.len();
         result
+    }
+
+    // -----------------------------------------------------------------------
+    // Last-step logits API
+    // -----------------------------------------------------------------------
+
+    /// Raw pre-temperature logits from the most recent forward pass.
+    ///
+    /// Returns the full vocabulary logit vector as a `Float32Array`.  These
+    /// are the raw values *before* temperature scaling, repetition penalty,
+    /// or any sampling filter — equivalent to the model's raw next-token
+    /// distribution.
+    ///
+    /// Useful for:
+    /// - Scoring candidate continuations (classification, ranking)
+    /// - Computing perplexity / cross-entropy
+    /// - Inspecting the model's "confidence" about the next token
+    ///
+    /// Returns an empty array before any inference has been run, and is
+    /// cleared by `reset()`.
+    ///
+    /// ```javascript
+    /// engine.begin_stream(promptIds, 1); // one token prefill+decode
+    /// engine.next_token();
+    /// const logits = engine.last_logits; // Float32Array of vocab_size
+    /// const topTokenId = logits.indexOf(Math.max(...logits));
+    /// ```
+    #[wasm_bindgen(getter)]
+    pub fn last_logits(&self) -> Vec<f32> {
+        self.last_logits.clone()
     }
 
     // -----------------------------------------------------------------------
@@ -1616,6 +1655,7 @@ impl FlareProgressiveLoader {
             stream_text_accum: String::new(),
             rng_seed: 0x12345678,
             metadata_json,
+            last_logits: Vec::new(),
         })
     }
 }
