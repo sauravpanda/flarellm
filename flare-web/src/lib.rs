@@ -315,6 +315,11 @@ pub struct FlareEngine {
     /// Interleaved `[token_id_as_f32, log_prob, ...]` for the last token.
     /// Length is `top_logprobs_n * 2`. Empty when disabled or before inference.
     top_logprobs_data: Vec<f32>,
+    // --- UTF-8 streaming accumulator ---
+    /// Accumulates raw bytes from consecutive `<0xXX>` byte-level tokens so that
+    /// multi-byte UTF-8 sequences (e.g. CJK, emoji) are reassembled correctly
+    /// before being returned to the caller.  Cleared by `reset()`.
+    utf8_byte_buf: Vec<u8>,
 }
 
 #[wasm_bindgen]
@@ -393,6 +398,7 @@ impl FlareEngine {
             last_logits: Vec::new(),
             top_logprobs_n: 0,
             top_logprobs_data: Vec::new(),
+            utf8_byte_buf: Vec::new(),
         })
     }
 
@@ -585,6 +591,7 @@ impl FlareEngine {
         self.last_logits.clear();
         self.top_logprobs_data.clear();
         self.stream_stop_reason.clear();
+        self.utf8_byte_buf.clear();
     }
 
     /// Get the vocabulary size of the loaded model.
@@ -862,6 +869,74 @@ impl FlareEngine {
         match &self.gguf_vocab {
             Some(vocab) => vocab.decode(&[id]),
             None => String::new(),
+        }
+    }
+
+    /// Decode a single token ID, correctly handling multi-byte UTF-8 sequences.
+    ///
+    /// SentencePiece tokenizers encode non-ASCII characters as consecutive
+    /// byte-level tokens such as `<0xE4>`, `<0xB8>`, `<0xAD>` (the UTF-8
+    /// encoding of `中`).  The basic `decode_token` function returns incorrect
+    /// Latin-1 characters in these cases because it treats each byte as an
+    /// independent Unicode scalar.
+    ///
+    /// `decode_token_chunk` accumulates bytes in an internal buffer until a
+    /// complete, valid UTF-8 sequence is assembled, then returns it as a
+    /// `String`.  While the sequence is incomplete it returns an empty string,
+    /// and when a regular (non-byte) token is encountered it flushes any
+    /// buffered bytes (replacing invalid sequences with U+FFFD) before
+    /// returning the decoded text.
+    ///
+    /// **Use this instead of `decode_token` whenever you are streaming tokens
+    /// that may include non-Latin characters.**
+    ///
+    /// ```javascript
+    /// engine.begin_stream(prompt, 256);
+    /// function tick() {
+    ///   const id = engine.next_token();
+    ///   if (id !== undefined) output.textContent += engine.decode_token_chunk(id);
+    ///   if (!engine.stream_done) requestAnimationFrame(tick);
+    /// }
+    /// requestAnimationFrame(tick);
+    /// ```
+    #[wasm_bindgen]
+    pub fn decode_token_chunk(&mut self, id: u32) -> String {
+        let vocab = match &self.gguf_vocab {
+            Some(v) => v,
+            None => return String::new(),
+        };
+
+        if let Some(token) = vocab.decode_token(id) {
+            // Detect SentencePiece byte-level tokens: exactly "<0xXX>" (6 chars)
+            if token.len() == 6 && token.starts_with("<0x") && token.ends_with('>') {
+                if let Ok(byte) = u8::from_str_radix(&token[3..5], 16) {
+                    self.utf8_byte_buf.push(byte);
+                    return match std::str::from_utf8(&self.utf8_byte_buf) {
+                        Ok(s) => {
+                            let out = s.to_owned();
+                            self.utf8_byte_buf.clear();
+                            out
+                        }
+                        // Incomplete multi-byte sequence — keep buffering.
+                        Err(_) => String::new(),
+                    };
+                }
+            }
+        }
+
+        // Regular (non-byte) token: flush any pending bytes first, then decode.
+        let prefix = if self.utf8_byte_buf.is_empty() {
+            String::new()
+        } else {
+            let flushed = String::from_utf8_lossy(&self.utf8_byte_buf).into_owned();
+            self.utf8_byte_buf.clear();
+            flushed
+        };
+        let decoded = vocab.decode(&[id]);
+        if prefix.is_empty() {
+            decoded
+        } else {
+            prefix + &decoded
         }
     }
 
@@ -2099,6 +2174,7 @@ impl FlareProgressiveLoader {
             last_logits: Vec::new(),
             top_logprobs_n: 0,
             top_logprobs_data: Vec::new(),
+            utf8_byte_buf: Vec::new(),
         })
     }
 }
