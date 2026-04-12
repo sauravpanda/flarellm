@@ -1097,7 +1097,11 @@ mod tests {
         let raw = val.to_le_bytes().to_vec();
         let result = super::dequantize_tensor(&raw, QuantFormat::F32, 1).unwrap();
         assert_eq!(result.len(), 1);
-        assert!((result[0] - val).abs() < 1e-6, "f32 passthrough: got {}", result[0]);
+        assert!(
+            (result[0] - val).abs() < 1e-6,
+            "f32 passthrough: got {}",
+            result[0]
+        );
     }
 
     #[test]
@@ -1154,7 +1158,11 @@ mod tests {
         raw[1] = 0x3C; // scale = 1.0
         raw[2] = 5i8 as u8; // qs[0] = 5
         let result = super::dequantize_tensor(&raw, QuantFormat::Q8_0, 32).unwrap();
-        assert!((result[0] - 5.0).abs() < 1e-5, "q8_0 nonzero: result[0] = {}", result[0]);
+        assert!(
+            (result[0] - 5.0).abs() < 1e-5,
+            "q8_0 nonzero: result[0] = {}",
+            result[0]
+        );
     }
 
     #[test]
