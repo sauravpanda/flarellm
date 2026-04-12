@@ -330,7 +330,9 @@
     }
 
     // ---------- Model loaded ----------
-    async function onModelLoaded(eng, ms) {
+    // rawBytes: optional Uint8Array of the GGUF file — used to load raw
+    // quantized weights for the fused dequant+matvec GPU path.
+    async function onModelLoaded(eng, ms, rawBytes) {
       engine = eng;
       const tmplName = eng.chat_template_name;
       $modelInfo.textContent =
@@ -351,7 +353,24 @@
         $env.textContent = 'WebGPU: initialising…';
         try {
           const gpuOn = await eng.init_gpu();
-          $env.textContent = gpuOn ? 'WebGPU: ✓ active' : 'WebGPU: available but init failed';
+          if (gpuOn) {
+            // Attempt to load raw quantized weights for the fused
+            // dequant+matvec path (reduces memory bandwidth on GPU).
+            if (rawBytes) {
+              try {
+                const rawOk = eng.load_raw_weights(rawBytes);
+                $env.textContent = rawOk
+                  ? 'WebGPU: ✓ active (fused quant kernels)'
+                  : 'WebGPU: ✓ active (f32 path — unsupported quant format)';
+              } catch (_) {
+                $env.textContent = 'WebGPU: ✓ active (f32 path)';
+              }
+            } else {
+              $env.textContent = 'WebGPU: ✓ active';
+            }
+          } else {
+            $env.textContent = 'WebGPU: available but init failed';
+          }
         } catch (e) {
           $env.textContent = 'WebGPU: error — ' + e;
         }
@@ -394,7 +413,8 @@
         await new Promise(r => setTimeout(r, 10));
         const t0 = performance.now();
         clearChat();
-        await onModelLoaded(FlareEngine.load(new Uint8Array(buffer)), performance.now() - t0);
+        const bytes = new Uint8Array(buffer);
+        await onModelLoaded(FlareEngine.load(bytes), performance.now() - t0, bytes);
       } catch (err) {
         $modelInfo.textContent = 'Error: ' + err;
         $modelInfo.classList.add('error');
@@ -464,7 +484,7 @@
         updateProgress(bytes.length, bytes.length, fromCache ? 'Parsing (cached)…' : 'Parsing…');
         await new Promise(r => setTimeout(r, 10)); // yield so progress renders
         const eng = FlareEngine.load(bytes);
-        await onModelLoaded(eng, performance.now() - t0);
+        await onModelLoaded(eng, performance.now() - t0, bytes);
       } catch (err) {
         $modelInfo.textContent = 'Error: ' + err;
         $modelInfo.classList.add('error');

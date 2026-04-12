@@ -171,6 +171,67 @@ impl FlareEngine {
         }
     }
 
+    /// Load raw quantized weights from GGUF bytes so the GPU fused
+    /// dequant+matvec kernels can be used during inference.
+    ///
+    /// Call this **after** `init_gpu()` so the backend is set before the raw
+    /// weights are attached.  The method is a no-op (returns `false`) if a
+    /// layer's weights are in an unsupported quantization format — the engine
+    /// continues to work using the f32 path loaded at `FlareEngine.load()`.
+    ///
+    /// Returns `true` if all layers were loaded successfully, `false` if any
+    /// layer fell back to the f32 path.
+    ///
+    /// ```javascript
+    /// const engine = FlareEngine.load(bytes);
+    /// await engine.init_gpu();
+    /// const ok = engine.load_raw_weights(bytes);
+    /// console.log('Raw weights loaded:', ok);
+    /// ```
+    #[wasm_bindgen]
+    pub fn load_raw_weights(&mut self, gguf_bytes: &[u8]) -> bool {
+        let mut reader = Cursor::new(gguf_bytes);
+        let gguf = match GgufFile::parse_header(&mut reader) {
+            Ok(g) => g,
+            Err(_) => return false,
+        };
+        let num_layers = self.model.config().num_layers;
+        let mut raw_layers = Vec::with_capacity(num_layers);
+        let mut all_ok = true;
+
+        for layer_idx in 0..num_layers {
+            match gguf.load_raw_layer_weights(&mut reader, layer_idx) {
+                Ok(Some(rw)) => raw_layers.push(rw),
+                _ => {
+                    all_ok = false;
+                    // Stop trying — partial raw weights are not supported.
+                    break;
+                }
+            }
+        }
+
+        if raw_layers.len() == num_layers {
+            self.model.set_raw_weights(raw_layers);
+        }
+
+        all_ok
+    }
+
+    /// Clear any previously loaded raw quantized weights.
+    ///
+    /// After calling this the engine uses the f32 dequantized path for all
+    /// matrix operations until `load_raw_weights` is called again.
+    #[wasm_bindgen]
+    pub fn clear_raw_weights(&mut self) {
+        self.model.clear_raw_weights();
+    }
+
+    /// Returns `true` if raw quantized weights are currently loaded.
+    #[wasm_bindgen(getter)]
+    pub fn has_raw_weights(&self) -> bool {
+        self.model.has_raw_weights()
+    }
+
     /// Reset the KV cache (start a new conversation).
     #[wasm_bindgen]
     pub fn reset(&mut self) {
