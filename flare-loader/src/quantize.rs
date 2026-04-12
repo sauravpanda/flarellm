@@ -15,6 +15,7 @@ pub enum QuantFormat {
     Q4K,
     Q5K,
     Q6K,
+    IQ4NL,
     Unknown(u32),
 }
 
@@ -35,6 +36,7 @@ impl QuantFormat {
             12 => QuantFormat::Q4K,
             13 => QuantFormat::Q5K,
             14 => QuantFormat::Q6K,
+            20 => QuantFormat::IQ4NL,
             other => QuantFormat::Unknown(other),
         }
     }
@@ -50,6 +52,7 @@ impl QuantFormat {
             QuantFormat::Q2K => 2.6,
             QuantFormat::Q3K => 3.4,
             QuantFormat::Q6K => 6.6,
+            QuantFormat::IQ4NL => 4.5, // 4 bits + 2-byte scale per 32 weights
             QuantFormat::Unknown(_) => 32.0, // assume worst case
         }
     }
@@ -58,7 +61,7 @@ impl QuantFormat {
     pub fn block_size(&self) -> usize {
         match self {
             QuantFormat::F32 | QuantFormat::F16 | QuantFormat::BF16 => 1,
-            QuantFormat::Q4_0 | QuantFormat::Q4_1 => 32,
+            QuantFormat::Q4_0 | QuantFormat::Q4_1 | QuantFormat::IQ4NL => 32,
             QuantFormat::Q5_0 | QuantFormat::Q5_1 => 32,
             QuantFormat::Q8_0 | QuantFormat::Q8_1 => 32,
             QuantFormat::Q2K
@@ -75,8 +78,8 @@ impl QuantFormat {
         match self {
             QuantFormat::F32 => 4,
             QuantFormat::F16 | QuantFormat::BF16 => 2,
-            QuantFormat::Q4_0 => 18, // 2 (scale) + 16 (nibbles)
-            QuantFormat::Q4_1 => 20, // 2 (scale) + 2 (min) + 16 (nibbles)
+            QuantFormat::Q4_0 | QuantFormat::IQ4NL => 18, // 2 (scale) + 16 (nibbles)
+            QuantFormat::Q4_1 => 20,                      // 2 (scale) + 2 (min) + 16 (nibbles)
             QuantFormat::Q5_0 => 22, // 2 (scale) + 4 (high bits) + 16 (nibbles)
             QuantFormat::Q5_1 => 24, // 2 (scale) + 2 (min) + 4 (high bits) + 16 (nibbles)
             QuantFormat::Q8_0 => 34, // 2 (scale) + 32 (int8)
@@ -100,6 +103,28 @@ impl QuantFormat {
         }
         let num_blocks = elements.div_ceil(bs);
         num_blocks * bb
+    }
+}
+
+/// Lookup table for IQ4_NL dequantization (from llama.cpp).
+/// Maps a 4-bit nibble [0, 15] to a signed quantized value.
+pub const KVALUES_IQ4NL: [i8; 16] = [
+    -127, -104, -83, -65, -49, -35, -22, -10, 1, 13, 25, 38, 53, 69, 89, 113,
+];
+
+/// Dequantize an IQ4_NL block: 32 weights via 16-entry lookup + f16 scale.
+/// Layout: 2 bytes scale (f16) + 16 bytes qs (32 packed 4-bit nibbles). 18 bytes total.
+pub fn dequant_iq4nl_block(block: &[u8], output: &mut [f32; 32]) {
+    if block.len() < 18 {
+        return;
+    }
+    let scale = f16_to_f32(u16::from_le_bytes([block[0], block[1]]));
+    for i in 0..16 {
+        let byte = block[2 + i];
+        let lo = KVALUES_IQ4NL[(byte & 0x0F) as usize];
+        let hi = KVALUES_IQ4NL[((byte >> 4) & 0x0F) as usize];
+        output[i * 2] = lo as f32 * scale;
+        output[i * 2 + 1] = hi as f32 * scale;
     }
 }
 
