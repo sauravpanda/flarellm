@@ -857,8 +857,9 @@ impl FlareEngine {
     ///
     /// - `temperature`: 0 = greedy, higher = more diverse
     /// - `top_p`: nucleus sampling (1.0 = disabled)
-    /// - `top_k`: top-k sampling, applied when `top_p` is 1.0 (0 = disabled)
+    /// - `top_k`: top-k sampling, applied when `top_p` is 1.0 and `min_p` is 0.0 (0 = disabled)
     /// - `repeat_penalty`: repetition penalty (1.0 = disabled, 1.1–1.3 = typical)
+    /// - `min_p`: min-p threshold (0.0 = disabled)
     ///
     /// Encodes `prompt` with the embedded GGUF vocabulary, generates up to
     /// `max_tokens` tokens, and calls `on_token(token_str)` with the decoded
@@ -873,7 +874,7 @@ impl FlareEngine {
     /// engine.reset();
     /// let out = '';
     /// const count = engine.generate_stream_with_params(
-    ///   prompt, 200, 0.8, 0.95, 40, 1.1,
+    ///   prompt, 200, 0.8, 0.95, 40, 1.1, 0.0,
     ///   (token) => { out += token; }
     /// );
     /// ```
@@ -887,6 +888,7 @@ impl FlareEngine {
         top_p: f32,
         top_k: u32,
         repeat_penalty: f32,
+        min_p: f32,
         on_token: &js_sys::Function,
     ) -> u32 {
         let raw_tokens = match &self.gguf_vocab {
@@ -900,6 +902,7 @@ impl FlareEngine {
             top_p,
             top_k,
             repeat_penalty,
+            min_p,
         );
         let mut count = 0u32;
         while let Some(token_id) = self.next_token() {
@@ -975,8 +978,9 @@ impl FlareEngine {
     ///   reduce repetition (1.0 = disabled, 1.1–1.3 = typical range)
     ///
     /// ```javascript
-    /// engine.begin_stream_with_params(promptIds, 200, 0.8, 0.95, 40, 1.1);
+    /// engine.begin_stream_with_params(promptIds, 200, 0.8, 0.95, 40, 1.1, 0.0);
     /// ```
+    #[allow(clippy::too_many_arguments)]
     #[wasm_bindgen]
     pub fn begin_stream_with_params(
         &mut self,
@@ -986,12 +990,14 @@ impl FlareEngine {
         top_p: f32,
         top_k: u32,
         repeat_penalty: f32,
+        min_p: f32,
     ) {
         self.stream_params = SamplingParams {
             temperature,
             top_p,
             top_k: top_k as usize,
             repeat_penalty,
+            min_p,
         };
         self.stream_rng_state = self.rng_seed;
         self.begin_stream_impl(prompt_tokens, max_tokens);
@@ -1064,10 +1070,11 @@ impl FlareEngine {
                 .wrapping_mul(1664525)
                 .wrapping_add(1013904223);
             let rng_val = (self.stream_rng_state as f32) / (u32::MAX as f32);
-            // Mirror Generator::step() logic: top_p takes precedence; fall back
-            // to top_k when top_p is 1.0 (disabled); otherwise sample all tokens.
+            // Mirror Generator::step() priority: top_p > min_p > top_k > full nucleus
             if self.stream_params.top_p < 1.0 {
                 sampling::sample_top_p(&logits, self.stream_params.top_p, rng_val)
+            } else if self.stream_params.min_p > 0.0 {
+                sampling::sample_min_p(&logits, self.stream_params.min_p, rng_val)
             } else if self.stream_params.top_k > 0 {
                 sampling::sample_top_k(&logits, self.stream_params.top_k, rng_val)
             } else {
@@ -1226,10 +1233,12 @@ impl FlareEngine {
     ///
     /// - `temperature`: 0 = greedy, higher = more diverse
     /// - `top_p`: nucleus sampling (1.0 = disabled)
-    /// - `top_k`: top-k sampling, applied when `top_p` is 1.0 (0 = disabled)
+    /// - `top_k`: top-k sampling, applied when `top_p` is 1.0 and `min_p` is 0.0 (0 = disabled)
     /// - `repeat_penalty`: repetition penalty applied to recently-seen tokens (1.0 = disabled)
+    /// - `min_p`: min-p threshold (0.0 = disabled); applied after `top_p`, before `top_k`
     ///
     /// Stops early at EOS. Uses a fixed LCG RNG seed for reproducibility.
+    #[allow(clippy::too_many_arguments)]
     #[wasm_bindgen]
     pub fn generate_with_params(
         &mut self,
@@ -1239,6 +1248,7 @@ impl FlareEngine {
         top_p: f32,
         top_k: u32,
         repeat_penalty: f32,
+        min_p: f32,
     ) -> Vec<u32> {
         let effective = self.with_bos(prompt_tokens);
         let params = SamplingParams {
@@ -1246,6 +1256,7 @@ impl FlareEngine {
             top_p,
             top_k: top_k as usize,
             repeat_penalty,
+            min_p,
         };
         let stop_seqs = &self.stop_sequences;
         let vocab = &self.gguf_vocab;
