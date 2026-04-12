@@ -724,4 +724,58 @@ mod tests {
         tensors.insert("lm_head.weight".into(), make_st_info(vec![32000, 4096]));
         assert!(infer_model_config_from_safetensors(&tensors).is_err());
     }
+
+    #[test]
+    fn test_load_layer_optional_bias_absent() {
+        // When no bias tensors are present, attn_q_bias / k_bias / v_bias must be None
+        let tensors = build_gguf_tensors(1);
+        let layer = load_layer_weights(&tensors, 0).unwrap();
+        assert!(layer.attn_q_bias.is_none(), "no q_bias in gguf tensors");
+        assert!(layer.attn_k_bias.is_none(), "no k_bias in gguf tensors");
+        assert!(layer.attn_v_bias.is_none(), "no v_bias in gguf tensors");
+    }
+
+    #[test]
+    fn test_load_layer_optional_bias_present() {
+        // When bias tensors exist, they should be loaded into Some(...)
+        let mut tensors = build_gguf_tensors(1);
+        tensors.insert("blk.0.attn_q.bias".into(), small_tensor(4));
+        tensors.insert("blk.0.attn_k.bias".into(), small_tensor(4));
+        tensors.insert("blk.0.attn_v.bias".into(), small_tensor(4));
+        let layer = load_layer_weights(&tensors, 0).unwrap();
+        assert!(layer.attn_q_bias.is_some(), "q_bias should be loaded");
+        assert!(layer.attn_k_bias.is_some(), "k_bias should be loaded");
+        assert!(layer.attn_v_bias.is_some(), "v_bias should be loaded");
+    }
+
+    #[test]
+    fn test_find_tensor_first_name_wins() {
+        // When both names exist, the first one takes priority
+        let mut m = HashMap::new();
+        m.insert("first".into(), small_tensor(2));
+        m.insert("second".into(), small_tensor(4));
+        let t = find_tensor(&m, &["first", "second"]).unwrap();
+        assert_eq!(t.numel(), 2, "first matching name should be returned");
+    }
+
+    #[test]
+    fn test_infer_config_small_head_dim_64() {
+        // Use 7 heads × 64 = 448 projection dim; 448 % 128 ≠ 0, so 64 is selected.
+        let tensors = build_st_tensors(32000, 2048, 5504, 7, 7, 64, 4);
+        let cfg = infer_model_config_from_safetensors(&tensors).unwrap();
+        assert_eq!(cfg.head_dim, 64);
+        assert_eq!(cfg.num_heads, 7);
+        assert_eq!(cfg.num_kv_heads, 7);
+    }
+
+    #[test]
+    fn test_infer_config_missing_gate_proj_fails() {
+        // gate_proj is required; its absence must return an error
+        let mut tensors = build_st_tensors(32000, 4096, 11008, 32, 8, 128, 1);
+        tensors.remove("model.layers.0.mlp.gate_proj.weight");
+        assert!(
+            infer_model_config_from_safetensors(&tensors).is_err(),
+            "missing gate_proj should fail"
+        );
+    }
 }
