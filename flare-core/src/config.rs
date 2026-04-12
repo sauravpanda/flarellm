@@ -1,6 +1,18 @@
 use serde::{Deserialize, Serialize};
 
 /// Model architecture configuration parsed from GGUF metadata or config.json.
+///
+/// # Examples
+///
+/// ```
+/// use flare_core::config::{ModelConfig, Architecture};
+///
+/// let cfg = ModelConfig::default();
+/// assert_eq!(cfg.architecture, Architecture::Llama);
+/// assert_eq!(cfg.num_heads, 32);
+/// assert!(cfg.vocab_size > 0);
+/// assert!(cfg.rope_theta > 0.0);
+/// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelConfig {
     pub architecture: Architecture,

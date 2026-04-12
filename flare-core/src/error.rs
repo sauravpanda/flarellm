@@ -19,6 +19,18 @@ pub enum FlareError {
 }
 
 /// Errors related to model loading and inference.
+///
+/// # Examples
+///
+/// ```
+/// use flare_core::error::ModelError;
+///
+/// let err = ModelError::UnsupportedArchitecture("gpt4".into());
+/// assert!(err.to_string().contains("gpt4"));
+///
+/// let oom = ModelError::OutOfMemory { needed: 8_000_000_000, available: 4_000_000_000 };
+/// assert!(oom.to_string().contains("8000000000"));
+/// ```
 #[derive(Debug, Error)]
 pub enum ModelError {
     #[error("unsupported model architecture: {0}")]

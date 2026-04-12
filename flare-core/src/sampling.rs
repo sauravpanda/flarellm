@@ -1,6 +1,20 @@
 //! Sampling strategies for token generation.
 
 /// Parameters controlling text generation.
+///
+/// # Examples
+///
+/// ```
+/// use flare_core::sampling::SamplingParams;
+///
+/// // Greedy (deterministic) decoding
+/// let greedy = SamplingParams { temperature: 0.0, top_p: 1.0, top_k: 0, repeat_penalty: 1.0, min_p: 0.0 };
+/// assert_eq!(greedy.temperature, 0.0);
+///
+/// // Default creative sampling
+/// let creative = SamplingParams::default();
+/// assert!(creative.temperature > 0.0);
+/// ```
 #[derive(Debug, Clone)]
 pub struct SamplingParams {
     pub temperature: f32,
