@@ -3,6 +3,7 @@
 pub enum QuantFormat {
     F32,
     F16,
+    BF16,
     Q4_0,
     Q4_1,
     Q5_0,
@@ -22,6 +23,7 @@ impl QuantFormat {
         match type_id {
             0 => QuantFormat::F32,
             1 => QuantFormat::F16,
+            32 => QuantFormat::BF16,
             2 => QuantFormat::Q4_0,
             3 => QuantFormat::Q4_1,
             6 => QuantFormat::Q5_0,
@@ -41,7 +43,7 @@ impl QuantFormat {
     pub fn bits_per_weight(&self) -> f32 {
         match self {
             QuantFormat::F32 => 32.0,
-            QuantFormat::F16 => 16.0,
+            QuantFormat::F16 | QuantFormat::BF16 => 16.0,
             QuantFormat::Q4_0 | QuantFormat::Q4_1 | QuantFormat::Q4K => 4.5,
             QuantFormat::Q5_0 | QuantFormat::Q5_1 | QuantFormat::Q5K => 5.5,
             QuantFormat::Q8_0 | QuantFormat::Q8_1 => 8.5,
@@ -55,7 +57,7 @@ impl QuantFormat {
     /// Block size for quantized formats (number of weights per block).
     pub fn block_size(&self) -> usize {
         match self {
-            QuantFormat::F32 | QuantFormat::F16 => 1,
+            QuantFormat::F32 | QuantFormat::F16 | QuantFormat::BF16 => 1,
             QuantFormat::Q4_0 | QuantFormat::Q4_1 => 32,
             QuantFormat::Q5_0 | QuantFormat::Q5_1 => 32,
             QuantFormat::Q8_0 | QuantFormat::Q8_1 => 32,
@@ -72,7 +74,7 @@ impl QuantFormat {
     pub fn block_bytes(&self) -> usize {
         match self {
             QuantFormat::F32 => 4,
-            QuantFormat::F16 => 2,
+            QuantFormat::F16 | QuantFormat::BF16 => 2,
             QuantFormat::Q4_0 => 18, // 2 (scale) + 16 (nibbles)
             QuantFormat::Q4_1 => 20, // 2 (scale) + 2 (min) + 16 (nibbles)
             QuantFormat::Q5_0 => 22, // 2 (scale) + 4 (high bits) + 16 (nibbles)
@@ -463,6 +465,14 @@ pub fn f16_to_f32(bits: u16) -> f32 {
     let exp = (exp + 127 - 15) & 0xFF;
     let mant = mant << 13;
     f32::from_bits((sign << 31) | (exp << 23) | mant)
+}
+
+/// Convert bfloat16 (as u16 bits) to f32.
+///
+/// BF16 shares the same exponent and sign layout as F32, but has only 7
+/// mantissa bits (vs 23 in F32). Conversion is a simple left-shift by 16.
+pub fn bf16_to_f32(bits: u16) -> f32 {
+    f32::from_bits((bits as u32) << 16)
 }
 
 #[cfg(test)]

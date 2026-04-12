@@ -26,6 +26,7 @@ const SOFTMAX_SHADER: &str = include_str!("../shaders/softmax.wgsl");
 const ATTENTION_SHADER: &str = include_str!("../shaders/attention.wgsl");
 const DEQUANT_Q4_1_SHADER: &str = include_str!("../shaders/dequant_q4_1.wgsl");
 const DEQUANT_Q4K_SHADER: &str = include_str!("../shaders/dequant_q4k.wgsl");
+const DEQUANT_MATVEC_BF16_SHADER: &str = include_str!("../shaders/dequant_matvec_bf16.wgsl");
 const DEQUANT_MATVEC_Q2K_SHADER: &str = include_str!("../shaders/dequant_matvec_q2k.wgsl");
 const DEQUANT_MATVEC_Q3K_SHADER: &str = include_str!("../shaders/dequant_matvec_q3k.wgsl");
 const DEQUANT_MATVEC_Q4_0_SHADER: &str = include_str!("../shaders/dequant_matvec_q4_0.wgsl");
@@ -796,6 +797,74 @@ impl WebGpuBackend {
             "dequant_matvec_q8_0",
             DEQUANT_MATVEC_Q8_0_SHADER,
             "dequant_matvec_q8_0",
+            &layout_entries,
+            |cached| {
+                let bind_group =
+                    self.make_bind_group(cached, &raw_buf, &vec_buf, &out_buf, &params_buf);
+                self.dispatch_and_readback(
+                    &cached.pipeline,
+                    &bind_group,
+                    [num_rows as u32, batch as u32, 1],
+                    &out_buf,
+                    output_size,
+                )
+            },
+        );
+
+        self.pool.return_storage(raw_buf);
+        self.pool.return_storage(vec_buf);
+        self.pool.return_output(out_buf);
+        self.pool.return_uniform(params_buf);
+
+        result
+    }
+
+    /// Fused BF16 dequantize + batched matrix-vector multiply.
+    ///
+    /// Reads packed BF16 weight data, converts each value to f32 on-the-fly
+    /// (BF16 = upper 16 bits of F32, so conversion is a left-shift by 16),
+    /// and accumulates the dot products with `input` in the same kernel.
+    ///
+    /// - `raw_bytes`: BF16 weight data — `num_rows × num_cols × 2` bytes
+    ///   (padded to 4-byte multiple by caller if needed)
+    /// - `input`: f32 input matrix of length `batch × num_cols`
+    /// - `num_blocks_per_row`: equals `num_cols` (weights_per_block = 1 for BF16)
+    /// - Returns `batch × num_rows` f32 dot products
+    pub fn dequant_matvec_bf16(
+        &self,
+        raw_bytes: &[u8],
+        input: &[f32],
+        num_rows: usize,
+        num_blocks_per_row: usize,
+        batch: usize,
+    ) -> Vec<f32> {
+        let output_size = num_rows as u64 * batch as u64 * 4;
+
+        // BF16 data may not be u32-aligned — pad to next multiple of 4.
+        #[allow(clippy::manual_is_multiple_of)]
+        let raw_buf = if raw_bytes.len() % 4 == 0 {
+            self.pool.get_storage(&self.device, &self.queue, raw_bytes)
+        } else {
+            let mut padded = raw_bytes.to_vec();
+            padded.resize((padded.len() + 3) & !3, 0);
+            self.pool.get_storage(&self.device, &self.queue, &padded)
+        };
+        let vec_buf = self
+            .pool
+            .get_storage(&self.device, &self.queue, bytemuck::cast_slice(input));
+        let out_buf = self.pool.get_output(&self.device, output_size);
+
+        let params: [u32; 3] = [num_rows as u32, num_blocks_per_row as u32, batch as u32];
+        let params_buf =
+            self.pool
+                .get_uniform(&self.device, &self.queue, bytemuck::cast_slice(&params));
+
+        let layout_entries = Self::standard_layout();
+        let result = self.cache.with_pipeline(
+            &self.device,
+            "dequant_matvec_bf16",
+            DEQUANT_MATVEC_BF16_SHADER,
+            "dequant_matvec_bf16",
             &layout_entries,
             |cached| {
                 let bind_group =
@@ -2140,6 +2209,13 @@ impl ComputeBackend for WebGpuBackend {
         let num_rows = weight.num_rows;
 
         match weight.format {
+            WeightFormat::BF16 => self.dequant_matvec_bf16(
+                &weight.data,
+                input,
+                num_rows,
+                weight.blocks_per_row,
+                batch,
+            ),
             WeightFormat::Q4_1 => self.dequant_matvec_q4_1(
                 &weight.data,
                 input,
@@ -3524,5 +3600,61 @@ mod tests {
                 "q3k mismatch at [{j}]: gpu={gpu}, cpu={cpu}"
             );
         }
+    }
+
+    /// Verify GPU BF16 fused dequant+matvec against CPU reference.
+    ///
+    /// One row, 4 BF16 weights: 1.0, 2.0, 3.0, 4.0.
+    /// BF16 bit representation (same as upper 16 bits of F32):
+    ///   1.0 = 0x3F80, 2.0 = 0x4000, 3.0 = 0x4040, 4.0 = 0x4080
+    /// Input vector: all 1.0. Expected dot product = 1+2+3+4 = 10.
+    ///
+    /// Requires a GPU adapter; run with: `cargo test -p flarellm-gpu -- --ignored`
+    #[test]
+    #[ignore]
+    fn test_dequant_matvec_bf16_matches_cpu() {
+        // 4 BF16 values: 1.0, 2.0, 3.0, 4.0 (LE u16)
+        // BF16 1.0 = 0x3F80 → bytes [0x80, 0x3F]
+        // BF16 2.0 = 0x4000 → bytes [0x00, 0x40]
+        // BF16 3.0 = 0x4040 → bytes [0x40, 0x40]
+        // BF16 4.0 = 0x4080 → bytes [0x80, 0x40]
+        let raw: Vec<u8> = vec![0x80, 0x3F, 0x00, 0x40, 0x40, 0x40, 0x80, 0x40];
+        let input = vec![1.0f32; 4];
+
+        let backend = pollster::block_on(WebGpuBackend::new()).expect("GPU backend unavailable");
+        // num_rows=1, num_blocks_per_row=4 (num_cols), batch=1
+        let result = backend.dequant_matvec_bf16(&raw, &input, 1, 4, 1);
+
+        assert_eq!(result.len(), 1, "expected 1 output");
+        assert!(
+            (result[0] - 10.0).abs() < 1e-3,
+            "dequant_matvec_bf16 mismatch: got {}, expected 10.0",
+            result[0]
+        );
+    }
+
+    /// Verify GPU BF16 fused dequant+matvec with negative values.
+    ///
+    /// One row, 2 BF16 weights: -1.0, -2.0.
+    /// BF16 -1.0 = 0xBF80 → bytes [0x80, 0xBF]
+    /// BF16 -2.0 = 0xC000 → bytes [0x00, 0xC0]
+    /// Input: all 1.0. Expected: -1 + -2 = -3.
+    ///
+    /// Requires a GPU adapter; run with: `cargo test -p flarellm-gpu -- --ignored`
+    #[test]
+    #[ignore]
+    fn test_dequant_matvec_bf16_negative_weights() {
+        let raw: Vec<u8> = vec![0x80, 0xBF, 0x00, 0xC0];
+        let input = vec![1.0f32; 2];
+
+        let backend = pollster::block_on(WebGpuBackend::new()).expect("GPU backend unavailable");
+        let result = backend.dequant_matvec_bf16(&raw, &input, 1, 2, 1);
+
+        assert_eq!(result.len(), 1, "expected 1 output");
+        assert!(
+            (result[0] - (-3.0)).abs() < 1e-3,
+            "dequant_matvec_bf16 negative mismatch: got {}, expected -3.0",
+            result[0]
+        );
     }
 }
