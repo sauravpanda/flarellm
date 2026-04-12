@@ -1110,6 +1110,39 @@ impl FlareEngine {
         self.begin_stream_impl(prompt_tokens, max_tokens);
     }
 
+    /// Begin a token-by-token stream, healing the last prompt token.
+    ///
+    /// Identical to `begin_stream` but avoids double-processing the final prompt
+    /// token: the prefill runs only tokens `[0 .. n-2]`, then the first
+    /// `next_token()` call processes the last prompt token at its correct
+    /// position `n-1` and produces the first output token.  This keeps RoPE
+    /// positional embeddings consistent and is recommended when the prompt
+    /// ends at a natural token boundary (e.g. when encoding a user turn in a
+    /// chat template).
+    ///
+    /// Falls back to `begin_stream` for prompts shorter than 2 tokens.
+    ///
+    /// # JS example
+    /// ```javascript
+    /// engine.reset();
+    /// const ids = engine.encode_text(engine.apply_chat_template(userMsg, sysMsg));
+    /// engine.begin_stream_healed(ids, 256);
+    /// requestAnimationFrame(function tick() {
+    ///   const id = engine.next_token();
+    ///   if (id !== undefined) output.textContent += tokenizer.decode_one(id);
+    ///   if (!engine.stream_done) requestAnimationFrame(tick);
+    /// });
+    /// ```
+    #[wasm_bindgen]
+    pub fn begin_stream_healed(&mut self, prompt_tokens: &[u32], max_tokens: u32) {
+        self.stream_params = SamplingParams {
+            temperature: 0.0,
+            ..Default::default()
+        };
+        self.stream_rng_state = self.rng_seed;
+        self.begin_stream_healed_impl(prompt_tokens, max_tokens);
+    }
+
     /// Internal prefill + state initialisation shared by both begin_stream variants.
     fn begin_stream_impl(&mut self, prompt_tokens: &[u32], max_tokens: u32) {
         let effective = self.with_bos(prompt_tokens);
@@ -1135,6 +1168,42 @@ impl FlareEngine {
         self.stream_recent_tokens
             .extend_from_slice(&effective[effective.len() - n..]);
         // Reset stop-sequence accumulator for this stream.
+        self.stream_text_accum.clear();
+    }
+
+    /// Healed prefill: run tokens `[0 .. n-2]` during prefill, leave the last
+    /// prompt token for the first `next_token()` call at its correct position.
+    fn begin_stream_healed_impl(&mut self, prompt_tokens: &[u32], max_tokens: u32) {
+        let effective = self.with_bos(prompt_tokens);
+        // Short prompt: fall back to standard prefill.
+        if effective.len() < 2 {
+            self.begin_stream_impl(prompt_tokens, max_tokens);
+            return;
+        }
+        let last_idx = effective.len() - 1;
+        let t0 = now_ms();
+        // Prefill all tokens except the last.
+        let mut pos = 0usize;
+        for &tok in &effective[..last_idx] {
+            self.model.forward(tok, pos);
+            pos += 1;
+        }
+        self.last_prefill_ms = now_ms() - t0;
+        self.last_decode_ms = 0.0;
+        self.last_tokens_generated = 0;
+        self.stream_decode_start_ms = 0.0;
+        // Leave stream_pos = last_idx so next_token() runs the last prompt
+        // token at its correct position (last_idx), keeping RoPE consistent.
+        self.stream_pos = pos; // == last_idx
+        self.kv_pos = pos;
+        self.stream_last_token = effective[last_idx];
+        self.stream_remaining = max_tokens as usize;
+        self.stream_done = false;
+        const REPEAT_WINDOW: usize = 64;
+        let n = effective.len().min(REPEAT_WINDOW);
+        self.stream_recent_tokens.clear();
+        self.stream_recent_tokens
+            .extend_from_slice(&effective[effective.len() - n..]);
         self.stream_text_accum.clear();
     }
 
