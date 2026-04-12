@@ -282,4 +282,80 @@ mod tests {
         // With rng~0, highest-prob token should dominate
         assert_eq!(token, 2);
     }
+
+    #[test]
+    fn test_temperature_gt_one_softens() {
+        // Temperature > 1 should spread the distribution (reduce max logit)
+        let mut logits = vec![1.0, 2.0, 3.0];
+        apply_temperature(&mut logits, 2.0);
+        // All logits halved: [0.5, 1.0, 1.5]
+        assert!((logits[0] - 0.5).abs() < 1e-5, "logits[0] = {}", logits[0]);
+        assert!((logits[1] - 1.0).abs() < 1e-5, "logits[1] = {}", logits[1]);
+        assert!((logits[2] - 1.5).abs() < 1e-5, "logits[2] = {}", logits[2]);
+    }
+
+    #[test]
+    fn test_temperature_one_is_noop() {
+        // Temperature = 1.0 should leave logits unchanged
+        let mut logits = vec![1.0, 2.0, 3.0];
+        let original = logits.clone();
+        apply_temperature(&mut logits, 1.0);
+        assert_eq!(logits, original);
+    }
+
+    #[test]
+    fn test_repeat_penalty_empty_tokens() {
+        // Empty previous_tokens → logits unchanged
+        let mut logits = vec![1.0, 2.0, 3.0];
+        let original = logits.clone();
+        apply_repeat_penalty(&mut logits, &[], 1.5);
+        assert_eq!(logits, original);
+    }
+
+    #[test]
+    fn test_repeat_penalty_one_is_noop() {
+        // penalty=1.0 → early return, logits unchanged
+        let mut logits = vec![1.0, 2.0, 3.0];
+        let original = logits.clone();
+        apply_repeat_penalty(&mut logits, &[0, 1, 2], 1.0);
+        assert_eq!(logits, original);
+    }
+
+    #[test]
+    fn test_greedy_all_equal() {
+        // All equal logits → returns first (index 0)
+        let logits = vec![1.0, 1.0, 1.0, 1.0];
+        assert_eq!(sample_greedy(&logits), 0);
+    }
+
+    #[test]
+    fn test_top_p_full_considers_all() {
+        // top_p=1.0 should consider all tokens; rng~0 picks highest-prob
+        let logits = vec![0.1, 10.0, 0.1];
+        let token = sample_top_p(&logits, 1.0, 0.01);
+        assert_eq!(
+            token, 1,
+            "top_p=1.0 should still return dominant token for rng~0"
+        );
+    }
+
+    #[test]
+    fn test_top_k_one_always_argmax() {
+        // top_k=1 → only the highest logit is a candidate → always returns it
+        let logits = vec![1.0, 5.0, 2.0, 0.5];
+        let token = sample_top_k(&logits, 1, 0.5);
+        assert_eq!(token, 1, "top_k=1 must always return argmax");
+    }
+
+    #[test]
+    fn test_softmax_large_values_stable() {
+        // Large values shouldn't overflow/NaN; softmax uses max-subtraction for stability
+        let logits = vec![1000.0, 1001.0, 1002.0];
+        let probs = softmax(&logits);
+        let sum: f32 = probs.iter().sum();
+        assert!((sum - 1.0).abs() < 1e-5, "softmax sum = {sum}");
+        assert!(probs.iter().all(|&p| p.is_finite() && p >= 0.0));
+        // Highest logit should have highest prob
+        assert!(probs[2] > probs[1] && probs[1] > probs[0]);
+    }
 }
