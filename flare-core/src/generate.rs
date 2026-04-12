@@ -25,17 +25,19 @@ impl<'a> Generator<'a> {
         }
     }
 
-    /// Prefill: process multiple prompt tokens at once (one-by-one for now).
-    /// Returns logits from the last token.
+    /// Prefill: process the prompt as a batch, returning logits for the last token.
+    ///
+    /// Uses `Model::forward_prefill` which computes all Q/K/V projections
+    /// in-order for the full sequence and does causal attention inline,
+    /// then writes the entire K/V batch into the KV cache at once.
     pub fn prefill(&mut self, prompt_tokens: &[u32]) -> Vec<f32> {
-        let mut logits = Vec::new();
-        for &token in prompt_tokens {
-            let output = self.model.forward(token, self.position);
-            logits = output.data().to_vec();
-            self.tokens.push(token);
-            self.position += 1;
+        if prompt_tokens.is_empty() {
+            return Vec::new();
         }
-        logits
+        let output = self.model.forward_prefill(prompt_tokens);
+        self.tokens.extend_from_slice(prompt_tokens);
+        self.position += prompt_tokens.len();
+        output.data().to_vec()
     }
 
     /// Generate a single next token, returning the token ID.
@@ -229,5 +231,74 @@ mod tests {
         // Should stop after first generated token (which matches EOS)
         assert_eq!(generated.len(), 1);
         assert_eq!(generated[0], first_token);
+    }
+
+    /// Verify that batched prefill (forward_prefill) produces the same first
+    /// generated token as the legacy token-by-token forward loop.
+    #[test]
+    fn test_batched_prefill_matches_sequential() {
+        let prompt = vec![1u32, 2, 3, 4];
+
+        // --- Sequential path: token-by-token ---
+        let seq_token = {
+            let mut model = tiny_model();
+            // Reset and run cleanly using the generator's sequential path
+            model.reset();
+            let params = crate::sampling::SamplingParams {
+                temperature: 0.0,
+                ..Default::default()
+            };
+            let mut gen = Generator::new(&mut model, params);
+            // Use old sequential path directly: call forward() for each token
+            let mut logits = Vec::new();
+            for &tok in &prompt {
+                let out = gen.model.forward(tok, gen.position);
+                logits = out.data().to_vec();
+                gen.tokens.push(tok);
+                gen.position += 1;
+            }
+            crate::sampling::sample_greedy(&logits)
+        };
+
+        // --- Batched path: forward_prefill ---
+        let batch_token = {
+            let mut model = tiny_model();
+            let params = crate::sampling::SamplingParams {
+                temperature: 0.0,
+                ..Default::default()
+            };
+            let mut gen = Generator::new(&mut model, params);
+            // prefill() now calls forward_prefill() internally
+            let logits = gen.prefill(&prompt);
+            crate::sampling::sample_greedy(&logits)
+        };
+
+        assert_eq!(
+            seq_token, batch_token,
+            "batched prefill must produce the same greedy token as sequential: seq={seq_token}, batch={batch_token}"
+        );
+    }
+
+    /// Single-token prefill edge case: must behave identically to forward().
+    #[test]
+    fn test_batched_prefill_single_token() {
+        let token = 3u32;
+
+        let seq_logits = {
+            let mut model = tiny_model();
+            model.forward(token, 0).data().to_vec()
+        };
+
+        let batch_logits = {
+            let mut model = tiny_model();
+            model.forward_prefill(&[token]).data().to_vec()
+        };
+
+        for (i, (&s, &b)) in seq_logits.iter().zip(batch_logits.iter()).enumerate() {
+            assert!(
+                (s - b).abs() < 1e-4,
+                "single-token prefill mismatch at logit[{i}]: seq={s}, batch={b}"
+            );
+        }
     }
 }
