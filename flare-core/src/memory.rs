@@ -312,4 +312,49 @@ mod tests {
             plan.recommended_quant_bits
         );
     }
+
+    #[test]
+    fn test_memory_budget_mobile_fields() {
+        let b = MemoryBudget::mobile();
+        assert_eq!(b.total_bytes, 1024 * 1024 * 1024);
+        assert_eq!(b.gpu_bytes, 512 * 1024 * 1024);
+        assert_eq!(b.label, "Mobile Browser");
+    }
+
+    #[test]
+    fn test_memory_budget_clone() {
+        let b = MemoryBudget::browser();
+        let c = b.clone();
+        assert_eq!(b.total_bytes, c.total_bytes);
+        assert_eq!(b.gpu_bytes, c.gpu_bytes);
+        assert_eq!(b.label, c.label);
+    }
+
+    #[test]
+    fn test_plan_zero_context_kv_is_zero() {
+        // With context_len=0, kv_cache_bytes must be 0
+        let config = small_model();
+        let plan = plan_memory(&config, 4.0, 0, &MemoryBudget::native());
+        assert_eq!(plan.kv_cache_bytes, 0, "zero context → zero KV cache");
+    }
+
+    #[test]
+    fn test_can_run_false_on_one_byte_budget() {
+        // A 1-byte budget must reject any non-trivial model
+        let config = small_model();
+        let tiny_budget = MemoryBudget {
+            total_bytes: 1,
+            gpu_bytes: 1,
+            label: "1B".into(),
+        };
+        assert!(!can_run(&config, 4.0, &tiny_budget));
+    }
+
+    #[test]
+    fn test_format_bytes_exact_mb() {
+        // Exactly 1 MiB → "1MB"
+        assert_eq!(format_bytes(1024 * 1024), "1MB");
+        // Exactly 1 GiB → "1.0GB"
+        assert_eq!(format_bytes(1024 * 1024 * 1024), "1.0GB");
+    }
 }
