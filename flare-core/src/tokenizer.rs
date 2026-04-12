@@ -649,4 +649,63 @@ mod tests {
         let decoded = tok.decode(&[100]).expect("should decode");
         assert_eq!(decoded, "<s>");
     }
+
+    #[test]
+    fn test_decode_empty_slice() {
+        let json = make_test_tokenizer_json();
+        let tok = BpeTokenizer::from_json(&json).expect("should load");
+        let decoded = tok.decode(&[]).expect("empty decode should succeed");
+        assert_eq!(decoded, "");
+    }
+
+    #[test]
+    fn test_decode_consecutive_special_tokens() {
+        let json = make_test_tokenizer_json();
+        let tok = BpeTokenizer::from_json(&json).expect("should load");
+        // BOS + EOS back-to-back should produce no extra whitespace
+        let decoded = tok
+            .decode(&[100, 101])
+            .expect("should decode consecutive specials");
+        assert_eq!(decoded, "<s></s>");
+    }
+
+    #[test]
+    fn test_new_constructor_stores_bos_eos() {
+        let tok = BpeTokenizer::new(0, Some(3), Some(7));
+        assert_eq!(tok.bos_token_id(), Some(3));
+        assert_eq!(tok.eos_token_id(), Some(7));
+    }
+
+    #[test]
+    fn test_new_constructor_vocab_size_zero() {
+        // new() leaves vocab empty, so vocab_size() returns 0
+        let tok = BpeTokenizer::new(100, None, None);
+        assert_eq!(tok.vocab_size(), 0);
+    }
+
+    #[test]
+    fn test_eos_none_when_no_eos_in_added_tokens() {
+        let json = r#"{
+            "model": { "vocab": { "h": 0 }, "merges": [] },
+            "added_tokens": [
+                {"id": 1, "content": "<pad>", "special": true}
+            ]
+        }"#;
+        let tok = BpeTokenizer::from_json(json).expect("should load");
+        assert_eq!(tok.eos_token_id(), None);
+        assert_eq!(tok.bos_token_id(), None);
+    }
+
+    #[test]
+    fn test_encode_error_on_unknown_char() {
+        let json = make_test_tokenizer_json();
+        let tok = BpeTokenizer::from_json(&json).expect("should load");
+        // 'z' maps to 'z' in GPT-2 byte encoding, but 'z' is not in the test vocab
+        let result = tok.encode("z");
+        assert!(result.is_err());
+        match result {
+            Err(TokenizerError::EncodeError(_)) => {}
+            _ => panic!("expected EncodeError for unknown char"),
+        }
+    }
 }
