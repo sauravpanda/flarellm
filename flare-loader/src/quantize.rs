@@ -162,6 +162,49 @@ pub fn dequant_q5_0_block(block: &[u8], output: &mut [f32; 32]) {
     }
 }
 
+/// Dequantize a Q4_1 block: 32 weights with additive bias. 20 bytes total.
+///
+/// Layout: `d[2]` (f16 scale) + `m[2]` (f16 min) + `qs[16]` (4-bit nibbles).
+///
+/// For weight `i`: `output[i] = d * q + m` where `q` is the 4-bit value (0..15).
+pub fn dequant_q4_1_block(block: &[u8], output: &mut [f32; 32]) {
+    if block.len() < 20 {
+        for v in output.iter_mut() {
+            *v = 0.0;
+        }
+        return;
+    }
+    let d = f16_to_f32(u16::from_le_bytes([block[0], block[1]]));
+    let m = f16_to_f32(u16::from_le_bytes([block[2], block[3]]));
+    for i in 0..16 {
+        let byte = block[4 + i];
+        let lo = (byte & 0x0F) as f32;
+        let hi = ((byte >> 4) & 0x0F) as f32;
+        output[i * 2] = d * lo + m;
+        output[i * 2 + 1] = d * hi + m;
+    }
+}
+
+/// Dequantize a Q8_1 block: 32 int8 weights with scale. 36 bytes total.
+///
+/// Layout: `d[2]` (f16 scale) + `s[2]` (f16 sum, precomputed — not used for dequant)
+/// + `qs[32]` (i8 quantized values).
+///
+/// For weight `i`: `output[i] = d * qs[i]`.
+pub fn dequant_q8_1_block(block: &[u8], output: &mut [f32; 32]) {
+    if block.len() < 36 {
+        for v in output.iter_mut() {
+            *v = 0.0;
+        }
+        return;
+    }
+    let d = f16_to_f32(u16::from_le_bytes([block[0], block[1]]));
+    // block[2..4] is the precomputed sum `s` — not needed for dequantization
+    for i in 0..32 {
+        output[i] = block[4 + i] as i8 as f32 * d;
+    }
+}
+
 /// Dequantize a Q3_K block: 256 weights.
 /// Layout (110 bytes): `hmask[32]` + `qs[64]` + `scales[12]` + `d[2]`
 ///
@@ -652,6 +695,101 @@ mod tests {
             assert!(
                 (val - 2.0).abs() < 1e-4,
                 "q2k nonzero: expected 2.0 at {i}, got {val}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_dequant_q4_1_zeroed() {
+        // All-zero block: all weights should be 0.0 (d=0, m=0, q=0)
+        let block = vec![0u8; 20];
+        let mut output = [1.0f32; 32];
+        dequant_q4_1_block(&block, &mut output);
+        for (i, &val) in output.iter().enumerate() {
+            assert!(val.abs() < 1e-5, "q4_1 zeroed: expected 0.0 at {i}, got {val}");
+        }
+    }
+
+    #[test]
+    fn test_dequant_q4_1_short_block() {
+        let block = vec![0u8; 5];
+        let mut output = [1.0f32; 32];
+        dequant_q4_1_block(&block, &mut output);
+        assert!(output.iter().all(|&v| v == 0.0));
+    }
+
+    #[test]
+    fn test_dequant_q4_1_nonzero() {
+        // d=1.0, m=0.0, all nibbles=3 → expected output[i] = 1.0*3 + 0.0 = 3.0
+        let mut block = vec![0u8; 20];
+        block[0] = 0x00;
+        block[1] = 0x3C; // f16 1.0 for d
+                         // m stays 0.0 (block[2..4] = 0)
+        block[4..20].fill(0x33); // low nibble=3, high nibble=3
+        let mut output = [0.0f32; 32];
+        dequant_q4_1_block(&block, &mut output);
+        for (i, &val) in output.iter().enumerate() {
+            assert!(
+                (val - 3.0).abs() < 1e-4,
+                "q4_1 nonzero: expected 3.0 at {i}, got {val}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_dequant_q4_1_with_min() {
+        // d=1.0, m=1.0, all nibbles=2 → expected output[i] = 1.0*2 + 1.0 = 3.0
+        let mut block = vec![0u8; 20];
+        block[0] = 0x00;
+        block[1] = 0x3C; // f16 1.0 for d
+        block[2] = 0x00;
+        block[3] = 0x3C; // f16 1.0 for m
+        block[4..20].fill(0x22); // low nibble=2, high nibble=2
+        let mut output = [0.0f32; 32];
+        dequant_q4_1_block(&block, &mut output);
+        for (i, &val) in output.iter().enumerate() {
+            assert!(
+                (val - 3.0).abs() < 1e-4,
+                "q4_1 with min: expected 3.0 at {i}, got {val}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_dequant_q8_1_zeroed() {
+        // All-zero block: d=0, qs=0 → all outputs = 0.0
+        let block = vec![0u8; 36];
+        let mut output = [1.0f32; 32];
+        dequant_q8_1_block(&block, &mut output);
+        for (i, &val) in output.iter().enumerate() {
+            assert!(val.abs() < 1e-5, "q8_1 zeroed: expected 0.0 at {i}, got {val}");
+        }
+    }
+
+    #[test]
+    fn test_dequant_q8_1_short_block() {
+        let block = vec![0u8; 5];
+        let mut output = [1.0f32; 32];
+        dequant_q8_1_block(&block, &mut output);
+        assert!(output.iter().all(|&v| v == 0.0));
+    }
+
+    #[test]
+    fn test_dequant_q8_1_nonzero() {
+        // d=1.0, qs[i]=i as i8 for i in 0..32 → output[i] = i as f32
+        let mut block = vec![0u8; 36];
+        block[0] = 0x00;
+        block[1] = 0x3C; // f16 1.0 for d
+                         // block[2..4] is the sum field — leave as 0 (not used for dequant)
+        for i in 0..32u8 {
+            block[4 + i as usize] = i; // i8 values 0..31
+        }
+        let mut output = [0.0f32; 32];
+        dequant_q8_1_block(&block, &mut output);
+        for (i, &val) in output.iter().enumerate() {
+            assert!(
+                (val - i as f32).abs() < 1e-3,
+                "q8_1 nonzero: expected {i}.0 at {i}, got {val}"
             );
         }
     }

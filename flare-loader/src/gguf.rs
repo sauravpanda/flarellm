@@ -363,6 +363,19 @@ fn dequantize_tensor(raw: &[u8], dtype: QuantFormat, numel: usize) -> Result<Vec
             }
             Ok(data)
         }
+        QuantFormat::Q8_1 => {
+            let block_size = 32;
+            let block_bytes = 36; // 2 (scale) + 2 (sum) + 32 (int8)
+            let num_blocks = numel.div_ceil(block_size);
+            let mut data = vec![0.0f32; numel];
+            for b in 0..num_blocks {
+                let block = &raw[b * block_bytes..(b + 1) * block_bytes];
+                let mut out = [0.0f32; 32];
+                quantize::dequant_q8_1_block(block, &mut out);
+                data[b * block_size..(b + 1) * block_size].copy_from_slice(&out);
+            }
+            Ok(data)
+        }
         QuantFormat::Q4_0 => {
             let block_size = 32;
             let block_bytes = 18; // 2 (scale) + 16 (data)
@@ -372,6 +385,19 @@ fn dequantize_tensor(raw: &[u8], dtype: QuantFormat, numel: usize) -> Result<Vec
                 let block = &raw[b * block_bytes..(b + 1) * block_bytes];
                 let mut out = [0.0f32; 32];
                 quantize::dequant_q4_0_block(block, &mut out);
+                data[b * block_size..(b + 1) * block_size].copy_from_slice(&out);
+            }
+            Ok(data)
+        }
+        QuantFormat::Q4_1 => {
+            let block_size = 32;
+            let block_bytes = 20; // 2 (scale) + 2 (min) + 16 (nibbles)
+            let num_blocks = numel.div_ceil(block_size);
+            let mut data = vec![0.0f32; numel];
+            for b in 0..num_blocks {
+                let block = &raw[b * block_bytes..(b + 1) * block_bytes];
+                let mut out = [0.0f32; 32];
+                quantize::dequant_q4_1_block(block, &mut out);
                 data[b * block_size..(b + 1) * block_size].copy_from_slice(&out);
             }
             Ok(data)
