@@ -78,6 +78,58 @@ mod tests {
     }
 
     #[test]
+    fn test_matmul_1x1() {
+        // 1x1 * 1x1 = 1x1: scalar multiplication
+        let a = Tensor::from_vec(vec![3.0], &[1, 1]).unwrap();
+        let b = Tensor::from_vec(vec![7.0], &[1, 1]).unwrap();
+        let mut c = Tensor::zeros(&[1, 1]);
+        matmul_cpu(&a, &b, &mut c);
+        assert!(
+            (c.data()[0] - 21.0).abs() < 1e-5,
+            "1x1: got {}",
+            c.data()[0]
+        );
+    }
+
+    #[test]
+    fn test_matmul_zero_a() {
+        // All-zero A → output all zeros regardless of B
+        let a = Tensor::from_vec(vec![0.0; 6], &[2, 3]).unwrap();
+        let b = Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[3, 2]).unwrap();
+        let mut c = Tensor::from_vec(vec![99.0; 4], &[2, 2]).unwrap();
+        matmul_cpu(&a, &b, &mut c);
+        for (i, &v) in c.data().iter().enumerate() {
+            assert!(v.abs() < 1e-5, "zero_a: c[{i}] = {v}");
+        }
+    }
+
+    #[test]
+    fn test_matmul_zero_b() {
+        // All-zero B → output all zeros regardless of A
+        let a = Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3]).unwrap();
+        let b = Tensor::from_vec(vec![0.0; 6], &[3, 2]).unwrap();
+        let mut c = Tensor::from_vec(vec![99.0; 4], &[2, 2]).unwrap();
+        matmul_cpu(&a, &b, &mut c);
+        for (i, &v) in c.data().iter().enumerate() {
+            assert!(v.abs() < 1e-5, "zero_b: c[{i}] = {v}");
+        }
+    }
+
+    #[test]
+    fn test_matmul_negative_values() {
+        // A=[[1,-1]], B=[[-1],[1]] → C=[[1*(-1)+(-1)*1]] = [[-2]]
+        let a = Tensor::from_vec(vec![1.0, -1.0], &[1, 2]).unwrap();
+        let b = Tensor::from_vec(vec![-1.0, 1.0], &[2, 1]).unwrap();
+        let mut c = Tensor::zeros(&[1, 1]);
+        matmul_cpu(&a, &b, &mut c);
+        assert!(
+            (c.data()[0] - (-2.0)).abs() < 1e-5,
+            "neg: got {}",
+            c.data()[0]
+        );
+    }
+
+    #[test]
     fn test_matmul_larger() {
         // 4x3 * 3x4
         let a = Tensor::from_vec((0..12).map(|i| i as f32).collect(), &[4, 3]).unwrap();
