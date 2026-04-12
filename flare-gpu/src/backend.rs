@@ -26,6 +26,7 @@ const SOFTMAX_SHADER: &str = include_str!("../shaders/softmax.wgsl");
 const ATTENTION_SHADER: &str = include_str!("../shaders/attention.wgsl");
 const DEQUANT_Q4_1_SHADER: &str = include_str!("../shaders/dequant_q4_1.wgsl");
 const DEQUANT_Q4K_SHADER: &str = include_str!("../shaders/dequant_q4k.wgsl");
+const DEQUANT_MATVEC_Q4_0_SHADER: &str = include_str!("../shaders/dequant_matvec_q4_0.wgsl");
 const DEQUANT_MATVEC_Q4_1_SHADER: &str = include_str!("../shaders/dequant_matvec_q4_1.wgsl");
 const DEQUANT_MATVEC_Q8_1_SHADER: &str = include_str!("../shaders/dequant_matvec_q8_1.wgsl");
 const DEQUANT_MATVEC_Q4K_SHADER: &str = include_str!("../shaders/dequant_matvec_q4k.wgsl");
@@ -497,7 +498,75 @@ impl WebGpuBackend {
         result
     }
 
-    /// Fused Q4_K dequantize + matrix-vector multiply.
+    /// Fused Q4_0 dequantize + matrix-vector multiply.
+    ///
+    /// Reads packed Q4_0 weight data, dequantizes each block on-the-fly, and
+    /// accumulates the dot product with `input` in the same kernel.
+    ///
+    /// Q4_0 blocks are 18 bytes each (not u32-aligned). The raw bytes are
+    /// padded to the nearest 4-byte multiple before upload so that the wgpu
+    /// storage buffer size requirement is satisfied.
+    ///
+    /// - `raw_bytes`: packed GGUF tensor data — `num_rows × num_blocks_per_row × 18` bytes
+    /// - `input`: f32 input vector of length `num_blocks_per_row × 32`
+    /// - Returns `num_rows` f32 dot products
+    pub fn dequant_matvec_q4_0(
+        &self,
+        raw_bytes: &[u8],
+        input: &[f32],
+        num_rows: usize,
+        num_blocks_per_row: usize,
+    ) -> Vec<f32> {
+        let output_size = num_rows as u64 * 4;
+
+        // Q4_0 blocks are 18 bytes — pad to next multiple of 4 for wgpu.
+        #[allow(clippy::manual_is_multiple_of)]
+        let raw_buf = if raw_bytes.len() % 4 == 0 {
+            self.pool.get_storage(&self.device, &self.queue, raw_bytes)
+        } else {
+            let mut padded = raw_bytes.to_vec();
+            padded.resize((padded.len() + 3) & !3, 0);
+            self.pool.get_storage(&self.device, &self.queue, &padded)
+        };
+        let vec_buf = self
+            .pool
+            .get_storage(&self.device, &self.queue, bytemuck::cast_slice(input));
+        let out_buf = self.pool.get_output(&self.device, output_size);
+
+        let params: [u32; 2] = [num_rows as u32, num_blocks_per_row as u32];
+        let params_buf =
+            self.pool
+                .get_uniform(&self.device, &self.queue, bytemuck::cast_slice(&params));
+
+        let layout_entries = Self::standard_layout();
+        let result = self.cache.with_pipeline(
+            &self.device,
+            "dequant_matvec_q4_0",
+            DEQUANT_MATVEC_Q4_0_SHADER,
+            "dequant_matvec_q4_0",
+            &layout_entries,
+            |cached| {
+                let bind_group =
+                    self.make_bind_group(cached, &raw_buf, &vec_buf, &out_buf, &params_buf);
+                // One workgroup per output row.
+                self.dispatch_and_readback(
+                    &cached.pipeline,
+                    &bind_group,
+                    [num_rows as u32, 1, 1],
+                    &out_buf,
+                    output_size,
+                )
+            },
+        );
+
+        self.pool.return_storage(raw_buf);
+        self.pool.return_storage(vec_buf);
+        self.pool.return_output(out_buf);
+        self.pool.return_uniform(params_buf);
+
+        result
+    }
+
     /// Fused Q4_1 dequantize + matrix-vector multiply.
     ///
     /// Reads packed Q4_1 weight data, dequantizes each block on-the-fly, and
@@ -1869,6 +1938,72 @@ mod tests {
                 result[i * 2 + 1]
             );
         }
+    }
+
+    /// Verify GPU Q4_0 fused dequant+matvec against CPU reference.
+    ///
+    /// One block: scale=1.0, all qs bytes = 0x88 (lo=8, hi=8).
+    /// lo−8=0, hi−8=0 → all weights = 0.0.
+    /// Input vector: all 1.0. Expected dot product: 0.0.
+    ///
+    /// Requires a GPU adapter; run with: `cargo test -p flarellm-gpu -- --ignored`
+    #[test]
+    #[ignore]
+    fn test_dequant_matvec_q4_0_zero_weights() {
+        let mut raw = vec![0u8; 18];
+        // scale = 1.0 as f16 LE: 0x3C00 → bytes [0x00, 0x3C]
+        raw[0] = 0x00;
+        raw[1] = 0x3C;
+        // qs[16]: lo=8, hi=8 → byte = 0x88; weight = (q-8)*scale = 0
+        for b in raw[2..18].iter_mut() {
+            *b = 0x88;
+        }
+
+        let input = vec![1.0f32; 32];
+
+        let backend = pollster::block_on(WebGpuBackend::new()).expect("GPU backend unavailable");
+        let result = backend.dequant_matvec_q4_0(&raw, &input, 1, 1);
+
+        assert_eq!(result.len(), 1, "expected 1 output");
+        assert!(
+            result[0].abs() < 1e-3,
+            "dequant_matvec_q4_0 zero mismatch: got {}, expected 0.0",
+            result[0]
+        );
+    }
+
+    /// Verify GPU Q4_0 fused dequant+matvec with non-zero weights.
+    ///
+    /// One block: scale=1.0, all qs bytes = 0x9A (lo=10, hi=9).
+    /// weight[lo] = (10−8)*1.0 = 2.0, weight[hi] = (9−8)*1.0 = 1.0.
+    /// Input: all 1.0.
+    /// Expected: 16×2.0 + 16×1.0 = 48.0.
+    ///
+    /// Requires a GPU adapter; run with: `cargo test -p flarellm-gpu -- --ignored`
+    #[test]
+    #[ignore]
+    fn test_dequant_matvec_q4_0_nonzero() {
+        let mut raw = vec![0u8; 18];
+        // scale = 1.0 as f16 LE
+        raw[0] = 0x00;
+        raw[1] = 0x3C;
+        // qs: lo nibble = 10 (A), hi nibble = 9 → byte = 0x9A
+        for b in raw[2..18].iter_mut() {
+            *b = 0x9A;
+        }
+
+        let input = vec![1.0f32; 32];
+
+        let backend = pollster::block_on(WebGpuBackend::new()).expect("GPU backend unavailable");
+        let result = backend.dequant_matvec_q4_0(&raw, &input, 1, 1);
+
+        assert_eq!(result.len(), 1, "expected 1 output");
+        // 16 pairs: w_lo = 2.0, w_hi = 1.0 → dot = 16*2 + 16*1 = 48
+        assert!(
+            (result[0] - 48.0).abs() < 1e-2,
+            "dequant_matvec_q4_0 nonzero mismatch: got {}, expected 48.0",
+            result[0]
+        );
     }
 
     /// Verify GPU Q4_1 fused dequant+matvec against CPU reference.
