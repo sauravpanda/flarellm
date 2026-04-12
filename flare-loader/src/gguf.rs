@@ -1190,4 +1190,68 @@ mod tests {
             e => panic!("expected UnsupportedQuant, got {e:?}"),
         }
     }
+
+    #[test]
+    fn test_tensor_info_numel_scalar() {
+        // Empty dimensions → empty product = 1, max(1) = 1
+        let ti = TensorInfo {
+            name: "scalar".into(),
+            dimensions: vec![],
+            dtype: QuantFormat::F32,
+            offset: 0,
+        };
+        assert_eq!(ti.numel(), 1);
+    }
+
+    #[test]
+    fn test_tensor_info_numel_multidim() {
+        let ti = TensorInfo {
+            name: "weights".into(),
+            dimensions: vec![4, 8, 2],
+            dtype: QuantFormat::F32,
+            offset: 0,
+        };
+        assert_eq!(ti.numel(), 64);
+    }
+
+    #[test]
+    fn test_metadata_value_as_u32_non_numeric() {
+        // as_u32() should return None for non-Uint32 variants
+        assert_eq!(MetadataValue::String("hello".into()).as_u32(), None);
+        assert_eq!(MetadataValue::Bool(true).as_u32(), None);
+        assert_eq!(MetadataValue::Array(vec![]).as_u32(), None);
+        assert_eq!(MetadataValue::Float32(1.0).as_u32(), None);
+    }
+
+    #[test]
+    fn test_metadata_value_as_str_on_non_string() {
+        // as_str() should return None for non-String variants
+        assert_eq!(MetadataValue::Uint32(42).as_str(), None);
+        assert_eq!(MetadataValue::Bool(false).as_str(), None);
+    }
+
+    #[test]
+    fn test_gguf_file_no_architecture_returns_none() {
+        let file = GgufFile {
+            version: 3,
+            metadata: HashMap::new(),
+            tensors: Vec::new(),
+            tensor_data_offset: 0,
+        };
+        assert_eq!(file.architecture(), None);
+    }
+
+    #[test]
+    fn test_parse_empty_string_metadata() {
+        let mut buf = Vec::new();
+        write_gguf_header(&mut buf, 0, 1);
+        write_gguf_string(&mut buf, "some.key");
+        buf.extend_from_slice(&8u32.to_le_bytes()); // type: string
+        write_gguf_string(&mut buf, ""); // empty string value
+
+        let mut cursor = Cursor::new(buf);
+        let file = GgufFile::parse_header(&mut cursor).unwrap();
+        let val = file.metadata.get("some.key").unwrap();
+        assert_eq!(val.as_str(), Some(""));
+    }
 }
