@@ -242,9 +242,7 @@ pub fn infer_model_config_from_safetensors(
 
     // Count transformer layers by probing for input_layernorm weights
     let num_layers = (0usize..)
-        .take_while(|&i| {
-            tensors.contains_key(&format!("model.layers.{i}.input_layernorm.weight"))
-        })
+        .take_while(|&i| tensors.contains_key(&format!("model.layers.{i}.input_layernorm.weight")))
         .count();
     if num_layers == 0 {
         return Err(SafeTensorsError::TensorNotFound(
@@ -355,10 +353,11 @@ fn load_st_layer_weights(
         tensors,
         &[&format!("model.layers.{i}.mlp.gate_proj.weight")],
     )?;
-    let w_up =
-        find_st_tensor(tensors, &[&format!("model.layers.{i}.mlp.up_proj.weight")])?;
-    let w_down =
-        find_st_tensor(tensors, &[&format!("model.layers.{i}.mlp.down_proj.weight")])?;
+    let w_up = find_st_tensor(tensors, &[&format!("model.layers.{i}.mlp.up_proj.weight")])?;
+    let w_down = find_st_tensor(
+        tensors,
+        &[&format!("model.layers.{i}.mlp.down_proj.weight")],
+    )?;
 
     let attn_q_bias = find_st_tensor(
         tensors,
@@ -382,7 +381,9 @@ fn load_st_layer_weights(
     .ok();
     let post_ffn_norm = find_st_tensor(
         tensors,
-        &[&format!("model.layers.{i}.post_feedforward_layernorm.weight")],
+        &[&format!(
+            "model.layers.{i}.post_feedforward_layernorm.weight"
+        )],
     )
     .ok();
 
@@ -427,11 +428,10 @@ pub fn load_model_weights_from_safetensors<R: Read + Seek>(
 
     let config = infer_model_config_from_safetensors(&sf.tensors)?;
 
-    let token_embedding =
-        find_st_tensor(&tensors, &["model.embed_tokens.weight"])?;
+    let token_embedding = find_st_tensor(&tensors, &["model.embed_tokens.weight"])?;
     let output_norm = find_st_tensor(&tensors, &["model.norm.weight"])?;
-    let output_weight = find_st_tensor(&tensors, &["lm_head.weight"])
-        .unwrap_or_else(|_| token_embedding.clone());
+    let output_weight =
+        find_st_tensor(&tensors, &["lm_head.weight"]).unwrap_or_else(|_| token_embedding.clone());
 
     let mut layers = Vec::with_capacity(config.num_layers);
     for i in 0..config.num_layers {
@@ -623,10 +623,7 @@ mod tests {
             make_st_info(vec![vocab, hidden]),
         );
         m.insert("model.norm.weight".into(), make_st_info(vec![hidden]));
-        m.insert(
-            "lm_head.weight".into(),
-            make_st_info(vec![vocab, hidden]),
-        );
+        m.insert("lm_head.weight".into(), make_st_info(vec![vocab, hidden]));
         for i in 0..num_layers {
             m.insert(
                 format!("model.layers.{i}.input_layernorm.weight"),
