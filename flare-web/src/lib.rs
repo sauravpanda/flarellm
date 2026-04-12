@@ -132,6 +132,9 @@ pub struct FlareEngine {
     /// Raw Jinja2 chat template string from `tokenizer.chat_template` in GGUF metadata.
     /// `None` if the GGUF file did not include a chat template.
     raw_chat_template: Option<String>,
+    /// Number of tokens consumed in the current KV-cache session (prompt + generated).
+    /// Updated after every generation call; reset to 0 by `engine.reset()`.
+    kv_pos: usize,
     // --- Token-by-token streaming state ---
     /// Sampling parameters for the current stream (set by begin_stream_with_params).
     stream_params: SamplingParams,
@@ -205,6 +208,7 @@ impl FlareEngine {
             bos_token_id,
             add_bos_token,
             raw_chat_template,
+            kv_pos: 0,
             stream_params: SamplingParams {
                 temperature: 0.0,
                 ..Default::default()
@@ -313,6 +317,7 @@ impl FlareEngine {
     #[wasm_bindgen]
     pub fn reset(&mut self) {
         self.model.reset();
+        self.kv_pos = 0;
     }
 
     /// Get the vocabulary size of the loaded model.
@@ -425,6 +430,27 @@ impl FlareEngine {
         self.model.config().max_seq_len as u32
     }
 
+    /// Number of tokens currently consumed in the KV-cache session (prompt + generated).
+    ///
+    /// Updated after every generation call; reset to 0 by `engine.reset()`.
+    /// Use with `max_seq_len` to build a context-usage progress bar.
+    #[wasm_bindgen(getter)]
+    pub fn tokens_used(&self) -> u32 {
+        self.kv_pos as u32
+    }
+
+    /// Fraction of the context window consumed (0.0 = empty, 1.0 = full).
+    ///
+    /// Equivalent to `tokens_used / max_seq_len`. Returns 0.0 if `max_seq_len` is 0.
+    #[wasm_bindgen(getter)]
+    pub fn context_window_pct(&self) -> f32 {
+        let cap = self.model.config().max_seq_len;
+        if cap == 0 {
+            return 0.0;
+        }
+        (self.kv_pos as f32) / (cap as f32)
+    }
+
     /// Count the number of tokens in `text` using the model's embedded GGUF vocabulary.
     ///
     /// Returns 0 if the model was not loaded from a GGUF file (e.g. SafeTensors only).
@@ -527,6 +553,7 @@ impl FlareEngine {
         self.last_prefill_ms = now_ms() - t0;
         self.last_decode_ms = 0.0;
         self.last_tokens_generated = generated.len() as u32;
+        self.kv_pos = prompt_tokens.len() + generated.len();
         match &self.gguf_vocab {
             Some(vocab) => vocab.decode(&generated),
             None => String::new(),
@@ -681,6 +708,7 @@ impl FlareEngine {
         self.last_tokens_generated = 0;
         self.stream_decode_start_ms = 0.0;
         self.stream_pos = pos;
+        self.kv_pos = pos;
         self.stream_last_token = *effective.last().unwrap_or(&0);
         self.stream_remaining = max_tokens as usize;
         self.stream_done = false;
@@ -723,6 +751,7 @@ impl FlareEngine {
 
         self.stream_last_token = token_id;
         self.stream_pos += 1;
+        self.kv_pos = self.stream_pos;
         self.stream_remaining -= 1;
 
         if self.eos_token_id == Some(token_id) {
@@ -776,6 +805,7 @@ impl FlareEngine {
         self.last_prefill_ms = now_ms() - t0;
         self.last_decode_ms = 0.0;
         self.last_tokens_generated = result.len() as u32;
+        self.kv_pos = effective.len() + result.len();
         result
     }
 
@@ -814,6 +844,7 @@ impl FlareEngine {
         self.last_prefill_ms = now_ms() - t0;
         self.last_decode_ms = 0.0;
         self.last_tokens_generated = result.len() as u32;
+        self.kv_pos = effective.len() + result.len();
         result
     }
 
@@ -1056,6 +1087,7 @@ impl FlareProgressiveLoader {
             bos_token_id,
             add_bos_token,
             raw_chat_template,
+            kv_pos: 0,
             stream_params: SamplingParams {
                 temperature: 0.0,
                 ..Default::default()
