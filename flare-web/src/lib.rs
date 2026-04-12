@@ -29,6 +29,7 @@ use flare_core::generate::Generator;
 use flare_core::model::Model;
 use flare_core::sampling::{self, SamplingParams};
 use flare_core::tokenizer::{BpeTokenizer, Tokenizer};
+use flare_gpu::WebGpuBackend;
 use flare_loader::gguf::GgufFile;
 use flare_loader::weights::{load_model_weights, load_model_weights_with_progress};
 use wasm_bindgen::prelude::*;
@@ -136,6 +137,33 @@ impl FlareEngine {
             stream_remaining: 0,
             stream_done: true,
         })
+    }
+
+    /// Try to initialise the WebGPU compute backend.
+    ///
+    /// Call this after `load()` to enable GPU-accelerated matrix operations
+    /// (matvec, matmul, silu_mul). Falls back silently to CPU if WebGPU is
+    /// unavailable or adapter request fails.
+    ///
+    /// Returns `true` if a GPU backend was successfully initialised.
+    ///
+    /// ```javascript
+    /// const engine = FlareEngine.load(bytes);
+    /// const gpuEnabled = await engine.init_gpu();
+    /// console.log('GPU:', gpuEnabled);
+    /// ```
+    #[wasm_bindgen]
+    pub async fn init_gpu(&mut self) -> bool {
+        if !webgpu_available() {
+            return false;
+        }
+        match WebGpuBackend::new().await {
+            Ok(gpu) => {
+                self.model.set_backend(Box::new(gpu));
+                true
+            }
+            Err(_) => false,
+        }
     }
 
     /// Reset the KV cache (start a new conversation).

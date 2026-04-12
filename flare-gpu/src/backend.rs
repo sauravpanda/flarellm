@@ -462,6 +462,13 @@ impl ComputeBackend for WebGpuBackend {
     }
 }
 
+// WASM is single-threaded; wgpu's JS-backed types don't impl Send/Sync but it's
+// safe to assert them here because no other threads exist.
+#[cfg(target_arch = "wasm32")]
+unsafe impl Send for WebGpuBackend {}
+#[cfg(target_arch = "wasm32")]
+unsafe impl Sync for WebGpuBackend {}
+
 // Helper functions for bind group layout entries
 fn storage_ro_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
     wgpu::BindGroupLayoutEntry {

@@ -324,7 +324,7 @@
     }
 
     // ---------- Model loaded ----------
-    function onModelLoaded(eng, ms) {
+    async function onModelLoaded(eng, ms) {
       engine = eng;
       const tmplName = eng.chat_template_name;
       $modelInfo.textContent =
@@ -338,6 +338,17 @@
       $tmplBadge.textContent = tmplName;
       $tmplBadge.style.display = '';
       hideProgress();
+
+      // Try to activate WebGPU backend for faster matrix ops
+      if (webgpu_available()) {
+        $env.textContent = 'WebGPU: initialising…';
+        try {
+          const gpuOn = await eng.init_gpu();
+          $env.textContent = gpuOn ? 'WebGPU: ✓ active' : 'WebGPU: available but init failed';
+        } catch (e) {
+          $env.textContent = 'WebGPU: error — ' + e;
+        }
+      }
     }
 
     function onTokenizerLoaded(tok) {
@@ -376,7 +387,7 @@
         await new Promise(r => setTimeout(r, 10));
         const t0 = performance.now();
         clearChat();
-        onModelLoaded(FlareEngine.load(new Uint8Array(buffer)), performance.now() - t0);
+        await onModelLoaded(FlareEngine.load(new Uint8Array(buffer)), performance.now() - t0);
       } catch (err) {
         $modelInfo.textContent = 'Error: ' + err;
         $modelInfo.classList.add('error');
@@ -395,7 +406,7 @@
         clearChat();
         const eng = await new FlareProgressiveLoader(url)
           .load((l, t) => updateProgress(l, t, 'Downloading…'));
-        onModelLoaded(eng, performance.now() - t0);
+        await onModelLoaded(eng, performance.now() - t0);
       } catch (err) {
         $modelInfo.textContent = 'Error: ' + err;
         $modelInfo.classList.add('error');
