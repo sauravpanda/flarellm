@@ -51,13 +51,17 @@ impl<'a> Generator<'a> {
         sampling::apply_repeat_penalty(&mut logits, &self.tokens, self.params.repeat_penalty);
         sampling::apply_temperature(&mut logits, self.params.temperature);
 
-        // Sample
+        // Sample — priority: greedy > top_p > min_p > top_k > full nucleus
         let token_id = if self.params.temperature == 0.0 {
             sampling::sample_greedy(&logits)
         } else if self.params.top_p < 1.0 {
             sampling::sample_top_p(&logits, self.params.top_p, rng_val)
-        } else {
+        } else if self.params.min_p > 0.0 {
+            sampling::sample_min_p(&logits, self.params.min_p, rng_val)
+        } else if self.params.top_k > 0 {
             sampling::sample_top_k(&logits, self.params.top_k, rng_val)
+        } else {
+            sampling::sample_top_p(&logits, 1.0, rng_val)
         };
 
         self.tokens.push(token_id);

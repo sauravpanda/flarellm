@@ -7,6 +7,11 @@ pub struct SamplingParams {
     pub top_p: f32,
     pub top_k: usize,
     pub repeat_penalty: f32,
+    /// Min-p threshold (0.0 = disabled).  When enabled, samples all tokens
+    /// whose probability is ≥ `min_p * p_max` (where `p_max` is the highest
+    /// token probability after softmax).  Takes precedence over `top_k` but
+    /// yields to `top_p` when `top_p < 1.0`.
+    pub min_p: f32,
 }
 
 impl Default for SamplingParams {
@@ -16,6 +21,7 @@ impl Default for SamplingParams {
             top_p: 0.9,
             top_k: 40,
             repeat_penalty: 1.1,
+            min_p: 0.0,
         }
     }
 }
@@ -168,6 +174,55 @@ pub fn sample_top_k(logits: &[f32], top_k: usize, rng_val: f32) -> u32 {
     items[items.len() - 1].1
 }
 
+/// Min-p sampling: keep all tokens whose probability is ≥ `min_p * p_max`.
+///
+/// `p_max` is the maximum token probability after softmax.  Tokens below the
+/// threshold are discarded and the remaining candidates are sampled
+/// proportionally.  Falls back to the top-1 (greedy) token when no candidate
+/// survives the threshold.
+///
+/// This method avoids the "repetition trap" that nucleus sampling can exhibit
+/// while still restricting the tail of the distribution.
+pub fn sample_min_p(logits: &[f32], min_p: f32, rng_val: f32) -> u32 {
+    let probs = softmax(logits);
+
+    let p_max = probs.iter().cloned().fold(0.0f32, f32::max);
+    let threshold = min_p * p_max;
+
+    // Collect candidates above the threshold.
+    let mut candidates: Vec<(f32, u32)> = probs
+        .iter()
+        .enumerate()
+        .filter_map(|(i, &p)| {
+            if p >= threshold {
+                Some((p, i as u32))
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    if candidates.is_empty() {
+        // Safety fallback: return greedy token.
+        return sample_greedy(logits);
+    }
+
+    // Sort descending by probability for consistent behaviour with top_p / top_k.
+    candidates.sort_unstable_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+
+    let total: f32 = candidates.iter().map(|&(p, _)| p).sum();
+    let target = rng_val * total;
+
+    let mut acc = 0.0f32;
+    for &(p, idx) in &candidates {
+        acc += p;
+        if acc >= target {
+            return idx;
+        }
+    }
+    candidates[candidates.len() - 1].1
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -208,5 +263,23 @@ mod tests {
         let token = sample_top_k(&logits, 2, 0.01);
         // Should be one of the top 2
         assert!(token == 1 || token == 0);
+    }
+
+    #[test]
+    fn test_min_p_keeps_high_prob_tokens() {
+        // Token 1 has a much higher logit; with min_p=0.1, token 2 (logit=0.1)
+        // should be excluded and only the dominant token returned.
+        let logits = vec![0.01, 10.0, 0.01, 0.01];
+        let token = sample_min_p(&logits, 0.1, 0.01);
+        assert_eq!(token, 1, "dominant token should win with tight min_p");
+    }
+
+    #[test]
+    fn test_min_p_fallback_on_zero() {
+        // min_p=0 should behave like sampling from all tokens (threshold=0)
+        let logits = vec![1.0, 2.0, 3.0];
+        let token = sample_min_p(&logits, 0.0, 0.01);
+        // With rng~0, highest-prob token should dominate
+        assert_eq!(token, 2);
     }
 }
