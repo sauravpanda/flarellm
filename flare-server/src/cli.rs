@@ -415,3 +415,43 @@ fn generate_and_collect(
 
     collected
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_get_arg_returns_value_after_flag() {
+        let args = vec![
+            "flare-cli".to_string(),
+            "--prompt".to_string(),
+            "hello world".to_string(),
+        ];
+        assert_eq!(get_arg(&args, "--prompt"), Some("hello world".to_string()));
+    }
+
+    #[test]
+    fn test_get_arg_returns_none_for_missing_flag() {
+        let args = vec!["flare-cli".to_string(), "--chat".to_string()];
+        assert_eq!(get_arg(&args, "--prompt"), None);
+    }
+
+    #[test]
+    fn test_get_arg_returns_none_when_flag_is_last() {
+        // Flag present but no value follows
+        let args = vec!["flare-cli".to_string(), "--prompt".to_string()];
+        assert_eq!(get_arg(&args, "--prompt"), None);
+    }
+
+    #[test]
+    fn test_encode_prompt_byte_fallback_ascii() {
+        // With no tokenizer and no vocab, falls back to raw byte values
+        let tokens = encode_prompt("AB", None, None);
+        assert_eq!(tokens, vec![65u32, 66u32]);
+    }
+
+    #[test]
+    fn test_get_eos_returns_none_with_no_tokenizer() {
+        assert_eq!(get_eos(None, None), None);
+    }
+}
