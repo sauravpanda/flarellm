@@ -31,6 +31,7 @@ const DEQUANT_MATVEC_Q5K_SHADER: &str = include_str!("../shaders/dequant_matvec_
 const DEQUANT_Q5K_SHADER: &str = include_str!("../shaders/dequant_q5k.wgsl");
 const DEQUANT_Q6K_SHADER: &str = include_str!("../shaders/dequant_q6k.wgsl");
 const PREFILL_ATTENTION_SHADER: &str = include_str!("../shaders/prefill_attention.wgsl");
+const DEQUANT_Q3K_SHADER: &str = include_str!("../shaders/dequant_q3k.wgsl");
 
 /// WebGPU/wgpu compute backend.
 ///
@@ -413,6 +414,61 @@ impl WebGpuBackend {
             "dequant_q6k",
             DEQUANT_Q6K_SHADER,
             "dequant_q6k",
+            &layout_entries,
+            |cached| {
+                let bind_group =
+                    self.make_single_input_bind_group(cached, &raw_buf, &out_buf, &params_buf);
+                let dispatch_x = (num_blocks as u32).div_ceil(64);
+                self.dispatch_and_readback(
+                    &cached.pipeline,
+                    &bind_group,
+                    [dispatch_x, 1, 1],
+                    &out_buf,
+                    output_size,
+                )
+            },
+        );
+
+        self.pool.return_storage(raw_buf);
+        self.pool.return_output(out_buf);
+        self.pool.return_uniform(params_buf);
+
+        result
+    }
+
+    /// Dequantize Q3_K blocks on the GPU.
+    ///
+    /// Runs `dequant_q3k.wgsl` with one thread per block (workgroup 64, dispatch
+    /// ceil(num_blocks/64) × 1 × 1).  Returns `num_blocks * 256` f32 values.
+    ///
+    /// Q3_K blocks are 110 bytes each (not u32-aligned).  The raw bytes are
+    /// padded to the nearest 4-byte multiple before upload so that the wgpu
+    /// storage buffer size requirement is satisfied.
+    pub fn dequant_q3k(&self, raw_bytes: &[u8], num_blocks: usize) -> Vec<f32> {
+        let output_size = (num_blocks * 256) as u64 * 4;
+
+        // Q3_K blocks are 110 bytes — pad to next multiple of 4 for wgpu.
+        #[allow(clippy::manual_is_multiple_of)]
+        let raw_buf = if raw_bytes.len() % 4 == 0 {
+            self.pool.get_storage(&self.device, &self.queue, raw_bytes)
+        } else {
+            let mut padded = raw_bytes.to_vec();
+            padded.resize((padded.len() + 3) & !3, 0);
+            self.pool.get_storage(&self.device, &self.queue, &padded)
+        };
+        let out_buf = self.pool.get_output(&self.device, output_size);
+
+        let params: [u32; 1] = [num_blocks as u32];
+        let params_buf =
+            self.pool
+                .get_uniform(&self.device, &self.queue, bytemuck::cast_slice(&params));
+
+        let layout_entries = Self::single_input_layout();
+        let result = self.cache.with_pipeline(
+            &self.device,
+            "dequant_q3k",
+            DEQUANT_Q3K_SHADER,
+            "dequant_q3k",
             &layout_entries,
             |cached| {
                 let bind_group =
@@ -1700,6 +1756,30 @@ mod tests {
         }
     }
 
+    /// Verify Q3_K GPU dequant with a zeroed block (d=0.0 → all outputs = 0.0).
+    ///
+    /// Requires a GPU adapter; run with: `cargo test -p flarellm-gpu -- --ignored`
+    #[test]
+    #[ignore]
+    fn test_dequant_q3k_zeroed() {
+        use flare_loader::quantize::dequant_q3k_block;
+
+        let raw = [0u8; 110];
+        let mut cpu_out = [0.0f32; 256];
+        dequant_q3k_block(&raw, &mut cpu_out);
+
+        let backend = pollster::block_on(WebGpuBackend::new()).expect("GPU backend unavailable");
+        let result = backend.dequant_q3k(&raw, 1);
+
+        assert_eq!(result.len(), 256);
+        for (j, (&gpu, &cpu)) in result.iter().zip(cpu_out.iter()).enumerate() {
+            assert!(
+                (gpu - cpu).abs() < 1e-3,
+                "q3k zeroed mismatch at [{j}]: gpu={gpu}, cpu={cpu}"
+            );
+        }
+    }
+
     /// Verify fused Q5_K dequant-matvec against the CPU reference.
     ///
     /// Block setup: d=1.0, dmin=0.0, sc[*]=1 (scales_raw[0..4]=0x41), mn[*]=0,
@@ -1767,6 +1847,58 @@ mod tests {
         assert_eq!(result.len(), num_rows);
         for (i, &v) in result.iter().enumerate() {
             assert!((v - 384.0).abs() < 1e-1, "row {i}: got {v}, expected 384.0");
+        }
+    }
+
+    /// Verify Q3_K GPU dequant matches CPU reference with d=1.0 and non-trivial weights.
+    ///
+    /// Block setup: d=1.0, all scales=1 (using kmask encoding), hmask=0xFF (all high bits set,
+    /// so no subtraction), qs all 0x55 (low2=1 for all shift positions).
+    ///
+    /// Requires a GPU adapter; run with: `cargo test -p flarellm-gpu -- --ignored`
+    #[test]
+    #[ignore]
+    fn test_dequant_q3k_matches_cpu() {
+        use flare_loader::quantize::dequant_q3k_block;
+
+        let mut raw = [0u8; 110];
+        // d = 1.0 as f16 LE at bytes 108-109
+        raw[108] = 0x00;
+        raw[109] = 0x3C;
+        // hmask[32] = 0xFF: all high bits set → sub=0 for all weights
+        for b in raw[0..32].iter_mut() {
+            *b = 0xFF;
+        }
+        // qs[64] at bytes 32..96 = 0x55 = 0b01010101:
+        //   shift 0 → bits[1:0]=01=1, shift 2 → bits[3:2]=01=1,
+        //   shift 4 → bits[5:4]=01=1, shift 6 → bits[7:6]=01=1
+        for b in raw[32..96].iter_mut() {
+            *b = 0x55;
+        }
+        // scales_raw[12] at bytes 96..108:
+        //   set b[0..8]=0x21 so (0x21 & 0x0F)=1, b[8..12]=0x00 → scales[0..4]=1-32=-31
+        //   For a simple non-zero test, use values that produce known output.
+        //   Instead: set all scales_raw to encode scales[i]=1:
+        //     scales[i] = (b[i] & 0x0F) | extra_bits - 32 = 1
+        //     → raw_val = 33 = 0x21 for b[0..4], b[8..12] bits[7:4]=0
+        for b in raw[96..104].iter_mut() {
+            *b = 0x21; // b[0..7]: low nibble=1 → after extra bits=0: scales[0..7]=1-32=-31
+        }
+        // b[8..12] = 0x00 → extra bits for scales[0..7] = 0
+
+        // CPU reference
+        let mut cpu_out = [0.0f32; 256];
+        dequant_q3k_block(&raw, &mut cpu_out);
+
+        let backend = pollster::block_on(WebGpuBackend::new()).expect("GPU backend unavailable");
+        let result = backend.dequant_q3k(&raw, 1);
+
+        assert_eq!(result.len(), 256);
+        for (j, (&gpu, &cpu)) in result.iter().zip(cpu_out.iter()).enumerate() {
+            assert!(
+                (gpu - cpu).abs() < 1e-3,
+                "q3k mismatch at [{j}]: gpu={gpu}, cpu={cpu}"
+            );
         }
     }
 }
