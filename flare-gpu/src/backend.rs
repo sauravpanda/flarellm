@@ -35,6 +35,7 @@ const PREFILL_ATTENTION_SHADER: &str = include_str!("../shaders/prefill_attentio
 const DEQUANT_Q3K_SHADER: &str = include_str!("../shaders/dequant_q3k.wgsl");
 const BATCHED_MATVEC_SHADER: &str = include_str!("../shaders/batched_matvec.wgsl");
 const BATCHED_RMSNORM_SHADER: &str = include_str!("../shaders/batched_rmsnorm.wgsl");
+const BATCHED_ROPE_SHADER: &str = include_str!("../shaders/batched_rope.wgsl");
 
 /// WebGPU/wgpu compute backend.
 ///
@@ -664,6 +665,70 @@ impl WebGpuBackend {
 
         self.pool.return_storage(weight_buf);
         self.pool.return_storage(input_buf);
+        self.pool.return_output(out_buf);
+        self.pool.return_uniform(params_buf);
+
+        result
+    }
+
+    /// Apply RoPE to a batch of token vectors.
+    ///
+    /// `inp` is laid out as `[seq_len × num_heads × head_dim]`. Token `t` gets
+    /// position `start_pos + t`. Returns a new buffer with the same shape.
+    ///
+    /// Dispatches `seq_len × num_heads × head_dim/2` threads; each thread
+    /// handles one rotation pair (element i, i + head_dim/2) for one token.
+    pub fn batched_rope(
+        &self,
+        inp: &[f32],
+        num_heads: usize,
+        head_dim: usize,
+        seq_len: usize,
+        start_pos: usize,
+        theta: f32,
+    ) -> Vec<f32> {
+        let total = seq_len * num_heads * head_dim;
+        let output_size = total as u64 * 4;
+
+        let inp_buf = self
+            .pool
+            .get_storage(&self.device, &self.queue, bytemuck::cast_slice(inp));
+        let out_buf = self.pool.get_output(&self.device, output_size);
+
+        let params: [u32; 5] = [
+            num_heads as u32,
+            head_dim as u32,
+            seq_len as u32,
+            start_pos as u32,
+            theta.to_bits(),
+        ];
+        let params_buf =
+            self.pool
+                .get_uniform(&self.device, &self.queue, bytemuck::cast_slice(&params));
+
+        let layout_entries = Self::single_input_layout();
+        let result = self.cache.with_pipeline(
+            &self.device,
+            "batched_rope",
+            BATCHED_ROPE_SHADER,
+            "batched_rope",
+            &layout_entries,
+            |cached| {
+                let bind_group =
+                    self.make_single_input_bind_group(cached, &inp_buf, &out_buf, &params_buf);
+                let half = (head_dim / 2) as u32;
+                let dispatch_x = (seq_len as u32 * num_heads as u32 * half).div_ceil(64);
+                self.dispatch_and_readback(
+                    &cached.pipeline,
+                    &bind_group,
+                    [dispatch_x, 1, 1],
+                    &out_buf,
+                    output_size,
+                )
+            },
+        );
+
+        self.pool.return_storage(inp_buf);
         self.pool.return_output(out_buf);
         self.pool.return_uniform(params_buf);
 
@@ -1532,6 +1597,18 @@ impl ComputeBackend for WebGpuBackend {
     ) -> Vec<f32> {
         WebGpuBackend::batched_rmsnorm(self, input, weight, dim, batch, eps)
     }
+
+    fn batched_rope(
+        &self,
+        inp: &[f32],
+        num_heads: usize,
+        head_dim: usize,
+        seq_len: usize,
+        start_pos: usize,
+        theta: f32,
+    ) -> Vec<f32> {
+        WebGpuBackend::batched_rope(self, inp, num_heads, head_dim, seq_len, start_pos, theta)
+    }
 }
 
 // WASM is single-threaded; wgpu's JS-backed types don't impl Send/Sync but it's
@@ -1912,6 +1989,49 @@ mod tests {
 
     /// Verify GPU batched prefill attention matches the CPU reference.
     ///
+    /// Verify GPU batched_rope matches CPU apply_rope for seq_len=3, num_heads=2, head_dim=4.
+    ///
+    /// Input: constant 1.0 across all elements. Checks that each token's rotation
+    /// matches the per-token CPU reference.
+    ///
+    /// Requires a GPU adapter; run with: `cargo test -p flarellm-gpu -- --ignored`
+    #[test]
+    #[ignore]
+    fn test_batched_rope_matches_cpu() {
+        use flare_core::model::apply_rope;
+
+        let seq_len = 3usize;
+        let num_heads = 2usize;
+        let head_dim = 4usize;
+        let theta = 10000.0f32;
+        let stride = num_heads * head_dim;
+
+        let inp = vec![1.0f32; seq_len * stride];
+
+        // CPU reference: apply_rope per token.
+        let mut expected = inp.clone();
+        for t in 0..seq_len {
+            apply_rope(
+                &mut expected[t * stride..(t + 1) * stride],
+                num_heads,
+                head_dim,
+                t,
+                theta,
+            );
+        }
+
+        let backend = pollster::block_on(WebGpuBackend::new()).expect("GPU backend unavailable");
+        let result = backend.batched_rope(&inp, num_heads, head_dim, seq_len, 0, theta);
+
+        assert_eq!(result.len(), seq_len * stride);
+        for (i, (&got, &exp)) in result.iter().zip(expected.iter()).enumerate() {
+            assert!(
+                (got - exp).abs() < 1e-5,
+                "index {i}: got {got}, expected {exp}"
+            );
+        }
+    }
+
     /// Uses a 3-position, 2-head, head_dim=4 setup:
     ///   Q = K = V = identity-like pattern (ones on diagonal per head).
     ///   Compares GPU output against `cpu_grouped_query_attention` per position.
