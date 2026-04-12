@@ -1819,6 +1819,95 @@ mod tests {
         }
     }
 
+    #[test]
+    fn test_dequant_q8_1_negative_d() {
+        // d=-1.0, qs[0]=5 (i8) → output[0] = 5 * (-1.0) = -5.0
+        let mut block = vec![0u8; 36];
+        block[0] = 0x00;
+        block[1] = 0xBC; // f16 -1.0
+        block[4] = 5; // i8 = 5
+        let mut output = [0.0f32; 32];
+        dequant_q8_1_block(&block, &mut output);
+        assert!(
+            (output[0] - (-5.0)).abs() < 1e-4,
+            "negative d: expected -5.0, got {}",
+            output[0]
+        );
+    }
+
+    #[test]
+    fn test_dequant_q8_1_i8_min() {
+        // d=1.0, qs[0]=0x80 (i8=-128) → output[0]=-128.0
+        let mut block = vec![0u8; 36];
+        block[0] = 0x00;
+        block[1] = 0x3C; // f16 1.0
+        block[4] = 0x80; // i8 = -128
+        let mut output = [0.0f32; 32];
+        dequant_q8_1_block(&block, &mut output);
+        assert!(
+            (output[0] - (-128.0)).abs() < 1e-4,
+            "i8 min: expected -128.0, got {}",
+            output[0]
+        );
+    }
+
+    #[test]
+    fn test_dequant_q8_1_i8_max() {
+        // d=1.0, qs[0]=0x7F (i8=127) → output[0]=127.0
+        let mut block = vec![0u8; 36];
+        block[0] = 0x00;
+        block[1] = 0x3C; // f16 1.0
+        block[4] = 0x7F; // i8 = 127
+        let mut output = [0.0f32; 32];
+        dequant_q8_1_block(&block, &mut output);
+        assert!(
+            (output[0] - 127.0).abs() < 1e-4,
+            "i8 max: expected 127.0, got {}",
+            output[0]
+        );
+    }
+
+    #[test]
+    fn test_dequant_q8_1_s_field_ignored() {
+        // The sum field (bytes 2-3) must not affect dequantization
+        // d=1.0, s=0xBEEF (non-zero), qs[0]=3 → output[0]=3.0
+        let mut block = vec![0u8; 36];
+        block[0] = 0x00;
+        block[1] = 0x3C; // d = 1.0
+        block[2] = 0xEF; // s field (not used)
+        block[3] = 0xBE;
+        block[4] = 3; // i8 = 3
+        let mut output = [0.0f32; 32];
+        dequant_q8_1_block(&block, &mut output);
+        assert!(
+            (output[0] - 3.0).abs() < 1e-4,
+            "s field ignored: expected 3.0, got {}",
+            output[0]
+        );
+    }
+
+    #[test]
+    fn test_dequant_q8_1_mixed_signs() {
+        // d=2.0, qs[0]=1 (i8), qs[1]=0xFF (i8=-1) → output[0]=2.0, output[1]=-2.0
+        let mut block = vec![0u8; 36];
+        block[0] = 0x00;
+        block[1] = 0x40; // f16 2.0
+        block[4] = 0x01; // i8 = 1
+        block[5] = 0xFF; // i8 = -1
+        let mut output = [0.0f32; 32];
+        dequant_q8_1_block(&block, &mut output);
+        assert!(
+            (output[0] - 2.0).abs() < 1e-4,
+            "mixed signs: expected 2.0, got {}",
+            output[0]
+        );
+        assert!(
+            (output[1] - (-2.0)).abs() < 1e-4,
+            "mixed signs: expected -2.0, got {}",
+            output[1]
+        );
+    }
+
     // ── IQ2_XS reference dequant tests ────────────────────────────────────────
 
     /// Minimal IQ2_XS grid fixture: only entry 0 is set (all bytes = 0x08).
