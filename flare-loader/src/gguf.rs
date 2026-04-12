@@ -5,6 +5,7 @@ use thiserror::Error;
 
 use crate::quantize::{self, QuantFormat};
 use flare_core::config::{Architecture, ModelConfig};
+use flare_core::model::{RawLayerWeights, RawWeight, WeightFormat};
 use flare_core::tensor::Tensor;
 
 const GGUF_MAGIC: u32 = 0x46554747; // "GGUF" as little-endian u32 (bytes: 47 47 55 46)
@@ -329,6 +330,97 @@ impl GgufFile {
             tensors.insert(info.name.clone(), tensor);
         }
         Ok(tensors)
+    }
+
+    /// Read a single tensor's raw bytes without dequantizing, along with its
+    /// shape and quantization format.
+    ///
+    /// Returns `None` if the tensor name is not found or the format is not one
+    /// of the GPU-accelerated formats supported by `WeightFormat`.
+    pub fn read_raw_weight<R: Read + Seek>(
+        &self,
+        reader: &mut R,
+        name: &str,
+    ) -> Result<Option<RawWeight>, GgufError> {
+        let info = match self.tensors.iter().find(|t| t.name == name) {
+            Some(i) => i,
+            None => return Ok(None),
+        };
+        let format = match quant_to_weight_format(info.dtype) {
+            Some(f) => f,
+            None => return Ok(None),
+        };
+
+        let absolute_offset = self.tensor_data_offset + info.offset;
+        reader.seek(SeekFrom::Start(absolute_offset))?;
+
+        let byte_size = info.byte_size() as usize;
+        let mut raw = vec![0u8; byte_size];
+        reader.read_exact(&mut raw)?;
+
+        // Determine tensor shape: dimensions[0] is num_rows, product of
+        // remaining dimensions gives the flat column count.
+        let num_rows = info.dimensions.first().copied().unwrap_or(1) as usize;
+        let weights_per_block = format.weights_per_block();
+        let col_elements = info.dimensions.iter().skip(1).product::<u64>().max(1) as usize;
+        let blocks_per_row = col_elements.div_ceil(weights_per_block);
+
+        Ok(Some(RawWeight {
+            data: raw,
+            format,
+            num_rows,
+            blocks_per_row,
+        }))
+    }
+
+    /// Load raw (non-dequantized) layer weights for a single transformer layer.
+    ///
+    /// Returns `None` if any of the seven required weight tensors (wq, wk, wv,
+    /// wo, w_gate, w_up, w_down) is missing or uses an unsupported format.
+    /// This allows callers to gracefully fall back to the f32 dequantized path
+    /// for models that mix quantization formats.
+    pub fn load_raw_layer_weights<R: Read + Seek>(
+        &self,
+        reader: &mut R,
+        layer_idx: usize,
+    ) -> Result<Option<RawLayerWeights>, GgufError> {
+        let i = layer_idx;
+        let wq = self.read_raw_weight(reader, &format!("blk.{i}.attn_q.weight"))?;
+        let wk = self.read_raw_weight(reader, &format!("blk.{i}.attn_k.weight"))?;
+        let wv = self.read_raw_weight(reader, &format!("blk.{i}.attn_v.weight"))?;
+        let wo = self.read_raw_weight(reader, &format!("blk.{i}.attn_output.weight"))?;
+        let w_gate = self.read_raw_weight(reader, &format!("blk.{i}.ffn_gate.weight"))?;
+        let w_up = self.read_raw_weight(reader, &format!("blk.{i}.ffn_up.weight"))?;
+        let w_down = self.read_raw_weight(reader, &format!("blk.{i}.ffn_down.weight"))?;
+
+        match (wq, wk, wv, wo, w_gate, w_up, w_down) {
+            (Some(wq), Some(wk), Some(wv), Some(wo), Some(w_gate), Some(w_up), Some(w_down)) => {
+                Ok(Some(RawLayerWeights {
+                    wq,
+                    wk,
+                    wv,
+                    wo,
+                    w_gate,
+                    w_up,
+                    w_down,
+                }))
+            }
+            _ => Ok(None),
+        }
+    }
+}
+
+/// Map a `QuantFormat` to a GPU-accelerated `WeightFormat`, if one exists.
+fn quant_to_weight_format(q: QuantFormat) -> Option<WeightFormat> {
+    match q {
+        QuantFormat::Q4_1 => Some(WeightFormat::Q4_1),
+        QuantFormat::Q8_1 => Some(WeightFormat::Q8_1),
+        QuantFormat::Q4_0 => Some(WeightFormat::Q4_0),
+        QuantFormat::Q2K => Some(WeightFormat::Q2K),
+        QuantFormat::Q4K => Some(WeightFormat::Q4K),
+        QuantFormat::Q5K => Some(WeightFormat::Q5K),
+        QuantFormat::Q6K => Some(WeightFormat::Q6K),
+        _ => None,
     }
 }
 
