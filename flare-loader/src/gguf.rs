@@ -435,6 +435,7 @@ fn quant_to_weight_format(q: QuantFormat) -> Option<WeightFormat> {
         QuantFormat::Q6K => Some(WeightFormat::Q6K),
         QuantFormat::IQ4NL => Some(WeightFormat::IQ4NL),
         QuantFormat::IQ4XS => Some(WeightFormat::IQ4XS),
+        QuantFormat::IQ3S => Some(WeightFormat::IQ3S),
         QuantFormat::IQ2XXS => Some(WeightFormat::IQ2XXS),
         QuantFormat::IQ2XS => Some(WeightFormat::IQ2XS),
         QuantFormat::IQ3XXS => Some(WeightFormat::IQ3XXS),
