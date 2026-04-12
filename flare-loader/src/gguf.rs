@@ -846,4 +846,199 @@ mod tests {
         assert_eq!(result[256], 0.0); // out[0] of second block
         assert_eq!(result[299], 43.0); // out[43] of second block
     }
+
+    // -----------------------------------------------------------------------
+    // Helpers for building a synthetic GGUF with quantized layer tensors
+    // -----------------------------------------------------------------------
+
+    /// Write a tensor info entry into a GGUF buffer.
+    ///
+    /// `dtype_id`: raw GGUF type code (3 = Q4_1).
+    /// `dims`: e.g. `&[num_rows as u64, num_cols as u64]`.
+    /// `offset`: byte offset within the tensor-data section.
+    fn write_tensor_info(buf: &mut Vec<u8>, name: &str, dims: &[u64], dtype_id: u32, offset: u64) {
+        write_gguf_string(buf, name);
+        buf.extend_from_slice(&(dims.len() as u32).to_le_bytes());
+        for &d in dims {
+            buf.extend_from_slice(&d.to_le_bytes());
+        }
+        buf.extend_from_slice(&dtype_id.to_le_bytes());
+        buf.extend_from_slice(&offset.to_le_bytes());
+    }
+
+    /// Build a synthetic GGUF buffer containing one transformer layer's weight
+    /// tensors in Q4_1 format (dtype_id=3, 20 bytes/block, 32 weights/block).
+    ///
+    /// The model shape is:
+    ///   - num_rows = 4, num_cols = 64 → 2 blocks/row → 160 bytes/tensor
+    ///
+    /// Returns the full buffer and the expected raw bytes for one tensor.
+    fn build_q4_1_layer_gguf() -> (Vec<u8>, Vec<u8>) {
+        const NUM_ROWS: u64 = 4;
+        const NUM_COLS: u64 = 64;
+        const BLOCKS_PER_ROW: usize = 2; // 64 / 32
+        const BYTES_PER_BLOCK: usize = 20; // Q4_1
+        const TENSOR_BYTES: usize = NUM_ROWS as usize * BLOCKS_PER_ROW * BYTES_PER_BLOCK; // 160
+
+        let tensor_names = [
+            "blk.0.attn_q.weight",
+            "blk.0.attn_k.weight",
+            "blk.0.attn_v.weight",
+            "blk.0.attn_output.weight",
+            "blk.0.ffn_gate.weight",
+            "blk.0.ffn_up.weight",
+            "blk.0.ffn_down.weight",
+        ];
+        let num_tensors = tensor_names.len();
+
+        let mut header = Vec::new();
+        write_gguf_header(&mut header, num_tensors as u64, 0);
+
+        let dims = [NUM_ROWS, NUM_COLS];
+        for (i, name) in tensor_names.iter().enumerate() {
+            write_tensor_info(
+                &mut header,
+                name,
+                &dims,
+                3, // Q4_1
+                (i * TENSOR_BYTES) as u64,
+            );
+        }
+
+        // Pad header to 32-byte alignment boundary
+        let alignment = 32usize;
+        let padded = header.len().div_ceil(alignment) * alignment;
+        header.resize(padded, 0u8);
+
+        // Build per-tensor raw data: fill with recognisable pattern so we can
+        // verify the right bytes are returned.
+        let expected_tensor: Vec<u8> = (0..TENSOR_BYTES).map(|i| (i & 0xFF) as u8).collect();
+        let mut tensor_data = Vec::new();
+        for _ in 0..num_tensors {
+            tensor_data.extend_from_slice(&expected_tensor);
+        }
+
+        let mut buf = header;
+        buf.extend_from_slice(&tensor_data);
+        (buf, expected_tensor)
+    }
+
+    #[test]
+    fn test_read_raw_weight_q4_1_metadata() {
+        use flare_core::model::WeightFormat;
+
+        let (buf, _) = build_q4_1_layer_gguf();
+        let mut cursor = Cursor::new(buf);
+        let file = GgufFile::parse_header(&mut cursor).unwrap();
+
+        let rw = file
+            .read_raw_weight(&mut cursor, "blk.0.attn_q.weight")
+            .unwrap()
+            .expect("should find blk.0.attn_q.weight");
+
+        assert_eq!(rw.format, WeightFormat::Q4_1);
+        assert_eq!(rw.num_rows, 4);
+        assert_eq!(rw.blocks_per_row, 2);
+        assert_eq!(rw.data.len(), 160); // 4 rows × 2 blocks × 20 bytes
+    }
+
+    #[test]
+    fn test_read_raw_weight_missing_returns_none() {
+        let (buf, _) = build_q4_1_layer_gguf();
+        let mut cursor = Cursor::new(buf);
+        let file = GgufFile::parse_header(&mut cursor).unwrap();
+
+        let result = file
+            .read_raw_weight(&mut cursor, "blk.99.attn_q.weight")
+            .unwrap();
+        assert!(result.is_none(), "missing tensor should return None");
+    }
+
+    #[test]
+    fn test_read_raw_weight_bytes_match() {
+        let (buf, expected) = build_q4_1_layer_gguf();
+        let mut cursor = Cursor::new(buf);
+        let file = GgufFile::parse_header(&mut cursor).unwrap();
+
+        // Third tensor (attn_v) starts at offset 2 * 160 = 320 within tensor data.
+        let rw = file
+            .read_raw_weight(&mut cursor, "blk.0.attn_v.weight")
+            .unwrap()
+            .unwrap();
+
+        // The expected bytes are the same pattern regardless of which tensor we
+        // pick, because build_q4_1_layer_gguf writes the same pattern for each.
+        assert_eq!(rw.data, expected);
+    }
+
+    #[test]
+    fn test_load_raw_layer_weights_complete() {
+        use flare_core::model::WeightFormat;
+
+        let (buf, _) = build_q4_1_layer_gguf();
+        let mut cursor = Cursor::new(buf);
+        let file = GgufFile::parse_header(&mut cursor).unwrap();
+
+        let layer = file
+            .load_raw_layer_weights(&mut cursor, 0)
+            .unwrap()
+            .expect("all seven tensors should be present");
+
+        for rw in [
+            &layer.wq,
+            &layer.wk,
+            &layer.wv,
+            &layer.wo,
+            &layer.w_gate,
+            &layer.w_up,
+            &layer.w_down,
+        ] {
+            assert_eq!(rw.format, WeightFormat::Q4_1);
+            assert_eq!(rw.num_rows, 4);
+            assert_eq!(rw.blocks_per_row, 2);
+            assert_eq!(rw.data.len(), 160);
+        }
+    }
+
+    #[test]
+    fn test_load_raw_layer_weights_missing_tensor_returns_none() {
+        // Build a GGUF with only 6 of the 7 required tensors (omit ffn_down).
+        const NUM_ROWS: u64 = 4;
+        const NUM_COLS: u64 = 64;
+        const TENSOR_BYTES: usize = 4 * 2 * 20;
+
+        let six_names = [
+            "blk.0.attn_q.weight",
+            "blk.0.attn_k.weight",
+            "blk.0.attn_v.weight",
+            "blk.0.attn_output.weight",
+            "blk.0.ffn_gate.weight",
+            "blk.0.ffn_up.weight",
+            // ffn_down intentionally omitted
+        ];
+
+        let mut header = Vec::new();
+        write_gguf_header(&mut header, six_names.len() as u64, 0);
+        for (i, name) in six_names.iter().enumerate() {
+            write_tensor_info(
+                &mut header,
+                name,
+                &[NUM_ROWS, NUM_COLS],
+                3,
+                (i * TENSOR_BYTES) as u64,
+            );
+        }
+        let padded = header.len().div_ceil(32) * 32;
+        header.resize(padded, 0u8);
+        header.extend(vec![0u8; six_names.len() * TENSOR_BYTES]);
+
+        let mut cursor = Cursor::new(header);
+        let file = GgufFile::parse_header(&mut cursor).unwrap();
+
+        let result = file.load_raw_layer_weights(&mut cursor, 0).unwrap();
+        assert!(
+            result.is_none(),
+            "missing ffn_down should cause load to return None"
+        );
+    }
 }
