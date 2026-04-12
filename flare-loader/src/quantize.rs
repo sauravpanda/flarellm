@@ -1076,12 +1076,182 @@ mod tests {
     }
 
     #[test]
+    fn test_dequant_q5k_unit_scale_zero_qh() {
+        // d=1.0, dmin=0.0, sc[0]=1 (scales_raw[0]=0x01), qh all 0 → q_lo=low nibble only
+        // ql[48]=0x03 → lo=3 → output[0] = 1*1*3 = 3.0
+        let mut block = vec![0u8; 176];
+        block[0] = 0x00;
+        block[1] = 0x3C; // d = 1.0
+        block[4] = 0x01; // scales_raw[0]: sc[0]=1
+                         // qh[16..48] = 0 (all high bits zero, default)
+        block[48] = 0x03; // ql[0]: lo nibble=3
+        let mut output = [0.0f32; 256];
+        dequant_q5k_block(&block, &mut output);
+        assert!(
+            (output[0] - 3.0).abs() < 1e-4,
+            "unit scale zero qh: expected 3.0, got {}",
+            output[0]
+        );
+    }
+
+    #[test]
+    fn test_dequant_q5k_high_bit_qh() {
+        // Set qh[0] bit 0 to give weight 0 a 5th bit: q_lo = 0|(1<<4)=16
+        // sc[0]=1, d=1.0, dmin=0 → output[0] = 1*1*16 = 16.0
+        let mut block = vec![0u8; 176];
+        block[0] = 0x00;
+        block[1] = 0x3C; // d = 1.0
+        block[4] = 0x01; // sc[0]=1
+        block[16] = 0x01; // qh[0] bit 0 = 1 → high bit for weight 0
+                          // ql[48] = 0x00 → lo nibble = 0
+        let mut output = [0.0f32; 256];
+        dequant_q5k_block(&block, &mut output);
+        assert!(
+            (output[0] - 16.0).abs() < 1e-4,
+            "high bit qh: expected 16.0, got {}",
+            output[0]
+        );
+    }
+
+    #[test]
+    fn test_dequant_q5k_nonzero_dmin() {
+        // d=1.0, dmin=1.0, sc[0]=2, mn[0]=3, ql[48]=0x01 (lo=1)
+        // output[0] = 1*2*1 - 1*3 = -1.0
+        let mut block = vec![0u8; 176];
+        block[0] = 0x00;
+        block[1] = 0x3C; // d = 1.0
+        block[2] = 0x00;
+        block[3] = 0x3C; // dmin = 1.0
+        block[4] = 0x02; // scales_raw[0]: sc[0]=2
+        block[8] = 0x03; // scales_raw[4]: mn[0]=3
+        block[48] = 0x01; // ql[0]: lo nibble=1
+        let mut output = [0.0f32; 256];
+        dequant_q5k_block(&block, &mut output);
+        assert!(
+            (output[0] - (-1.0)).abs() < 1e-4,
+            "nonzero dmin: expected -1.0, got {}",
+            output[0]
+        );
+    }
+
+    #[test]
+    fn test_dequant_q5k_negative_d() {
+        // d=-1.0, sc[0]=2, ql[48]=0x03 (lo=3) → output[0] = (-1)*2*3 = -6.0
+        let mut block = vec![0u8; 176];
+        block[0] = 0x00;
+        block[1] = 0xBC; // d = -1.0
+        block[4] = 0x02; // sc[0]=2
+        block[48] = 0x03; // ql[0]: lo=3
+        let mut output = [0.0f32; 256];
+        dequant_q5k_block(&block, &mut output);
+        assert!(
+            (output[0] - (-6.0)).abs() < 1e-4,
+            "negative d: expected -6.0, got {}",
+            output[0]
+        );
+    }
+
+    #[test]
+    fn test_dequant_q5k_second_block_idx() {
+        // sc[1] from scales_raw[1]=0x03 → sc[1]=3; d=1.0, dmin=0.0
+        // ql[48+32]=ql[80]=0x05 (lo=5, block_idx=32/32=1) → output[32] = 1*3*5 = 15.0
+        let mut block = vec![0u8; 176];
+        block[0] = 0x00;
+        block[1] = 0x3C; // d = 1.0
+        block[5] = 0x03; // scales_raw[1]: sc[1]=3
+        block[80] = 0x05; // ql[32]: lo=5
+        let mut output = [0.0f32; 256];
+        dequant_q5k_block(&block, &mut output);
+        assert!(
+            (output[32] - 15.0).abs() < 1e-4,
+            "second block_idx: expected 15.0, got {}",
+            output[32]
+        );
+    }
+
+    #[test]
     fn test_dequant_q6k_short_block() {
         // Too-short block should zero-fill
         let block = vec![0u8; 10];
         let mut output = [1.0f32; 256];
         dequant_q6k_block(&block, &mut output);
         assert!(output.iter().all(|&v| v == 0.0));
+    }
+
+    #[test]
+    fn test_dequant_q6k_nonzero_scale() {
+        // d=1.0 at bytes 208-209; scales[192]=1 (i8=1); ql[0]=0x01, qh[128]=0 (no high bits)
+        // half=0, l=0, is=0: q1=(0x01&0xF|(0&3)<<4)-32=1-32=-31; sc1=scales[0]=1
+        // output[0] = 1.0 * 1 * (-31) = -31.0
+        let mut block = vec![0u8; 210];
+        block[208] = 0x00;
+        block[209] = 0x3C; // d = 1.0
+        block[192] = 0x01; // scales[0] = i8(1)
+        block[0] = 0x01; // ql[0] lo nibble = 1
+        let mut output = [0.0f32; 256];
+        dequant_q6k_block(&block, &mut output);
+        assert!(
+            (output[0] - (-31.0)).abs() < 1e-4,
+            "nonzero scale: expected -31.0, got {}",
+            output[0]
+        );
+    }
+
+    #[test]
+    fn test_dequant_q6k_qh_high_bits() {
+        // d=1.0, scales[192]=1; ql[0]=0x00, qh[128]=0x03 → q1=(0|(3<<4))-32=48-32=16
+        // output[0] = 1.0 * 1 * 16 = 16.0
+        let mut block = vec![0u8; 210];
+        block[208] = 0x00;
+        block[209] = 0x3C; // d = 1.0
+        block[192] = 0x01; // scales[0] = 1
+                           // ql[0] = 0 → low nibble=0
+        block[128] = 0x03; // qh[0]: bits 1:0 = 3 → contributes 3<<4 = 48 to q1
+        let mut output = [0.0f32; 256];
+        dequant_q6k_block(&block, &mut output);
+        assert!(
+            (output[0] - 16.0).abs() < 1e-4,
+            "qh high bits: expected 16.0, got {}",
+            output[0]
+        );
+    }
+
+    #[test]
+    fn test_dequant_q6k_negative_scale() {
+        // d=1.0, scales[192]=0xFF (i8=-1); ql[0]=0x01, qh[128]=0 → q1=-31
+        // output[0] = 1.0 * (-1) * (-31) = 31.0
+        let mut block = vec![0u8; 210];
+        block[208] = 0x00;
+        block[209] = 0x3C; // d = 1.0
+        block[192] = 0xFF; // scales[0] = i8(-1)
+        block[0] = 0x01; // ql[0] lo nibble = 1
+        let mut output = [0.0f32; 256];
+        dequant_q6k_block(&block, &mut output);
+        assert!(
+            (output[0] - 31.0).abs() < 1e-4,
+            "negative scale: expected 31.0, got {}",
+            output[0]
+        );
+    }
+
+    #[test]
+    fn test_dequant_q6k_second_half() {
+        // half=1: ql_off=64, qh_off=32, sc_off=8, y_off=128
+        // d=1.0, scales[192+8]=scales[200]=2 (i8); ql[64]=0x01, qh[128+32]=qh[160]=0
+        // l=0, is=0: q1=(ql[64]&0xF|(qh[160]&3)<<4)-32 = 1-32=-31
+        // sc1=scales[sc_off+is]=scales[8]=2 → output[128] = 1.0*2*(-31)=-62.0
+        let mut block = vec![0u8; 210];
+        block[208] = 0x00;
+        block[209] = 0x3C; // d = 1.0
+        block[200] = 0x02; // scales[8] = 2
+        block[64] = 0x01; // ql[64]: lo nibble=1
+        let mut output = [0.0f32; 256];
+        dequant_q6k_block(&block, &mut output);
+        assert!(
+            (output[128] - (-62.0)).abs() < 1e-4,
+            "second half: expected -62.0, got {}",
+            output[128]
+        );
     }
 
     #[test]
