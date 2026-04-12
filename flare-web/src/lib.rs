@@ -132,6 +132,10 @@ pub struct FlareEngine {
     /// Raw Jinja2 chat template string from `tokenizer.chat_template` in GGUF metadata.
     /// `None` if the GGUF file did not include a chat template.
     raw_chat_template: Option<String>,
+    /// Architecture name from `general.architecture` in GGUF metadata (e.g. `"llama"`).
+    architecture: String,
+    /// Model display name from `general.name` in GGUF metadata, or empty string if absent.
+    model_name: String,
     /// Number of tokens consumed in the current KV-cache session (prompt + generated).
     /// Updated after every generation call; reset to 0 by `engine.reset()`.
     kv_pos: usize,
@@ -193,6 +197,13 @@ impl FlareEngine {
             .get("tokenizer.chat_template")
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
+        let architecture = gguf.architecture().unwrap_or("unknown").to_string();
+        let model_name = gguf
+            .metadata
+            .get("general.name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
         let gguf_vocab = GgufVocab::from_gguf(&gguf).ok();
         let config = gguf
             .to_model_config()
@@ -208,6 +219,8 @@ impl FlareEngine {
             bos_token_id,
             add_bos_token,
             raw_chat_template,
+            architecture,
+            model_name,
             kv_pos: 0,
             stream_params: SamplingParams {
                 temperature: 0.0,
@@ -420,6 +433,24 @@ impl FlareEngine {
     #[wasm_bindgen(getter)]
     pub fn raw_chat_template(&self) -> Option<String> {
         self.raw_chat_template.clone()
+    }
+
+    /// Model architecture name from `general.architecture` in the GGUF metadata.
+    ///
+    /// Returns a lowercase string such as `"llama"`, `"mistral"`, `"gemma2"`,
+    /// `"phi3"`, or `"qwen2"`. Returns `"unknown"` if the field is absent.
+    #[wasm_bindgen(getter)]
+    pub fn architecture(&self) -> String {
+        self.architecture.clone()
+    }
+
+    /// Model display name from `general.name` in the GGUF metadata.
+    ///
+    /// Returns the human-readable name embedded by the model author (e.g.
+    /// `"Llama 3.2 1B Instruct"`). Returns an empty string if the field is absent.
+    #[wasm_bindgen(getter)]
+    pub fn model_name(&self) -> String {
+        self.model_name.clone()
     }
 
     /// Maximum sequence length (context window size) of the loaded model.
@@ -1066,6 +1097,13 @@ impl FlareProgressiveLoader {
             .get("tokenizer.chat_template")
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
+        let architecture = gguf.architecture().unwrap_or("unknown").to_string();
+        let model_name = gguf
+            .metadata
+            .get("general.name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
         let gguf_vocab = GgufVocab::from_gguf(&gguf).ok();
         let config = gguf
             .to_model_config()
@@ -1087,6 +1125,8 @@ impl FlareProgressiveLoader {
             bos_token_id,
             add_bos_token,
             raw_chat_template,
+            architecture,
+            model_name,
             kv_pos: 0,
             stream_params: SamplingParams {
                 temperature: 0.0,
