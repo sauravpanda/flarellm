@@ -360,4 +360,87 @@ mod tests {
         // First tokens are the prompt
         assert_eq!(&gen.tokens()[..prompt.len()], &prompt[..]);
     }
+
+    #[test]
+    fn test_generate_max_tokens_respected() {
+        // Output must never exceed max_tokens regardless of EOS or callback
+        let mut model = tiny_model();
+        let params = SamplingParams {
+            temperature: 0.0,
+            ..Default::default()
+        };
+        let mut gen = Generator::new(&mut model, params);
+        let max = 5;
+        let generated = gen.generate(&[1u32], max, None, || 0.5, |_, _| true);
+        assert!(
+            generated.len() <= max,
+            "generated {} tokens but max was {}",
+            generated.len(),
+            max
+        );
+        assert_eq!(
+            generated.len(),
+            max,
+            "should generate exactly max tokens when no EOS"
+        );
+    }
+
+    #[test]
+    fn test_generate_deterministic_with_greedy() {
+        // Greedy (temperature=0) + same prompt must produce identical token sequences
+        let prompt = vec![2u32, 3u32];
+        let max = 4;
+
+        let run = |prompt: &[u32]| -> Vec<u32> {
+            let mut model = tiny_model();
+            let params = SamplingParams {
+                temperature: 0.0,
+                ..Default::default()
+            };
+            let mut gen = Generator::new(&mut model, params);
+            gen.generate(prompt, max, None, || 0.5, |_, _| true)
+        };
+
+        let first = run(&prompt);
+        let second = run(&prompt);
+        assert_eq!(
+            first, second,
+            "greedy generation must be deterministic: {first:?} vs {second:?}"
+        );
+    }
+
+    #[test]
+    fn test_step_without_prefill_does_not_panic() {
+        // Calling step() directly without prefill should not panic (uses token 0 as fallback)
+        let mut model = tiny_model();
+        let params = SamplingParams {
+            temperature: 0.0,
+            ..Default::default()
+        };
+        let mut gen = Generator::new(&mut model, params);
+        let result = gen.step(0.5);
+        assert!(result.token_id < 8, "token_id must be in vocab range");
+    }
+
+    #[test]
+    fn test_position_advances_per_step() {
+        // Each step() call must increment position by exactly 1
+        let mut model = tiny_model();
+        let params = SamplingParams {
+            temperature: 0.0,
+            ..Default::default()
+        };
+        let mut gen = Generator::new(&mut model, params);
+        gen.tokens.push(1); // seed one token so step() has something to work with
+        gen.position = 1;
+
+        for expected_pos in 2..=5 {
+            gen.step(0.5);
+            assert_eq!(
+                gen.position(),
+                expected_pos,
+                "position should be {expected_pos} after step"
+            );
+        }
+    }
 }
