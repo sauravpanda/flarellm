@@ -173,6 +173,34 @@ pub trait ComputeBackend: Send + Sync {
         }
         output
     }
+
+    /// Batched matrix-vector multiply: apply the same weight matrix to each row of the input.
+    ///
+    /// For each batch item `b` in `0..batch`:
+    ///   `output[b * out_rows .. (b+1) * out_rows] = weight × input[b * in_cols .. (b+1) * in_cols]`
+    ///
+    /// - `weight`: f32 matrix `[out_rows × in_cols]`, row-major
+    /// - `input`:  f32 batch  `[batch × in_cols]`, row-major
+    /// - Returns:  f32 result `[batch × out_rows]`, row-major
+    ///
+    /// GPU backends override this for a single kernel dispatch;
+    /// the default implementation loops over batch items and calls `matvec`.
+    fn batched_matmul(
+        &self,
+        weight: &[f32],
+        input: &[f32],
+        out_rows: usize,
+        in_cols: usize,
+        batch: usize,
+    ) -> Vec<f32> {
+        let mut output = vec![0.0f32; batch * out_rows];
+        for b in 0..batch {
+            let in_row = &input[b * in_cols..(b + 1) * in_cols];
+            let out_row = matvec(weight, in_row, out_rows, in_cols);
+            output[b * out_rows..(b + 1) * out_rows].copy_from_slice(&out_row);
+        }
+        output
+    }
 }
 
 /// Default CPU compute backend. Uses optimized scalar loops.
@@ -585,7 +613,7 @@ impl Model {
                     .collect()
             };
 
-            // Q/K/V projections, biases, RoPE — one token at a time
+            // Q/K/V projections: single batched dispatch per matrix, then per-token bias+RoPE.
             let mut q_batch = vec![0.0f32; seq_len * q_dim];
             {
                 let wq: Vec<f32> = self.weights.layers[layer_idx].wq.data().to_vec();
@@ -604,11 +632,21 @@ impl Model {
                     .as_ref()
                     .map(|t| t.data().to_vec());
 
+                // Three GPU dispatches instead of 3 × seq_len individual matvec calls.
+                let q_proj = self
+                    .backend
+                    .batched_matmul(&wq, &normed_batch, q_dim, dim, seq_len);
+                let k_proj = self
+                    .backend
+                    .batched_matmul(&wk, &normed_batch, kv_dim, dim, seq_len);
+                let v_proj = self
+                    .backend
+                    .batched_matmul(&wv, &normed_batch, kv_dim, dim, seq_len);
+
                 for t in 0..seq_len {
-                    let normed = &normed_batch[t * dim..(t + 1) * dim];
-                    let mut q = self.backend.matvec(&wq, normed, q_dim, dim);
-                    let mut k = self.backend.matvec(&wk, normed, kv_dim, dim);
-                    let mut v = self.backend.matvec(&wv, normed, kv_dim, dim);
+                    let mut q = q_proj[t * q_dim..(t + 1) * q_dim].to_vec();
+                    let mut k = k_proj[t * kv_dim..(t + 1) * kv_dim].to_vec();
+                    let mut v = v_proj[t * kv_dim..(t + 1) * kv_dim].to_vec();
 
                     if let Some(ref b) = q_bias {
                         for (qi, &bi) in q.iter_mut().zip(b.iter()) {
