@@ -225,6 +225,35 @@ pub trait ComputeBackend: Send + Sync {
             })
             .collect()
     }
+
+    /// Apply RoPE to every token in `inp` (laid out as `[seq_len × num_heads × head_dim]`).
+    ///
+    /// Token `t` gets position `start_pos + t`.  Returns a new buffer of the same shape.
+    ///
+    /// GPU backends override this for a single kernel dispatch;
+    /// the default loops over tokens and calls `apply_rope`.
+    fn batched_rope(
+        &self,
+        inp: &[f32],
+        num_heads: usize,
+        head_dim: usize,
+        seq_len: usize,
+        start_pos: usize,
+        theta: f32,
+    ) -> Vec<f32> {
+        let stride = num_heads * head_dim;
+        let mut output = inp.to_vec();
+        for t in 0..seq_len {
+            apply_rope(
+                &mut output[t * stride..(t + 1) * stride],
+                num_heads,
+                head_dim,
+                start_pos + t,
+                theta,
+            );
+        }
+        output
+    }
 }
 
 /// Default CPU compute backend. Uses optimized scalar loops.
@@ -668,34 +697,59 @@ impl Model {
                     .backend
                     .batched_matmul(&wv, &normed_batch, kv_dim, dim, seq_len);
 
-                for t in 0..seq_len {
-                    let mut q = q_proj[t * q_dim..(t + 1) * q_dim].to_vec();
-                    let mut k = k_proj[t * kv_dim..(t + 1) * kv_dim].to_vec();
-                    let mut v = v_proj[t * kv_dim..(t + 1) * kv_dim].to_vec();
-
-                    if let Some(ref b) = q_bias {
-                        for (qi, &bi) in q.iter_mut().zip(b.iter()) {
+                // Apply biases in-place (CPU broadcast, cheap; rare in most models).
+                let mut q_proj = q_proj;
+                let mut k_proj = k_proj;
+                let mut v_proj = v_proj;
+                if let Some(ref b) = q_bias {
+                    for t in 0..seq_len {
+                        let row = &mut q_proj[t * q_dim..(t + 1) * q_dim];
+                        for (qi, &bi) in row.iter_mut().zip(b.iter()) {
                             *qi += bi;
                         }
                     }
-                    if let Some(ref b) = k_bias {
-                        for (ki, &bi) in k.iter_mut().zip(b.iter()) {
+                }
+                if let Some(ref b) = k_bias {
+                    for t in 0..seq_len {
+                        let row = &mut k_proj[t * kv_dim..(t + 1) * kv_dim];
+                        for (ki, &bi) in row.iter_mut().zip(b.iter()) {
                             *ki += bi;
                         }
                     }
-                    if let Some(ref b) = v_bias {
-                        for (vi, &bi) in v.iter_mut().zip(b.iter()) {
+                }
+                if let Some(ref b) = v_bias {
+                    for t in 0..seq_len {
+                        let row = &mut v_proj[t * kv_dim..(t + 1) * kv_dim];
+                        for (vi, &bi) in row.iter_mut().zip(b.iter()) {
                             *vi += bi;
                         }
                     }
+                }
 
-                    // RoPE at absolute position t (position within the prompt)
-                    apply_rope(&mut q, num_heads, head_dim, t, config.rope_theta);
-                    apply_rope(&mut k, num_kv_heads, head_dim, t, config.rope_theta);
+                // RoPE: single GPU dispatch instead of 2 × seq_len CPU calls.
+                let q_roped = self.backend.batched_rope(
+                    &q_proj,
+                    num_heads,
+                    head_dim,
+                    seq_len,
+                    0,
+                    config.rope_theta,
+                );
+                let k_roped = self.backend.batched_rope(
+                    &k_proj,
+                    num_kv_heads,
+                    head_dim,
+                    seq_len,
+                    0,
+                    config.rope_theta,
+                );
 
-                    q_batch[t * q_dim..(t + 1) * q_dim].copy_from_slice(&q);
-                    k_all[layer_idx][t * kv_dim..(t + 1) * kv_dim].copy_from_slice(&k);
-                    v_all[layer_idx][t * kv_dim..(t + 1) * kv_dim].copy_from_slice(&v);
+                q_batch.copy_from_slice(&q_roped);
+                for t in 0..seq_len {
+                    k_all[layer_idx][t * kv_dim..(t + 1) * kv_dim]
+                        .copy_from_slice(&k_roped[t * kv_dim..(t + 1) * kv_dim]);
+                    v_all[layer_idx][t * kv_dim..(t + 1) * kv_dim]
+                        .copy_from_slice(&v_proj[t * kv_dim..(t + 1) * kv_dim]);
                 }
             }
 
