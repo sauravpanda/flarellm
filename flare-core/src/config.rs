@@ -90,6 +90,26 @@ impl Default for ModelConfig {
 mod tests {
     use super::*;
 
+    fn tiny_config() -> ModelConfig {
+        // vocab=100 hidden=4 intermediate=8 layers=1 heads=2 kv_heads=1 head_dim=2
+        // embed=400 per_layer=152 output=400 → total=952
+        ModelConfig {
+            architecture: Architecture::Llama,
+            vocab_size: 100,
+            hidden_dim: 4,
+            intermediate_dim: 8,
+            num_layers: 1,
+            num_heads: 2,
+            num_kv_heads: 1,
+            head_dim: 2,
+            max_seq_len: 128,
+            rope_theta: 10000.0,
+            rms_norm_eps: 1e-5,
+            attn_logit_softcap: 0.0,
+            final_logit_softcap: 0.0,
+        }
+    }
+
     #[test]
     fn test_memory_estimates() {
         let config = ModelConfig::default();
@@ -106,5 +126,62 @@ mod tests {
         // Should be in the tens of MB range
         assert!(kv_mem > 10_000_000);
         assert!(kv_mem < 200_000_000);
+    }
+
+    #[test]
+    fn test_estimate_param_count_tiny_model() {
+        // Manually computed: embed=400, per_layer=152, output=400 → 952
+        // per_layer: attn_qkv=4*(2+2)*2=32, attn_out=2*2*4=16, ffn=3*4*8=96, norms=2*4=8
+        let config = tiny_config();
+        assert_eq!(config.estimate_param_count(), 952);
+    }
+
+    #[test]
+    fn test_architecture_equality() {
+        assert_eq!(Architecture::Llama, Architecture::Llama);
+        assert_eq!(Architecture::Qwen2, Architecture::Qwen2);
+        assert_eq!(Architecture::Mistral, Architecture::Mistral);
+        assert_eq!(Architecture::Phi3, Architecture::Phi3);
+        assert_eq!(Architecture::Gemma2, Architecture::Gemma2);
+        assert_ne!(Architecture::Llama, Architecture::Gemma2);
+    }
+
+    #[test]
+    fn test_architecture_clone() {
+        let arch = Architecture::Phi3;
+        let cloned = arch;
+        assert_eq!(arch, cloned);
+    }
+
+    #[test]
+    fn test_default_softcap_zero() {
+        let config = ModelConfig::default();
+        assert_eq!(config.attn_logit_softcap, 0.0);
+        assert_eq!(config.final_logit_softcap, 0.0);
+    }
+
+    #[test]
+    fn test_kv_cache_zero_seq_len() {
+        let config = tiny_config();
+        assert_eq!(config.estimate_kv_cache_memory(0, 8.0), 0);
+    }
+
+    #[test]
+    fn test_kv_cache_one_token() {
+        // layers=1, kv_heads=1, head_dim=2, seq_len=1, bits=8
+        // kv_per_layer=2*1*1*2=4 elements, total=4, bytes=(4*8/8)=4
+        let config = tiny_config();
+        assert_eq!(config.estimate_kv_cache_memory(1, 8.0), 4);
+    }
+
+    #[test]
+    fn test_weight_memory_scales_with_bits() {
+        let config = tiny_config();
+        let mem8 = config.estimate_weight_memory(8.0);
+        let mem16 = config.estimate_weight_memory(16.0);
+        // 16-bit should be exactly 2× 8-bit
+        assert_eq!(mem16, mem8 * 2);
+        // 8-bit should equal param count (1 byte per param)
+        assert_eq!(mem8, config.estimate_param_count());
     }
 }
