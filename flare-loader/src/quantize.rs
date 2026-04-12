@@ -357,6 +357,49 @@ pub fn dequant_q5k_block(block: &[u8], output: &mut [f32; 256]) {
     }
 }
 
+/// Dequantize a Q2_K block: 256 weights.
+///
+/// Layout (84 bytes total, matches llama.cpp `block_q2_K`):
+/// - `qs[64]`:     2-bit quantized values — 4 weights per byte (256 / 4 = 64)
+/// - `scales[16]`: packed 4-bit scale + 4-bit min for each 16-weight super-block
+///                 (256 / 16 = 16 super-blocks → 8 bytes of scale nibbles + 8 bytes of min nibbles)
+///                 Layout: bytes 0..7 = low nibbles of scales, bytes 8..15 = low nibbles of mins,
+///                 high nibbles of bytes 0..7 carry the high nibble of the min, and vice-versa.
+///                 Actually (llama.cpp block_q2_K): `scales[16]` where
+///                 - scale[i] (0..15) lower 4 bits = sub-block scale
+///                 - scale[i] upper 4 bits = sub-block min
+/// - `d[2]`:       f16 overall delta
+/// - `dmin[2]`:    f16 overall min delta
+///
+/// Reconstruction for weight i:
+/// - sub = i / 16  (which of the 16 super-blocks)
+/// - scale_nibble = scales[sub] & 0x0F
+/// - min_nibble   = scales[sub] >> 4
+/// - q2 = (qs[i/4] >> (2*(i%4))) & 0x3  → value in {0,1,2,3}
+/// - output[i] = d * scale_nibble * q2 - dmin * min_nibble
+pub fn dequant_q2k_block(block: &[u8], output: &mut [f32; 256]) {
+    if block.len() < 84 {
+        for v in output.iter_mut() {
+            *v = 0.0;
+        }
+        return;
+    }
+
+    let qs = &block[0..64];
+    let scales = &block[64..80];
+    let d = f16_to_f32(u16::from_le_bytes([block[80], block[81]]));
+    let dmin = f16_to_f32(u16::from_le_bytes([block[82], block[83]]));
+
+    for i in 0..256usize {
+        let sub = i / 16;
+        let scale_nibble = (scales[sub] & 0x0F) as f32;
+        let min_nibble = (scales[sub] >> 4) as f32;
+        let shift = (i % 4) * 2;
+        let q2 = ((qs[i / 4] >> shift) & 0x3) as f32;
+        output[i] = d * scale_nibble * q2 - dmin * min_nibble;
+    }
+}
+
 /// Convert f16 (as u16 bits) to f32.
 pub fn f16_to_f32(bits: u16) -> f32 {
     let sign = ((bits >> 15) & 1) as u32;
@@ -577,6 +620,64 @@ mod tests {
             assert!(
                 (output[i] - 1.0).abs() < 1e-4,
                 "expected 1.0 at {i}, got {}",
+                output[i]
+            );
+        }
+    }
+
+    #[test]
+    fn test_dequant_q2k_zeroed() {
+        // All-zero block: all weights should be 0.0
+        let block = vec![0u8; 84];
+        let mut output = [1.0f32; 256];
+        dequant_q2k_block(&block, &mut output);
+        for (i, &val) in output.iter().enumerate() {
+            assert!(
+                val.abs() < 1e-5,
+                "q2k zeroed: expected 0.0 at {i}, got {val}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_dequant_q2k_short_block() {
+        // Too-short block should zero-fill
+        let block = vec![0u8; 10];
+        let mut output = [1.0f32; 256];
+        dequant_q2k_block(&block, &mut output);
+        assert!(output.iter().all(|&v| v == 0.0));
+    }
+
+    #[test]
+    fn test_dequant_q2k_nonzero() {
+        // Build a block where output = d * scale * q2 - dmin * min.
+        //
+        // Strategy: set dmin=0, d=1.0, scale nibble=2 for all sub-blocks, q2=1 for all weights.
+        // Expected: output[i] = 1.0 * 2.0 * 1.0 - 0.0 = 2.0 for all i.
+        //
+        // Block layout:
+        //   qs[0..64]: q2=1 for all 256 weights → each byte = 0x55 (01 repeated 4×)
+        //   scales[64..80]: scale nibble=2, min nibble=0 → each byte = 0x02
+        //   d at [80..82]: f16 1.0 = 0x3C00 → [0x00, 0x3C]
+        //   dmin at [82..84]: f16 0.0 = 0x0000 → [0x00, 0x00]
+        let mut block = vec![0u8; 84];
+        for i in 0..64 {
+            block[i] = 0x55; // q2=1 for all 4 weights per byte
+        }
+        for i in 64..80 {
+            block[i] = 0x02; // scale nibble=2, min nibble=0
+        }
+        block[80] = 0x00;
+        block[81] = 0x3C; // f16 1.0 for d
+                          // dmin stays 0x0000
+
+        let mut output = [0.0f32; 256];
+        dequant_q2k_block(&block, &mut output);
+
+        for i in 0..256 {
+            assert!(
+                (output[i] - 2.0).abs() < 1e-4,
+                "q2k nonzero: expected 2.0 at {i}, got {}",
                 output[i]
             );
         }
