@@ -877,6 +877,7 @@ impl FlareEngine {
     ///   (token) => { out += token; }
     /// );
     /// ```
+    #[allow(clippy::too_many_arguments)]
     #[wasm_bindgen]
     pub fn generate_stream_with_params(
         &mut self,
@@ -901,11 +902,7 @@ impl FlareEngine {
             repeat_penalty,
         );
         let mut count = 0u32;
-        loop {
-            let token_id = match self.next_token() {
-                Some(id) => id,
-                None => break,
-            };
+        while let Some(token_id) = self.next_token() {
             if let Some(vocab) = &self.gguf_vocab {
                 let token_str = vocab.decode(&[token_id]);
                 let _ = on_token.call1(&JsValue::NULL, &JsValue::from_str(&token_str));
