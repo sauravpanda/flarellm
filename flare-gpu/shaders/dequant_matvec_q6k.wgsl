@@ -1,6 +1,7 @@
-// Fused Q6_K dequantize + matrix-vector multiply on GPU.
+// Fused Q6_K dequantize + batched matrix-vector multiply on GPU.
 //
-// Computes: output[row] = Σ_j  dequant(raw[row, j]) * vec[j]
+// Computes: output[b * num_rows + row] = Σ_j  dequant(raw[row, j]) * vec[b * in_cols + j]
+// for each batch item b ∈ [0, batch_size) and output row ∈ [0, num_rows).
 //
 // Q6_K block layout (210 bytes per block, 256 weights per block):
 //   bytes   0-127: ql[128] — lower 4 bits of 6-bit weights (two interleaved groups of 64)
@@ -23,18 +24,18 @@
 //       q4 =  (ql_b >> 4)  | (((qh_b >> 6) & 3) << 4) − 32
 //       is = l / 16
 //       sc1..sc4 = sign_extend(scales[sc_off+is+{0,2,4,6}])
-//       acc += d*sc1*q1 * vec[b*256 + y_off+l]
-//            + d*sc2*q2 * vec[b*256 + y_off+l+32]
-//            + d*sc3*q3 * vec[b*256 + y_off+l+64]
-//            + d*sc4*q4 * vec[b*256 + y_off+l+96]
+//       acc += d*sc1*q1 * vec[batch*in_cols + y_off+l]
+//            + d*sc2*q2 * vec[batch*in_cols + y_off+l+32]
+//            + d*sc3*q3 * vec[batch*in_cols + y_off+l+64]
+//            + d*sc4*q4 * vec[batch*in_cols + y_off+l+96]
 //
-// One workgroup per output row. 64 threads stride across blocks;
+// One workgroup per (output row, batch item). 64 threads stride across blocks;
 // a tree reduction over workgroup-shared memory accumulates partial sums.
 //
 // Bindings (standard 4-entry layout: 2 read-only, 1 read-write, 1 uniform):
 //   binding 0: raw    — packed Q6_K weight data [num_rows * num_blocks_per_row * 210 bytes, padded]
-//   binding 1: vec    — f32 input vector        [num_blocks_per_row * 256]
-//   binding 2: output — f32 result              [num_rows]
+//   binding 1: vec    — f32 input matrix        [batch_size * num_blocks_per_row * 256]
+//   binding 2: output — f32 result              [batch_size * num_rows]
 //   binding 3: params — uniform
 
 @group(0) @binding(0) var<storage, read> raw: array<u32>;
@@ -44,6 +45,7 @@
 struct Params {
     num_rows:           u32,
     num_blocks_per_row: u32,
+    batch_size:         u32,
 }
 @group(0) @binding(3) var<uniform> params: Params;
 
@@ -65,12 +67,14 @@ fn dequant_matvec_q6k(
     @builtin(local_invocation_id) lid: vec3<u32>,
     @builtin(workgroup_id)        wid: vec3<u32>,
 ) {
-    let row = wid.x;
-    if row >= params.num_rows {
+    let row   = wid.x;
+    let batch = wid.y;
+    if row >= params.num_rows || batch >= params.batch_size {
         return;
     }
 
     let tid = lid.x;
+    let in_cols = params.num_blocks_per_row * 256u;
     var acc: f32 = 0.0;
 
     // Each thread strides across blocks in this row (64-thread stride).
@@ -82,8 +86,8 @@ fn dequant_matvec_q6k(
 
         // Byte offset for this block's start in the raw data (210 bytes per block).
         let bb = (row * params.num_blocks_per_row + b) * 210u;
-        // Start position in the input vector (256 elements per block).
-        let vec_base = b * 256u;
+        // Start position in the input matrix for this batch item (256 elements per block).
+        let vec_base = batch * in_cols + b * 256u;
 
         // d at bytes 208-209 of this block (LE f16).
         let d_packed = read_byte(bb + 208u) | (read_byte(bb + 209u) << 8u);
@@ -142,6 +146,6 @@ fn dequant_matvec_q6k(
     workgroupBarrier();
 
     if tid == 0u {
-        output[row] = partials[0u];
+        output[batch * params.num_rows + row] = partials[0u];
     }
 }

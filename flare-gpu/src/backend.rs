@@ -513,8 +513,9 @@ impl WebGpuBackend {
         input: &[f32],
         num_rows: usize,
         num_blocks_per_row: usize,
+        batch: usize,
     ) -> Vec<f32> {
-        let output_size = num_rows as u64 * 4;
+        let output_size = num_rows as u64 * batch as u64 * 4;
 
         let raw_buf = self.pool.get_storage(&self.device, &self.queue, raw_bytes);
         let vec_buf = self
@@ -522,7 +523,7 @@ impl WebGpuBackend {
             .get_storage(&self.device, &self.queue, bytemuck::cast_slice(input));
         let out_buf = self.pool.get_output(&self.device, output_size);
 
-        let params: [u32; 2] = [num_rows as u32, num_blocks_per_row as u32];
+        let params: [u32; 3] = [num_rows as u32, num_blocks_per_row as u32, batch as u32];
         let params_buf =
             self.pool
                 .get_uniform(&self.device, &self.queue, bytemuck::cast_slice(&params));
@@ -541,7 +542,7 @@ impl WebGpuBackend {
                 self.dispatch_and_readback(
                     &cached.pipeline,
                     &bind_group,
-                    [num_rows as u32, 1, 1],
+                    [num_rows as u32, batch as u32, 1],
                     &out_buf,
                     output_size,
                 )
@@ -574,8 +575,9 @@ impl WebGpuBackend {
         input: &[f32],
         num_rows: usize,
         num_blocks_per_row: usize,
+        batch: usize,
     ) -> Vec<f32> {
-        let output_size = num_rows as u64 * 4;
+        let output_size = num_rows as u64 * batch as u64 * 4;
 
         // Q4_0 blocks are 18 bytes — pad to next multiple of 4 for wgpu.
         #[allow(clippy::manual_is_multiple_of)]
@@ -591,7 +593,7 @@ impl WebGpuBackend {
             .get_storage(&self.device, &self.queue, bytemuck::cast_slice(input));
         let out_buf = self.pool.get_output(&self.device, output_size);
 
-        let params: [u32; 2] = [num_rows as u32, num_blocks_per_row as u32];
+        let params: [u32; 3] = [num_rows as u32, num_blocks_per_row as u32, batch as u32];
         let params_buf =
             self.pool
                 .get_uniform(&self.device, &self.queue, bytemuck::cast_slice(&params));
@@ -610,7 +612,7 @@ impl WebGpuBackend {
                 self.dispatch_and_readback(
                     &cached.pipeline,
                     &bind_group,
-                    [num_rows as u32, 1, 1],
+                    [num_rows as u32, batch as u32, 1],
                     &out_buf,
                     output_size,
                 )
@@ -640,8 +642,9 @@ impl WebGpuBackend {
         input: &[f32],
         num_rows: usize,
         num_blocks_per_row: usize,
+        batch: usize,
     ) -> Vec<f32> {
-        let output_size = num_rows as u64 * 4;
+        let output_size = num_rows as u64 * batch as u64 * 4;
 
         let raw_buf = self.pool.get_storage(&self.device, &self.queue, raw_bytes);
         let vec_buf = self
@@ -649,7 +652,7 @@ impl WebGpuBackend {
             .get_storage(&self.device, &self.queue, bytemuck::cast_slice(input));
         let out_buf = self.pool.get_output(&self.device, output_size);
 
-        let params: [u32; 2] = [num_rows as u32, num_blocks_per_row as u32];
+        let params: [u32; 3] = [num_rows as u32, num_blocks_per_row as u32, batch as u32];
         let params_buf =
             self.pool
                 .get_uniform(&self.device, &self.queue, bytemuck::cast_slice(&params));
@@ -668,7 +671,7 @@ impl WebGpuBackend {
                 self.dispatch_and_readback(
                     &cached.pipeline,
                     &bind_group,
-                    [num_rows as u32, 1, 1],
+                    [num_rows as u32, batch as u32, 1],
                     &out_buf,
                     output_size,
                 )
@@ -698,8 +701,9 @@ impl WebGpuBackend {
         input: &[f32],
         num_rows: usize,
         num_blocks_per_row: usize,
+        batch: usize,
     ) -> Vec<f32> {
-        let output_size = num_rows as u64 * 4;
+        let output_size = num_rows as u64 * batch as u64 * 4;
 
         let raw_buf = self.pool.get_storage(&self.device, &self.queue, raw_bytes);
         let vec_buf = self
@@ -707,7 +711,7 @@ impl WebGpuBackend {
             .get_storage(&self.device, &self.queue, bytemuck::cast_slice(input));
         let out_buf = self.pool.get_output(&self.device, output_size);
 
-        let params: [u32; 2] = [num_rows as u32, num_blocks_per_row as u32];
+        let params: [u32; 3] = [num_rows as u32, num_blocks_per_row as u32, batch as u32];
         let params_buf =
             self.pool
                 .get_uniform(&self.device, &self.queue, bytemuck::cast_slice(&params));
@@ -726,7 +730,7 @@ impl WebGpuBackend {
                 self.dispatch_and_readback(
                     &cached.pipeline,
                     &bind_group,
-                    [num_rows as u32, 1, 1],
+                    [num_rows as u32, batch as u32, 1],
                     &out_buf,
                     output_size,
                 )
@@ -755,8 +759,9 @@ impl WebGpuBackend {
         input: &[f32],
         num_rows: usize,
         num_blocks_per_row: usize,
+        batch: usize,
     ) -> Vec<f32> {
-        let output_size = num_rows as u64 * 4;
+        let output_size = num_rows as u64 * batch as u64 * 4;
 
         let raw_buf = self.pool.get_storage(&self.device, &self.queue, raw_bytes);
         let vec_buf = self
@@ -764,7 +769,7 @@ impl WebGpuBackend {
             .get_storage(&self.device, &self.queue, bytemuck::cast_slice(input));
         let out_buf = self.pool.get_output(&self.device, output_size);
 
-        let params: [u32; 2] = [num_rows as u32, num_blocks_per_row as u32];
+        let params: [u32; 3] = [num_rows as u32, num_blocks_per_row as u32, batch as u32];
         let params_buf =
             self.pool
                 .get_uniform(&self.device, &self.queue, bytemuck::cast_slice(&params));
@@ -783,7 +788,7 @@ impl WebGpuBackend {
                 self.dispatch_and_readback(
                     &cached.pipeline,
                     &bind_group,
-                    [num_rows as u32, 1, 1],
+                    [num_rows as u32, batch as u32, 1],
                     &out_buf,
                     output_size,
                 )
@@ -812,8 +817,9 @@ impl WebGpuBackend {
         input: &[f32],
         num_rows: usize,
         num_blocks_per_row: usize,
+        batch: usize,
     ) -> Vec<f32> {
-        let output_size = num_rows as u64 * 4;
+        let output_size = num_rows as u64 * batch as u64 * 4;
 
         let raw_buf = self.pool.get_storage(&self.device, &self.queue, raw_bytes);
         let vec_buf = self
@@ -821,7 +827,7 @@ impl WebGpuBackend {
             .get_storage(&self.device, &self.queue, bytemuck::cast_slice(input));
         let out_buf = self.pool.get_output(&self.device, output_size);
 
-        let params: [u32; 2] = [num_rows as u32, num_blocks_per_row as u32];
+        let params: [u32; 3] = [num_rows as u32, num_blocks_per_row as u32, batch as u32];
         let params_buf =
             self.pool
                 .get_uniform(&self.device, &self.queue, bytemuck::cast_slice(&params));
@@ -840,7 +846,7 @@ impl WebGpuBackend {
                 self.dispatch_and_readback(
                     &cached.pipeline,
                     &bind_group,
-                    [num_rows as u32, 1, 1],
+                    [num_rows as u32, batch as u32, 1],
                     &out_buf,
                     output_size,
                 )
@@ -995,8 +1001,9 @@ impl WebGpuBackend {
         input: &[f32],
         num_rows: usize,
         num_blocks_per_row: usize,
+        batch: usize,
     ) -> Vec<f32> {
-        let output_size = num_rows as u64 * 4;
+        let output_size = num_rows as u64 * batch as u64 * 4;
 
         // Q6_K blocks are 210 bytes — pad to next multiple of 4 for wgpu.
         #[allow(clippy::manual_is_multiple_of)]
@@ -1012,7 +1019,7 @@ impl WebGpuBackend {
             .get_storage(&self.device, &self.queue, bytemuck::cast_slice(input));
         let out_buf = self.pool.get_output(&self.device, output_size);
 
-        let params: [u32; 2] = [num_rows as u32, num_blocks_per_row as u32];
+        let params: [u32; 3] = [num_rows as u32, num_blocks_per_row as u32, batch as u32];
         let params_buf =
             self.pool
                 .get_uniform(&self.device, &self.queue, bytemuck::cast_slice(&params));
@@ -1031,7 +1038,7 @@ impl WebGpuBackend {
                 self.dispatch_and_readback(
                     &cached.pipeline,
                     &bind_group,
-                    [num_rows as u32, 1, 1],
+                    [num_rows as u32, batch as u32, 1],
                     &out_buf,
                     output_size,
                 )
@@ -1860,64 +1867,43 @@ impl ComputeBackend for WebGpuBackend {
     }
 
     fn batched_dequant_matmul(&self, weight: &RawWeight, input: &[f32], batch: usize) -> Vec<f32> {
-        let weights_per_block = weight.format.weights_per_block();
-        let in_cols = weight.blocks_per_row * weights_per_block;
         let num_rows = weight.num_rows;
-        let mut out = Vec::with_capacity(batch * num_rows);
 
-        // Compute per-row block size in bytes to slice raw weight data per row.
-        let row_bytes = weight.data.len() / num_rows;
-
-        for b in 0..batch {
-            let vec_slice = &input[b * in_cols..(b + 1) * in_cols];
-            let row_result = match weight.format {
-                WeightFormat::Q4_1 => self.dequant_matvec_q4_1(
-                    &weight.data,
-                    vec_slice,
-                    num_rows,
-                    weight.blocks_per_row,
-                ),
-                WeightFormat::Q8_1 => self.dequant_matvec_q8_1(
-                    &weight.data,
-                    vec_slice,
-                    num_rows,
-                    weight.blocks_per_row,
-                ),
-                WeightFormat::Q4_0 => self.dequant_matvec_q4_0(
-                    &weight.data,
-                    vec_slice,
-                    num_rows,
-                    weight.blocks_per_row,
-                ),
-                WeightFormat::Q2K => self.dequant_matvec_q2k(
-                    &weight.data,
-                    vec_slice,
-                    num_rows,
-                    weight.blocks_per_row,
-                ),
-                WeightFormat::Q4K => self.dequant_matvec_q4k(
-                    &weight.data,
-                    vec_slice,
-                    num_rows,
-                    weight.blocks_per_row,
-                ),
-                WeightFormat::Q5K => self.dequant_matvec_q5k(
-                    &weight.data,
-                    vec_slice,
-                    num_rows,
-                    weight.blocks_per_row,
-                ),
-                WeightFormat::Q6K => self.dequant_matvec_q6k(
-                    &weight.data,
-                    vec_slice,
-                    num_rows,
-                    weight.blocks_per_row,
-                ),
-            };
-            let _ = row_bytes; // suppress unused warning
-            out.extend_from_slice(&row_result);
+        match weight.format {
+            WeightFormat::Q4_1 => self.dequant_matvec_q4_1(
+                &weight.data,
+                input,
+                num_rows,
+                weight.blocks_per_row,
+                batch,
+            ),
+            WeightFormat::Q8_1 => self.dequant_matvec_q8_1(
+                &weight.data,
+                input,
+                num_rows,
+                weight.blocks_per_row,
+                batch,
+            ),
+            WeightFormat::Q4_0 => self.dequant_matvec_q4_0(
+                &weight.data,
+                input,
+                num_rows,
+                weight.blocks_per_row,
+                batch,
+            ),
+            WeightFormat::Q2K => {
+                self.dequant_matvec_q2k(&weight.data, input, num_rows, weight.blocks_per_row, batch)
+            }
+            WeightFormat::Q4K => {
+                self.dequant_matvec_q4k(&weight.data, input, num_rows, weight.blocks_per_row, batch)
+            }
+            WeightFormat::Q5K => {
+                self.dequant_matvec_q5k(&weight.data, input, num_rows, weight.blocks_per_row, batch)
+            }
+            WeightFormat::Q6K => {
+                self.dequant_matvec_q6k(&weight.data, input, num_rows, weight.blocks_per_row, batch)
+            }
         }
-        out
     }
 }
 
@@ -2091,7 +2077,7 @@ mod tests {
         let input = vec![1.0f32; 256];
 
         let backend = pollster::block_on(WebGpuBackend::new()).expect("GPU backend unavailable");
-        let result = backend.dequant_matvec_q2k(&raw, &input, 1, 1);
+        let result = backend.dequant_matvec_q2k(&raw, &input, 1, 1, 1);
 
         assert_eq!(result.len(), 1, "expected 1 output");
         // 256 weights each = 1.0 * 1 * 1 - 0 = 1.0; dot with [1]*256 = 256.0
@@ -2132,7 +2118,7 @@ mod tests {
         let input = vec![1.0f32; 256];
 
         let backend = pollster::block_on(WebGpuBackend::new()).expect("GPU backend unavailable");
-        let result = backend.dequant_matvec_q2k(&raw, &input, 1, 1);
+        let result = backend.dequant_matvec_q2k(&raw, &input, 1, 1, 1);
 
         assert_eq!(result.len(), 1, "expected 1 output");
         // weight = 1*2*2 - 1*1 = 3.0; dot with [1]*256 = 768.0
@@ -2165,7 +2151,7 @@ mod tests {
         let input = vec![1.0f32; 32];
 
         let backend = pollster::block_on(WebGpuBackend::new()).expect("GPU backend unavailable");
-        let result = backend.dequant_matvec_q4_0(&raw, &input, 1, 1);
+        let result = backend.dequant_matvec_q4_0(&raw, &input, 1, 1, 1);
 
         assert_eq!(result.len(), 1, "expected 1 output");
         assert!(
@@ -2198,7 +2184,7 @@ mod tests {
         let input = vec![1.0f32; 32];
 
         let backend = pollster::block_on(WebGpuBackend::new()).expect("GPU backend unavailable");
-        let result = backend.dequant_matvec_q4_0(&raw, &input, 1, 1);
+        let result = backend.dequant_matvec_q4_0(&raw, &input, 1, 1, 1);
 
         assert_eq!(result.len(), 1, "expected 1 output");
         // 16 pairs: w_lo = 2.0, w_hi = 1.0 → dot = 16*2 + 16*1 = 48
@@ -2233,7 +2219,7 @@ mod tests {
         let input = vec![1.0f32; 32];
 
         let backend = pollster::block_on(WebGpuBackend::new()).expect("GPU backend unavailable");
-        let result = backend.dequant_matvec_q4_1(&raw, &input, 1, 1);
+        let result = backend.dequant_matvec_q4_1(&raw, &input, 1, 1, 1);
 
         assert_eq!(result.len(), 1, "expected 1 output");
         // weights: [2,1]*16 → dot with [1]*32 = 16*2 + 16*1 = 48
@@ -2267,7 +2253,7 @@ mod tests {
         let input = vec![1.0f32; 32];
 
         let backend = pollster::block_on(WebGpuBackend::new()).expect("GPU backend unavailable");
-        let result = backend.dequant_matvec_q4_1(&raw, &input, 2, 1);
+        let result = backend.dequant_matvec_q4_1(&raw, &input, 2, 1, 1);
 
         assert_eq!(result.len(), 2, "expected 2 outputs");
         for (i, &v) in result.iter().enumerate() {
@@ -2303,7 +2289,7 @@ mod tests {
         let input = vec![1.0f32; 32];
 
         let backend = pollster::block_on(WebGpuBackend::new()).expect("GPU backend unavailable");
-        let result = backend.dequant_matvec_q8_1(&raw, &input, 1, 1);
+        let result = backend.dequant_matvec_q8_1(&raw, &input, 1, 1, 1);
 
         assert_eq!(result.len(), 1, "expected 1 output");
         // Σ i for i=0..31 = 31*32/2 = 496
@@ -2336,7 +2322,7 @@ mod tests {
         let input = vec![1.0f32; 32];
 
         let backend = pollster::block_on(WebGpuBackend::new()).expect("GPU backend unavailable");
-        let result = backend.dequant_matvec_q8_1(&raw, &input, 1, 1);
+        let result = backend.dequant_matvec_q8_1(&raw, &input, 1, 1, 1);
 
         assert_eq!(result.len(), 1, "expected 1 output");
         // 32 × (-1.0) = -32.0
@@ -2426,7 +2412,7 @@ mod tests {
         let input = [1.0f32; 256];
 
         let backend = pollster::block_on(WebGpuBackend::new()).expect("GPU backend unavailable");
-        let result = backend.dequant_matvec_q4k(&raw, &input, 1, 1);
+        let result = backend.dequant_matvec_q4k(&raw, &input, 1, 1, 1);
 
         assert_eq!(result.len(), 1, "expected one output value");
         // 128 weights of 2.0 and 128 of 1.0, all dotted with 1.0
@@ -2460,7 +2446,7 @@ mod tests {
         let input = [1.0f32; 256];
 
         let backend = pollster::block_on(WebGpuBackend::new()).expect("GPU backend unavailable");
-        let result = backend.dequant_matvec_q4k(&raw, &input, num_rows, 1);
+        let result = backend.dequant_matvec_q4k(&raw, &input, num_rows, 1, 1);
 
         assert_eq!(result.len(), num_rows);
         for (i, &v) in result.iter().enumerate() {
@@ -2735,7 +2721,7 @@ mod tests {
         let expected = 128.0 * 2.0 + 128.0 * 1.0; // 384.0
 
         let backend = pollster::block_on(WebGpuBackend::new()).expect("GPU backend unavailable");
-        let result = backend.dequant_matvec_q5k(&raw, &input, 1, 1);
+        let result = backend.dequant_matvec_q5k(&raw, &input, 1, 1, 1);
 
         assert_eq!(result.len(), 1, "expected one output value");
         assert!(
@@ -2768,7 +2754,7 @@ mod tests {
         let input = [1.0f32; 256];
 
         let backend = pollster::block_on(WebGpuBackend::new()).expect("GPU backend unavailable");
-        let result = backend.dequant_matvec_q5k(&raw, &input, num_rows, 1);
+        let result = backend.dequant_matvec_q5k(&raw, &input, num_rows, 1, 1);
 
         assert_eq!(result.len(), num_rows);
         for (i, &v) in result.iter().enumerate() {
@@ -2809,7 +2795,7 @@ mod tests {
 
         let input = [1.0f32; 256];
         let backend = pollster::block_on(WebGpuBackend::new()).expect("GPU backend unavailable");
-        let result = backend.dequant_matvec_q6k(&raw, &input, 1, 1);
+        let result = backend.dequant_matvec_q6k(&raw, &input, 1, 1, 1);
 
         assert_eq!(result.len(), 1, "expected one output value");
         assert!(
@@ -2848,7 +2834,7 @@ mod tests {
         let input = [1.0f32; 256];
 
         let backend = pollster::block_on(WebGpuBackend::new()).expect("GPU backend unavailable");
-        let result = backend.dequant_matvec_q6k(&raw, &input, num_rows, 1);
+        let result = backend.dequant_matvec_q6k(&raw, &input, num_rows, 1, 1);
 
         assert_eq!(result.len(), num_rows);
         for (i, &v) in result.iter().enumerate() {

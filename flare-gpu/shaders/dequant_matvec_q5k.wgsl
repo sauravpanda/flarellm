@@ -1,6 +1,7 @@
-// Fused Q5_K dequantize + matrix-vector multiply on GPU.
+// Fused Q5_K dequantize + batched matrix-vector multiply on GPU.
 //
-// Computes: output[row] = Σ_j  dequant(raw[row, j]) * vec[j]
+// Computes: output[b * num_rows + row] = Σ_j  dequant(raw[row, j]) * vec[b * in_cols + j]
+// for each batch item b ∈ [0, batch_size) and output row ∈ [0, num_rows).
 //
 // Q5_K block layout (176 bytes = 44 u32 per block, 256 weights per block):
 //   u32[0]      : d (f16 LE, lower 16 bits) + dmin (f16 LE, upper 16 bits)
@@ -23,13 +24,13 @@
 //   w[j]     = d * sc[j/32]   * q_lo - dmin * mn[j/32]
 //   w[j+128] = d * sc[j/32+4] * q_hi - dmin * mn[j/32+4]
 //
-// One workgroup per output row. 64 threads stride across blocks in the row;
+// One workgroup per (output row, batch item). 64 threads stride across blocks;
 // a tree reduction over workgroup-shared memory accumulates partial sums.
 //
 // Bindings (standard 4-entry layout: 2 read-only, 1 read-write, 1 uniform):
 //   binding 0: raw    — packed Q5_K weight data [num_rows * num_blocks_per_row * 44]
-//   binding 1: vec    — f32 input vector        [num_blocks_per_row * 256]
-//   binding 2: output — f32 result              [num_rows]
+//   binding 1: vec    — f32 input matrix        [batch_size * num_blocks_per_row * 256]
+//   binding 2: output — f32 result              [batch_size * num_rows]
 //   binding 3: params — uniform
 
 @group(0) @binding(0) var<storage, read> raw: array<u32>;
@@ -39,6 +40,7 @@
 struct Params {
     num_rows:           u32,
     num_blocks_per_row: u32,
+    batch_size:         u32,
 }
 @group(0) @binding(3) var<uniform> params: Params;
 
@@ -50,12 +52,14 @@ fn dequant_matvec_q5k(
     @builtin(local_invocation_id) lid: vec3<u32>,
     @builtin(workgroup_id)        wid: vec3<u32>,
 ) {
-    let row = wid.x;
-    if row >= params.num_rows {
+    let row   = wid.x;
+    let batch = wid.y;
+    if row >= params.num_rows || batch >= params.batch_size {
         return;
     }
 
     let tid = lid.x;
+    let in_cols = params.num_blocks_per_row * 256u;
     var acc: f32 = 0.0;
 
     // Each thread strides across blocks in this row (64-thread stride).
@@ -67,8 +71,8 @@ fn dequant_matvec_q5k(
 
         // Base offset for this block in the raw u32 array (44 u32 per block).
         let raw_base = (row * params.num_blocks_per_row + b) * 44u;
-        // Corresponding start position in the input vector (256 elements per block).
-        let vec_base = b * 256u;
+        // Corresponding start position in the input matrix for this batch item.
+        let vec_base = batch * in_cols + b * 256u;
 
         // d and dmin packed as two f16 in the first u32.
         let dm   = unpack2x16float(raw[raw_base]);
@@ -140,6 +144,6 @@ fn dequant_matvec_q5k(
     workgroupBarrier();
 
     if tid == 0u {
-        output[row] = partials[0u];
+        output[batch * params.num_rows + row] = partials[0u];
     }
 }
