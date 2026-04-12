@@ -162,6 +162,68 @@ pub fn dequant_q5_0_block(block: &[u8], output: &mut [f32; 32]) {
     }
 }
 
+/// Dequantize a Q3_K block: 256 weights.
+/// Layout (110 bytes): `hmask[32]` + `qs[64]` + `scales[12]` + `d[2]`
+///
+/// - `hmask[32]`: high bit (bit 2) for each weight — 8 packed per byte
+/// - `qs[64]`:    low 2 bits — 4 packed per byte with the interleaved scheme below
+/// - `scales[12]`: 8 sub-block scales (6-bit, offset -32) packed via llama.cpp transform
+/// - `d[2]`:      f16 overall delta
+///
+/// Weight layout (matches llama.cpp `dequantize_row_q3_K`):
+///
+/// The 256 weights are split into two groups of 128 (outer loop, `oi = 0,1`).
+/// Within each group, four sub-blocks of 32 (`si = 0..3`) process `qs[oi*32..(oi+1)*32]`
+/// with bit shift `si*2`. The hmask bitmask cycles: `m = 1 << (oi*4 + si)`.
+///
+/// High-bit rule: `q -= if (hmask[l] & m) == 0 { 4 } else { 0 }` → range [-4, 3].
+pub fn dequant_q3k_block(block: &[u8], output: &mut [f32; 256]) {
+    if block.len() < 110 {
+        for v in output.iter_mut() {
+            *v = 0.0;
+        }
+        return;
+    }
+
+    let hmask = &block[0..32]; // high bit: 8 per byte
+    let qs = &block[32..96]; // low 2 bits: 4 per byte (64 bytes total)
+    let scales_raw = &block[96..108]; // 12 bytes → 8 scales
+    let d = f16_to_f32(u16::from_le_bytes([block[108], block[109]]));
+
+    // Decode 8 scales from 12 bytes using the llama.cpp kmask transform.
+    // b[0..11] = scales_raw bytes.
+    // scales[i] (0..7) are 6-bit values, then subtract 32 for centering.
+    let b = scales_raw;
+    let scales: [i32; 8] = [
+        ((b[0] & 0x0F) | (((b[8] >> 4) & 3) << 4)) as i32 - 32,
+        ((b[1] & 0x0F) | (((b[9] >> 4) & 3) << 4)) as i32 - 32,
+        ((b[2] & 0x0F) | (((b[10] >> 4) & 3) << 4)) as i32 - 32,
+        ((b[3] & 0x0F) | (((b[11] >> 4) & 3) << 4)) as i32 - 32,
+        ((b[4] & 0x0F) | (((b[8] >> 6) & 3) << 4)) as i32 - 32,
+        ((b[5] & 0x0F) | (((b[9] >> 6) & 3) << 4)) as i32 - 32,
+        ((b[6] & 0x0F) | (((b[10] >> 6) & 3) << 4)) as i32 - 32,
+        ((b[7] & 0x0F) | (((b[11] >> 6) & 3) << 4)) as i32 - 32,
+    ];
+
+    let mut m: u8 = 1; // sliding hmask bit selector
+    for oi in 0..2usize {
+        // each outer iteration covers 128 weights and 32 qs bytes
+        let qs_group = &qs[oi * 32..(oi + 1) * 32];
+        for si in 0..4usize {
+            let shift = si * 2;
+            let scale_idx = oi * 4 + si;
+            let d_scale = d * scales[scale_idx] as f32;
+            for l in 0..32usize {
+                let low2 = (qs_group[l] >> shift) & 3;
+                let sub = if (hmask[l] & m) != 0 { 0i32 } else { 4 };
+                let q = low2 as i32 - sub;
+                output[oi * 128 + si * 32 + l] = d_scale * q as f32;
+            }
+            m <<= 1;
+        }
+    }
+}
+
 /// Dequantize a Q6_K block: 256 weights.
 /// Layout: `ql[128]` + `qh[64]` + `scales[16]` + `d[2]` = 210 bytes.
 ///
@@ -440,6 +502,83 @@ mod tests {
         dequant_q8_0_block(&block, &mut output);
         for (i, &val) in output.iter().enumerate() {
             assert!((val - i as f32).abs() < 1e-3, "mismatch at {i}");
+        }
+    }
+
+    #[test]
+    fn test_dequant_q3k_zeroed() {
+        // Q3_K block with all zeros should produce all zeros
+        let block = vec![0u8; 110];
+        let mut output = [1.0f32; 256];
+        dequant_q3k_block(&block, &mut output);
+        for (i, &val) in output.iter().enumerate() {
+            assert!(
+                val.abs() < 1e-5,
+                "q3k dequant: expected ~0.0 at {i}, got {val}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_dequant_q3k_short_block() {
+        // Too-short block should zero-fill (graceful bounds check)
+        let block = vec![0u8; 10];
+        let mut output = [1.0f32; 256];
+        dequant_q3k_block(&block, &mut output);
+        assert!(output.iter().all(|&v| v == 0.0));
+    }
+
+    #[test]
+    fn test_dequant_q3k_nonzero() {
+        // Build a block where all 256 weights equal 1.
+        //
+        // For q=1: we need low2=1 and hmask bit SET (no subtraction of 4).
+        // low2=1 means qs byte = 0x55 (01 repeated 4×).
+        // hmask bit set for all weights: hmask byte = 0xFF for all 32 bytes.
+        // scales: set all 8 to 33 raw (33-32=1 as signed).
+        //   scale[0..3] = (b[0..3] & 0x0F) | (((b[8..11] >> 4) & 3) << 4) = 33
+        //   Simplest: b[0..3] = 1 (lower 4 bits = 1), b[8..11] upper nibble = 2 →
+        //   Actually: (b[i]&0x0F) = 1 and (b[i+8]>>4)&3 = 2 → scale = 1|(2<<4) = 33 ✓
+        //   scale[4..7] = (b[4..7] & 0x0F) | (((b[8..11] >> 6) & 3) << 4) = 33
+        //   (b[i+4]&0x0F) = 1 and (b[i+8]>>6)&3 = 2 → scale = 1|(2<<4) = 33 ✓
+        //   So b[0..7] = 1, b[8..11] = 0x20 (upper nibble 0x2, lower nibble 0).
+        //   But we also need (b[i+8]>>4)&3 = 2 (bits 4-5 of b[i+8]).
+        //   b[8] = 0x20: bits[4..5] = 0x2>>0 = 0x20 >> 4 & 3 = (0x20>>4)&3 = 2 ✓
+        //                bits[6..7] = (0x20>>6)&3 = 0. Not 2.
+        //   Try b[8..11] = 0x21: upper nibble bits[4..5]=2, bits[6..7]=0. scale[0..3]=33, scale[4..7]=1.
+        //   Use b[8..11] = 0xA0: bits[4..5]=(0xA0>>4)&3=0x0A&3=2, bits[6..7]=(0xA0>>6)&3=0x02&3=2.
+        //   → scale[0..3]=33, scale[4..7]=33 ✓
+        //
+        // d = 1.0 (f16: 0x3C00 → bytes [0x00, 0x3C])
+        let mut block = vec![0u8; 110];
+        // hmask[0..32]: all 0xFF → hmask bit set for all weights
+        for i in 0..32 {
+            block[i] = 0xFF;
+        }
+        // qs[32..96]: all 0x55 → low2=1 for all positions
+        for i in 32..96 {
+            block[i] = 0x55;
+        }
+        // scales_raw[96..108]: b[0..7]=1, b[8..11]=0xA0 → all 8 scales = 33 → signed = 1
+        for i in 0..8 {
+            block[96 + i] = 1;
+        }
+        for i in 0..4 {
+            block[96 + 8 + i] = 0xA0;
+        }
+        // d at bytes 108..110
+        block[108] = 0x00;
+        block[109] = 0x3C; // f16 1.0
+
+        let mut output = [0.0f32; 256];
+        dequant_q3k_block(&block, &mut output);
+
+        for i in 0..256 {
+            assert!(
+                (output[i] - 1.0).abs() < 1e-4,
+                "expected 1.0 at {i}, got {}",
+                output[i]
+            );
         }
     }
 }
