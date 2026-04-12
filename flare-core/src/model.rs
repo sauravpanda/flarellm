@@ -545,6 +545,10 @@ impl Model {
         let offset = token_id as usize * dim;
         let mut x = Tensor::from_vec(embed_data[offset..offset + dim].to_vec(), &[dim]).unwrap();
 
+        // When raw quantized weights are available and the backend supports fused
+        // dequant+matvec, use that path to avoid dequantizing to f32 for every token.
+        let use_raw = self.backend.supports_dequant_matmul() && self.raw_weights.is_some();
+
         // Process each transformer layer
         for layer_idx in 0..config.num_layers {
             let layer = &self.weights.layers[layer_idx];
@@ -555,12 +559,26 @@ impl Model {
                 self.backend
                     .rmsnorm_vec(x.data(), layer.attn_norm.data(), config.rms_norm_eps);
 
-            // QKV projections
-            let mut q_data =
+            // QKV projections — use fused dequant+matvec when raw weights are loaded.
+            let mut q_data = if use_raw {
+                let rw = &self.raw_weights.as_ref().unwrap()[layer_idx];
+                self.backend.batched_dequant_matmul(&rw.wq, &normed, 1)
+            } else {
                 self.backend
-                    .matvec(layer.wq.data(), &normed, num_heads * head_dim, dim);
-            let mut k_data = self.backend.matvec(layer.wk.data(), &normed, kv_dim, dim);
-            let mut v_data = self.backend.matvec(layer.wv.data(), &normed, kv_dim, dim);
+                    .matvec(layer.wq.data(), &normed, num_heads * head_dim, dim)
+            };
+            let mut k_data = if use_raw {
+                let rw = &self.raw_weights.as_ref().unwrap()[layer_idx];
+                self.backend.batched_dequant_matmul(&rw.wk, &normed, 1)
+            } else {
+                self.backend.matvec(layer.wk.data(), &normed, kv_dim, dim)
+            };
+            let mut v_data = if use_raw {
+                let rw = &self.raw_weights.as_ref().unwrap()[layer_idx];
+                self.backend.batched_dequant_matmul(&rw.wv, &normed, 1)
+            } else {
+                self.backend.matvec(layer.wv.data(), &normed, kv_dim, dim)
+            };
 
             // Add attention biases if present (Qwen2)
             if let Some(bias) = &layer.attn_q_bias {
@@ -621,9 +639,13 @@ impl Model {
             };
 
             // Output projection
-            let attn_proj =
+            let attn_proj = if use_raw {
+                let rw = &self.raw_weights.as_ref().unwrap()[layer_idx];
+                self.backend.batched_dequant_matmul(&rw.wo, &attn_output, 1)
+            } else {
                 self.backend
-                    .matvec(layer.wo.data(), &attn_output, dim, num_heads * head_dim);
+                    .matvec(layer.wo.data(), &attn_output, dim, num_heads * head_dim)
+            };
 
             // Gemma 2: apply post-attention RMSNorm before the residual add
             let attn_contrib = if let Some(ref post_norm) = layer.post_attn_norm {
@@ -645,12 +667,20 @@ impl Model {
                     .rmsnorm_vec(x.data(), layer.ffn_norm.data(), config.rms_norm_eps);
 
             // Gate and up projections
-            let gate =
+            let gate = if use_raw {
+                let rw = &self.raw_weights.as_ref().unwrap()[layer_idx];
+                self.backend.batched_dequant_matmul(&rw.w_gate, &normed, 1)
+            } else {
                 self.backend
-                    .matvec(layer.w_gate.data(), &normed, config.intermediate_dim, dim);
-            let up = self
-                .backend
-                .matvec(layer.w_up.data(), &normed, config.intermediate_dim, dim);
+                    .matvec(layer.w_gate.data(), &normed, config.intermediate_dim, dim)
+            };
+            let up = if use_raw {
+                let rw = &self.raw_weights.as_ref().unwrap()[layer_idx];
+                self.backend.batched_dequant_matmul(&rw.w_up, &normed, 1)
+            } else {
+                self.backend
+                    .matvec(layer.w_up.data(), &normed, config.intermediate_dim, dim)
+            };
 
             // Gemma 2 uses GELU activation; Llama / Phi-3 use SiLU
             let ffn_hidden = if config.architecture == Architecture::Gemma2 {
@@ -660,12 +690,18 @@ impl Model {
             };
 
             // Down projection
-            let ffn_out = self.backend.matvec(
-                layer.w_down.data(),
-                &ffn_hidden,
-                dim,
-                config.intermediate_dim,
-            );
+            let ffn_out = if use_raw {
+                let rw = &self.raw_weights.as_ref().unwrap()[layer_idx];
+                self.backend
+                    .batched_dequant_matmul(&rw.w_down, &ffn_hidden, 1)
+            } else {
+                self.backend.matvec(
+                    layer.w_down.data(),
+                    &ffn_hidden,
+                    dim,
+                    config.intermediate_dim,
+                )
+            };
 
             // Gemma 2: apply post-FFN RMSNorm before the residual add
             let ffn_contrib = if let Some(ref post_norm) = layer.post_ffn_norm {
