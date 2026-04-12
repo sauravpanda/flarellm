@@ -171,6 +171,12 @@ pub struct FlareEngine {
     // --- Streaming timing accumulator ---
     /// Timestamp (ms) of the start of the current streaming decode phase.
     stream_decode_start_ms: f64,
+    // --- Stop sequences ---
+    /// Strings that halt generation when they appear in the decoded output.
+    stop_sequences: Vec<String>,
+    /// Decoded text accumulated during the current streaming session, used to
+    /// match against `stop_sequences`.  Cleared at each `begin_stream` call.
+    stream_text_accum: String,
 }
 
 #[wasm_bindgen]
@@ -239,6 +245,8 @@ impl FlareEngine {
             last_decode_ms: 0.0,
             last_tokens_generated: 0,
             stream_decode_start_ms: 0.0,
+            stop_sequences: Vec::new(),
+            stream_text_accum: String::new(),
         })
     }
 
@@ -383,11 +391,15 @@ impl FlareEngine {
     }
 
     /// Reset the KV cache (start a new conversation).
+    ///
+    /// Also clears stop sequences and the internal text accumulator.
     #[wasm_bindgen]
     pub fn reset(&mut self) {
         self.model.reset();
         self.kv_pos = 0;
         self.stream_recent_tokens.clear();
+        self.stop_sequences.clear();
+        self.stream_text_accum.clear();
     }
 
     /// Get the vocabulary size of the loaded model.
@@ -629,6 +641,9 @@ impl FlareEngine {
             ..Default::default()
         };
         let eos = self.eos_token_id;
+        let stop_seqs = &self.stop_sequences;
+        let vocab_ref = &self.gguf_vocab;
+        let mut text_accum = String::new();
         let t0 = now_ms();
         let mut gen = Generator::new(&mut self.model, params);
         let generated = gen.generate(
@@ -636,7 +651,20 @@ impl FlareEngine {
             max_tokens as usize,
             eos,
             || 0.5,
-            |_, _| true,
+            |token_id, _pos| {
+                if !stop_seqs.is_empty() {
+                    if let Some(v) = vocab_ref {
+                        let piece = v.decode(&[token_id]);
+                        text_accum.push_str(&piece);
+                        for seq in stop_seqs.iter() {
+                            if text_accum.ends_with(seq.as_str()) {
+                                return false;
+                            }
+                        }
+                    }
+                }
+                true
+            },
         );
         self.last_prefill_ms = now_ms() - t0;
         self.last_decode_ms = 0.0;
@@ -821,6 +849,8 @@ impl FlareEngine {
         self.stream_recent_tokens.clear();
         self.stream_recent_tokens
             .extend_from_slice(&effective[effective.len() - n..]);
+        // Reset stop-sequence accumulator for this stream.
+        self.stream_text_accum.clear();
     }
 
     /// Generate and return the next token ID, or `undefined` when the stream
@@ -890,6 +920,23 @@ impl FlareEngine {
             return None;
         }
 
+        // Check stop sequences by decoding the current token and appending it to
+        // the accumulated text.  When a match is found the token is withheld (not
+        // returned) so stop-sequence text never reaches the caller.
+        if !self.stop_sequences.is_empty() {
+            if let Some(vocab) = &self.gguf_vocab {
+                let piece = vocab.decode(&[token_id]);
+                self.stream_text_accum.push_str(&piece);
+                for seq in &self.stop_sequences {
+                    if self.stream_text_accum.ends_with(seq.as_str()) {
+                        self.last_decode_ms = now_ms() - self.stream_decode_start_ms;
+                        self.stream_done = true;
+                        return None;
+                    }
+                }
+            }
+        }
+
         self.last_tokens_generated += 1;
         self.last_decode_ms = now_ms() - self.stream_decode_start_ms;
 
@@ -910,6 +957,32 @@ impl FlareEngine {
         self.stream_done
     }
 
+    /// Register a stop sequence.
+    ///
+    /// Generation halts (without emitting the matched tokens) as soon as the
+    /// decoded output ends with `sequence`.  Call once per stop string before
+    /// `begin_stream` or `generate_with_params`.
+    ///
+    /// Stop sequences are cleared by `reset()` or `clear_stop_sequences()`.
+    ///
+    /// ```javascript
+    /// engine.add_stop_sequence("<|im_end|>");
+    /// engine.add_stop_sequence("</s>");
+    /// engine.begin_stream_with_params(promptIds, 200, 0.8, 0.95, 40, 1.1);
+    /// ```
+    #[wasm_bindgen]
+    pub fn add_stop_sequence(&mut self, sequence: &str) {
+        if !sequence.is_empty() {
+            self.stop_sequences.push(sequence.to_string());
+        }
+    }
+
+    /// Remove all registered stop sequences.
+    #[wasm_bindgen]
+    pub fn clear_stop_sequences(&mut self) {
+        self.stop_sequences.clear();
+    }
+
     // -----------------------------------------------------------------------
     // Batch generation (returns all tokens at once)
     // -----------------------------------------------------------------------
@@ -923,6 +996,9 @@ impl FlareEngine {
             temperature: 0.0,
             ..Default::default()
         };
+        let stop_seqs = &self.stop_sequences;
+        let vocab = &self.gguf_vocab;
+        let mut text_accum = String::new();
         let t0 = now_ms();
         let mut gen = Generator::new(&mut self.model, params);
         let result = gen.generate(
@@ -930,7 +1006,20 @@ impl FlareEngine {
             max_tokens as usize,
             self.eos_token_id,
             || 0.5,
-            |_, _| true,
+            |token_id, _pos| {
+                if !stop_seqs.is_empty() {
+                    if let Some(v) = vocab {
+                        let piece = v.decode(&[token_id]);
+                        text_accum.push_str(&piece);
+                        for seq in stop_seqs.iter() {
+                            if text_accum.ends_with(seq.as_str()) {
+                                return false;
+                            }
+                        }
+                    }
+                }
+                true
+            },
         );
         self.last_prefill_ms = now_ms() - t0;
         self.last_decode_ms = 0.0;
@@ -964,6 +1053,9 @@ impl FlareEngine {
             top_k: top_k as usize,
             repeat_penalty,
         };
+        let stop_seqs = &self.stop_sequences;
+        let vocab = &self.gguf_vocab;
+        let mut text_accum = String::new();
         let t0 = now_ms();
         let mut gen = Generator::new(&mut self.model, params);
         // Simple LCG for browser-side RNG (deterministic per call)
@@ -977,7 +1069,20 @@ impl FlareEngine {
             max_tokens as usize,
             self.eos_token_id,
             &mut rng,
-            |_, _| true,
+            |token_id, _pos| {
+                if !stop_seqs.is_empty() {
+                    if let Some(v) = vocab {
+                        let piece = v.decode(&[token_id]);
+                        text_accum.push_str(&piece);
+                        for seq in stop_seqs.iter() {
+                            if text_accum.ends_with(seq.as_str()) {
+                                return false;
+                            }
+                        }
+                    }
+                }
+                true
+            },
         );
         self.last_prefill_ms = now_ms() - t0;
         self.last_decode_ms = 0.0;
@@ -1249,6 +1354,8 @@ impl FlareProgressiveLoader {
             last_decode_ms: 0.0,
             last_tokens_generated: 0,
             stream_decode_start_ms: 0.0,
+            stop_sequences: Vec::new(),
+            stream_text_accum: String::new(),
         })
     }
 }
