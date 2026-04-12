@@ -345,19 +345,6 @@ fn server_busy_error() -> Response {
         .into_response()
 }
 
-fn lock_error_response(err: &str) -> Response {
-    (
-        StatusCode::INTERNAL_SERVER_ERROR,
-        Json(serde_json::json!({
-            "error": {
-                "message": format!("Model lock error: {err}"),
-                "type": "server_error",
-            }
-        })),
-    )
-        .into_response()
-}
-
 async fn non_stream_response(
     model_name: &str,
     req: &ChatCompletionRequest,
