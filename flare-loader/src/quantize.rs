@@ -2847,4 +2847,161 @@ mod tests {
             );
         }
     }
+
+    // ── IQ4_XS extended tests ─────────────────────────────────────────────────
+
+    /// Helper: build an IQ4_XS block (136 bytes) with d=1.0 and all zeroed fields.
+    /// By default: scales_h=0, scales_l=0, qs=0 → ls=0, dl=-32.0, nibble=0→-127.
+    /// Callers override specific fields for each test.
+    fn make_iq4xs_zero_block() -> Vec<u8> {
+        let mut block = vec![0u8; 136];
+        block[0] = 0x00;
+        block[1] = 0x3C; // d = 1.0
+        block
+    }
+
+    #[test]
+    fn test_dequant_iq4xs_max_ls() {
+        // ls_lo=15, ls_hi=3 → ls=63, dl=1*(63-32)=31.0; nibble=8→KVALUES[8]=1 → output=31.0
+        let mut block = make_iq4xs_zero_block();
+        // scales_h bits 1:0 = 3 for ib32=0 → block[2]=0x03
+        block[2] = 0x03;
+        block[3] = 0x00;
+        // scales_l ib32=0 lo nibble=15 → block[4]=0x0F
+        block[4] = 0x0F;
+        // qs for ib32=0 (bytes 8..24) = 0x88 → nibble=8 → KVALUES_IQ4NL[8]=1
+        block[8..24].fill(0x88);
+        let mut output = [0.0f32; 256];
+        dequant_iq4xs_block(&block, &mut output);
+        for (i, &v) in output[..32].iter().enumerate() {
+            assert!(
+                (v - 31.0).abs() < 1e-4,
+                "iq4xs max_ls: weight[{i}] = {v}, expected 31.0"
+            );
+        }
+    }
+
+    #[test]
+    fn test_dequant_iq4xs_scales_h_contribution() {
+        // ls_lo=0, ls_hi=1 → ls=16, dl=1*(16-32)=-16.0; nibble=8→1 → output=-16.0.
+        // Isolates the scales_h contribution independently of ls_lo.
+        let mut block = make_iq4xs_zero_block();
+        // scales_h bits 1:0 = 1 for ib32=0 → block[2]=0x01
+        block[2] = 0x01;
+        block[3] = 0x00;
+        block[8..24].fill(0x88);
+        let mut output = [0.0f32; 256];
+        dequant_iq4xs_block(&block, &mut output);
+        for (i, &v) in output[..32].iter().enumerate() {
+            assert!(
+                (v - (-16.0)).abs() < 1e-4,
+                "iq4xs scales_h: weight[{i}] = {v}, expected -16.0"
+            );
+        }
+    }
+
+    #[test]
+    fn test_dequant_iq4xs_extreme_nibbles() {
+        // nibble=0 → KVALUES_IQ4NL[0]=-127; nibble=15 → KVALUES_IQ4NL[15]=113.
+        // dl=1.0 (ls=33). One qs byte = 0xF0: lo nibble=0 (→-127), hi nibble=15 (→113).
+        let mut block = make_iq4xs_zero_block();
+        // ls=33: scales_h bits 1:0=2 → block[2]=0x02; scales_l ib32=0 lo=1 → block[4]=0x01
+        block[2] = 0x02;
+        block[4] = 0x01;
+        // qs[8] = 0xF0: lo=0 (−127), hi=15 (113)
+        block[8] = 0xF0;
+        block[9..24].fill(0x88);
+        let mut output = [0.0f32; 256];
+        dequant_iq4xs_block(&block, &mut output);
+        assert!(
+            (output[0] - (-127.0)).abs() < 1e-4,
+            "iq4xs extreme lo nibble: got {}, expected -127.0",
+            output[0]
+        );
+        assert!(
+            (output[16] - 113.0).abs() < 1e-4,
+            "iq4xs extreme hi nibble: got {}, expected 113.0",
+            output[16]
+        );
+    }
+
+    #[test]
+    fn test_dequant_iq4xs_scales_l_odd_ib32() {
+        // For odd ib32=1, ls_lo comes from the hi nibble of scales_l byte block[4].
+        // scales_h=0x000A: ib32=0 ls_hi=2 (ls=32→dl=0), ib32=1 ls_hi=2.
+        // block[4]=0x10: ib32=0 lo=0, ib32=1 hi=1 → ib32=1 ls=33, dl=1.0.
+        let mut block = make_iq4xs_zero_block();
+        block[2] = 0x0A; // scales_h low byte: ib32=0 bits=2, ib32=1 bits=2
+        block[3] = 0x00;
+        block[4] = 0x10; // ib32=0 lo=0; ib32=1 hi=1
+        block[8..24].fill(0x88); // ib32=0 qs (dl=0 → output 0)
+        block[24..40].fill(0x88); // ib32=1 qs → nibble=8 → KVALUES[8]=1
+        let mut output = [0.0f32; 256];
+        dequant_iq4xs_block(&block, &mut output);
+        // ib32=0: dl=0 → 0.0
+        for (i, &v) in output[..32].iter().enumerate() {
+            assert!(
+                v.abs() < 1e-5,
+                "iq4xs odd ib32=0: weight[{i}] = {v}, expected 0.0"
+            );
+        }
+        // ib32=1: dl=1.0 → 1.0
+        for (i, &v) in output[32..64].iter().enumerate() {
+            assert!(
+                (v - 1.0).abs() < 1e-5,
+                "iq4xs odd ib32=1: weight[{i}] = {v}, expected 1.0"
+            );
+        }
+    }
+
+    #[test]
+    fn test_dequant_iq4xs_last_ib32() {
+        // ib32=7: ls_lo from hi-nibble of block[7], ls_hi from scales_h bits 15:14.
+        // scales_h=0xAAAA → all ib32 ls_hi=2; ib32=0..6 ls_lo=0 → ls=32, dl=0.
+        // block[7]=0xF0 → ib32=7 ls_lo=15 → ls=47, dl=1*(47-32)=15.0.
+        let mut block = make_iq4xs_zero_block();
+        block[2] = 0xAA; // scales_h low byte
+        block[3] = 0xAA; // scales_h high byte → all ib32 ls_hi=2
+        block[7] = 0xF0; // ib32=7 ls_lo = hi nibble = 15
+        block[120..136].fill(0x88); // ib32=7 qs: nibble=8 → 1
+        let mut output = [0.0f32; 256];
+        dequant_iq4xs_block(&block, &mut output);
+        // ib32=0..6: ls=32, dl=0 → 0.0
+        for (i, &v) in output[..224].iter().enumerate() {
+            assert!(
+                v.abs() < 1e-5,
+                "iq4xs last ib32 rest: weight[{i}] = {v}, expected 0.0"
+            );
+        }
+        // ib32=7: dl=15.0 → 15.0 * 1 = 15.0
+        for (i, &v) in output[224..256].iter().enumerate() {
+            assert!(
+                (v - 15.0).abs() < 1e-4,
+                "iq4xs last ib32: weight[{i}] = {v}, expected 15.0"
+            );
+        }
+    }
+
+    #[test]
+    fn test_dequant_iq4xs_two_nibbles_per_byte() {
+        // One qs byte encodes two weights: lo nibble → output[j], hi nibble → output[j+16].
+        // dl=1.0 (ls=33). qs[8]=0x98: lo=8→KVALUES[8]=1; hi=9→KVALUES[9]=13.
+        let mut block = make_iq4xs_zero_block();
+        block[2] = 0x02;
+        block[4] = 0x01; // ls=33, dl=1.0 for ib32=0
+        block[8] = 0x98; // lo nibble=8, hi nibble=9
+        block[9..24].fill(0x88);
+        let mut output = [0.0f32; 256];
+        dequant_iq4xs_block(&block, &mut output);
+        assert!(
+            (output[0] - 1.0).abs() < 1e-5,
+            "iq4xs two_nibbles lo: got {}, expected 1.0",
+            output[0]
+        );
+        assert!(
+            (output[16] - 13.0).abs() < 1e-4,
+            "iq4xs two_nibbles hi: got {}, expected 13.0",
+            output[16]
+        );
+    }
 }
