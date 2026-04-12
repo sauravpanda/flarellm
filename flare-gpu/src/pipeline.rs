@@ -63,7 +63,7 @@ impl PipelineCache {
     /// Returns an empty `Vec` if no driver cache is active or if the backend
     /// does not produce any data (e.g. the driver manages its own cache).
     /// The bytes can be stored and later fed back via
-    /// [`WebGpuBackend::new_with_cache`] to skip recompilation on next start.
+    /// `WebGpuBackend::new_with_cache` to skip recompilation on next start.
     pub fn get_data(&self) -> Vec<u8> {
         self.wgpu_cache
             .as_ref()
