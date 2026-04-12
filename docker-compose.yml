@@ -1,0 +1,13 @@
+services:
+  flare-server:
+    build: .
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./models:/models:ro
+    environment:
+      - MODEL_FILE=${MODEL_FILE:-}
+      - MODEL_NAME=${MODEL_NAME:-flare-local}
+      - HOST=0.0.0.0
+      - PORT=8080
+    restart: unless-stopped
