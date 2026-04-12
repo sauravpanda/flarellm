@@ -79,7 +79,7 @@ impl QuantFormat {
             QuantFormat::F32 => 4,
             QuantFormat::F16 | QuantFormat::BF16 => 2,
             QuantFormat::Q4_0 | QuantFormat::IQ4NL => 18, // 2 (scale) + 16 (nibbles)
-            QuantFormat::Q4_1 => 20, // 2 (scale) + 2 (min) + 16 (nibbles)
+            QuantFormat::Q4_1 => 20,                      // 2 (scale) + 2 (min) + 16 (nibbles)
             QuantFormat::Q5_0 => 22, // 2 (scale) + 4 (high bits) + 16 (nibbles)
             QuantFormat::Q5_1 => 24, // 2 (scale) + 2 (min) + 4 (high bits) + 16 (nibbles)
             QuantFormat::Q8_0 => 34, // 2 (scale) + 32 (int8)
