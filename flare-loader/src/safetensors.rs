@@ -546,4 +546,57 @@ mod tests {
         assert_eq!(data.len(), 8);
         assert_eq!(data, raw);
     }
+
+    #[test]
+    fn test_dtype_element_size() {
+        assert_eq!(Dtype::F32.element_size(), 4);
+        assert_eq!(Dtype::F16.element_size(), 2);
+        assert_eq!(Dtype::BF16.element_size(), 2);
+    }
+
+    #[test]
+    fn test_dtype_to_quant_format() {
+        use crate::QuantFormat;
+        assert_eq!(Dtype::F32.to_quant_format(), QuantFormat::F32);
+        assert_eq!(Dtype::F16.to_quant_format(), QuantFormat::F16);
+        assert_eq!(Dtype::BF16.to_quant_format(), QuantFormat::F16);
+    }
+
+    #[test]
+    fn test_dtype_display() {
+        assert_eq!(format!("{}", Dtype::F32), "F32");
+        assert_eq!(format!("{}", Dtype::F16), "F16");
+        assert_eq!(format!("{}", Dtype::BF16), "BF16");
+    }
+
+    #[test]
+    fn test_safe_tensor_info_numel() {
+        let make_info = |shape: Vec<usize>| SafeTensorInfo {
+            name: "x".into(),
+            dtype: Dtype::F32,
+            shape,
+            start: 0,
+            end: 0,
+        };
+        // Scalar (empty shape) → numel=1 (max(product,1))
+        assert_eq!(make_info(vec![]).numel(), 1);
+        // 1D
+        assert_eq!(make_info(vec![5]).numel(), 5);
+        // 2D
+        assert_eq!(make_info(vec![2, 3]).numel(), 6);
+        // 3D
+        assert_eq!(make_info(vec![2, 3, 4]).numel(), 24);
+    }
+
+    #[test]
+    fn test_safe_tensor_info_byte_len() {
+        let info = SafeTensorInfo {
+            name: "w".into(),
+            dtype: Dtype::F32,
+            shape: vec![2, 3],
+            start: 10,
+            end: 34, // 24 bytes = 2*3*4
+        };
+        assert_eq!(info.byte_len(), 24);
+    }
 }
