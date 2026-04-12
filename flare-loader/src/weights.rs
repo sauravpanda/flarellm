@@ -693,4 +693,35 @@ mod tests {
         let m: HashMap<String, SafeTensorInfo> = HashMap::new();
         assert!(infer_model_config_from_safetensors(&m).is_err());
     }
+
+    #[test]
+    fn test_infer_config_mha() {
+        // Multi-head attention: num_kv_heads == num_heads (no GQA, like Llama 1/2 7B)
+        let tensors = build_st_tensors(32000, 4096, 11008, 32, 32, 128, 4);
+        let cfg = infer_model_config_from_safetensors(&tensors).unwrap();
+        assert_eq!(cfg.num_heads, 32);
+        assert_eq!(cfg.num_kv_heads, 32, "MHA: kv_heads should equal num_heads");
+        assert_eq!(cfg.head_dim, 128);
+    }
+
+    #[test]
+    fn test_infer_config_missing_q_proj_fails() {
+        // Build tensors but omit q_proj — inference should return an error
+        let mut tensors = build_st_tensors(32000, 4096, 11008, 32, 8, 128, 1);
+        tensors.remove("model.layers.0.self_attn.q_proj.weight");
+        assert!(infer_model_config_from_safetensors(&tensors).is_err());
+    }
+
+    #[test]
+    fn test_infer_config_no_layers_fails() {
+        // Embedding and output present, but no input_layernorm tensors → num_layers=0 → error
+        let mut tensors = HashMap::new();
+        tensors.insert(
+            "model.embed_tokens.weight".into(),
+            make_st_info(vec![32000, 4096]),
+        );
+        tensors.insert("model.norm.weight".into(), make_st_info(vec![4096]));
+        tensors.insert("lm_head.weight".into(), make_st_info(vec![32000, 4096]));
+        assert!(infer_model_config_from_safetensors(&tensors).is_err());
+    }
 }
