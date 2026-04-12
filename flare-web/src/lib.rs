@@ -190,6 +190,38 @@ fn build_metadata_json(gguf: &GgufFile) -> String {
     format!("{{{}}}", pairs.join(","))
 }
 
+/// Compute top-N log-probabilities from a raw logit vector.
+///
+/// Returns an interleaved `Vec<f32>` with `n * 2` elements laid out as
+/// `[token_id_0 as f32, log_prob_0, token_id_1 as f32, log_prob_1, ...]`
+/// sorted by descending log-probability.  If `n == 0` or `logits` is empty,
+/// returns an empty vector.
+fn compute_top_logprobs(logits: &[f32], n: usize) -> Vec<f32> {
+    if n == 0 || logits.is_empty() {
+        return Vec::new();
+    }
+    // Numerically-stable softmax.
+    let max_l = logits.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+    let exps: Vec<f32> = logits.iter().map(|&x| (x - max_l).exp()).collect();
+    let sum: f32 = exps.iter().sum();
+    // log(softmax(x_i)) = x_i - max - log(sum(exp(x_j - max)))
+    let log_sum = sum.ln();
+    let mut candidates: Vec<(u32, f32)> = exps
+        .iter()
+        .enumerate()
+        .map(|(i, &e)| (i as u32, e.ln() - log_sum))
+        .collect();
+    // Sort descending by log-prob.
+    candidates.sort_unstable_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    candidates.truncate(n);
+    let mut out = Vec::with_capacity(n * 2);
+    for (id, lp) in candidates {
+        out.push(id as f32);
+        out.push(lp);
+    }
+    out
+}
+
 /// Flare LLM inference engine, exported to JS.
 ///
 /// Holds a loaded model and runs greedy/sampled token generation.
@@ -270,6 +302,13 @@ pub struct FlareEngine {
     /// Populated by `next_token()` and the batch `generate_*` methods.
     /// Empty before any inference; cleared by `reset()`.
     last_logits: Vec<f32>,
+    // --- Top-N logprobs ---
+    /// How many top log-probability entries to capture after each forward pass.
+    /// 0 = disabled (default).
+    top_logprobs_n: u32,
+    /// Interleaved `[token_id_as_f32, log_prob, ...]` for the last token.
+    /// Length is `top_logprobs_n * 2`. Empty when disabled or before inference.
+    top_logprobs_data: Vec<f32>,
 }
 
 #[wasm_bindgen]
@@ -344,6 +383,8 @@ impl FlareEngine {
             rng_seed: 0x12345678,
             metadata_json,
             last_logits: Vec::new(),
+            top_logprobs_n: 0,
+            top_logprobs_data: Vec::new(),
         })
     }
 
@@ -500,6 +541,7 @@ impl FlareEngine {
         self.stream_text_accum.clear();
         self.rng_seed = 0x12345678;
         self.last_logits.clear();
+        self.top_logprobs_data.clear();
     }
 
     /// Get the vocabulary size of the loaded model.
@@ -1119,6 +1161,11 @@ impl FlareEngine {
         let logits_tensor = self.model.forward(self.stream_last_token, self.stream_pos);
         // Capture raw pre-temperature logits for last_logits() getter.
         self.last_logits = logits_tensor.data().to_vec();
+        // Compute top-N log-probabilities if requested.
+        if self.top_logprobs_n > 0 {
+            self.top_logprobs_data =
+                compute_top_logprobs(&self.last_logits, self.top_logprobs_n as usize);
+        }
         let token_id = if self.stream_params.temperature == 0.0 {
             sampling::sample_greedy(logits_tensor.data())
         } else {
@@ -1394,6 +1441,43 @@ impl FlareEngine {
     }
 
     // -----------------------------------------------------------------------
+    // Top-N log-probabilities API
+    // -----------------------------------------------------------------------
+
+    /// Set how many top log-probability entries to capture after each forward
+    /// pass.  Pass `0` (the default) to disable and save the computation.
+    ///
+    /// When enabled, `top_logprobs` is populated after every `next_token()`
+    /// call and after every token in `generate_stream_with_params`.
+    ///
+    /// # JS example
+    /// ```javascript
+    /// engine.set_top_logprobs(5);
+    /// engine.begin_stream(promptIds, 64);
+    /// while (!engine.stream_done) {
+    ///   engine.next_token();
+    ///   const lp = engine.top_logprobs; // Float32Array [id0, lp0, id1, lp1, ...]
+    /// }
+    /// ```
+    #[wasm_bindgen]
+    pub fn set_top_logprobs(&mut self, n: u32) {
+        self.top_logprobs_n = n;
+        self.top_logprobs_data.clear();
+    }
+
+    /// Interleaved top-N log-probabilities from the last forward pass.
+    ///
+    /// Layout: `[token_id_0 as f32, log_prob_0, token_id_1 as f32, log_prob_1, ...]`
+    /// sorted by descending log-probability.  Length is `top_logprobs_n * 2`.
+    ///
+    /// Returns an empty array if `set_top_logprobs(0)` (default) or before
+    /// any inference has been run.
+    #[wasm_bindgen(getter)]
+    pub fn top_logprobs(&self) -> Vec<f32> {
+        self.top_logprobs_data.clone()
+    }
+
+    // -----------------------------------------------------------------------
     // Performance metrics API
     // -----------------------------------------------------------------------
 
@@ -1662,6 +1746,8 @@ impl FlareProgressiveLoader {
             rng_seed: 0x12345678,
             metadata_json,
             last_logits: Vec::new(),
+            top_logprobs_n: 0,
+            top_logprobs_data: Vec::new(),
         })
     }
 }
