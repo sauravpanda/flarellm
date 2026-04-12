@@ -177,6 +177,10 @@ pub struct FlareEngine {
     /// Decoded text accumulated during the current streaming session, used to
     /// match against `stop_sequences`.  Cleared at each `begin_stream` call.
     stream_text_accum: String,
+    // --- RNG seed ---
+    /// User-configurable LCG seed applied to the next generation call.
+    /// Defaults to `0x12345678`; reset to default by `reset()`.
+    rng_seed: u32,
 }
 
 #[wasm_bindgen]
@@ -247,6 +251,7 @@ impl FlareEngine {
             stream_decode_start_ms: 0.0,
             stop_sequences: Vec::new(),
             stream_text_accum: String::new(),
+            rng_seed: 0x12345678,
         })
     }
 
@@ -392,7 +397,8 @@ impl FlareEngine {
 
     /// Reset the KV cache (start a new conversation).
     ///
-    /// Also clears stop sequences and the internal text accumulator.
+    /// Also clears stop sequences, the internal text accumulator, and
+    /// restores the RNG seed to the default `0x12345678`.
     #[wasm_bindgen]
     pub fn reset(&mut self) {
         self.model.reset();
@@ -400,6 +406,7 @@ impl FlareEngine {
         self.stream_recent_tokens.clear();
         self.stop_sequences.clear();
         self.stream_text_accum.clear();
+        self.rng_seed = 0x12345678;
     }
 
     /// Get the vocabulary size of the loaded model.
@@ -771,7 +778,7 @@ impl FlareEngine {
             temperature: 0.0,
             ..Default::default()
         };
-        self.stream_rng_state = 0x12345678;
+        self.stream_rng_state = self.rng_seed;
         self.begin_stream_impl(prompt_tokens, max_tokens);
     }
 
@@ -821,7 +828,7 @@ impl FlareEngine {
             top_k: top_k as usize,
             repeat_penalty,
         };
-        self.stream_rng_state = 0x12345678;
+        self.stream_rng_state = self.rng_seed;
         self.begin_stream_impl(prompt_tokens, max_tokens);
     }
 
@@ -983,6 +990,28 @@ impl FlareEngine {
         self.stop_sequences.clear();
     }
 
+    /// Set the LCG RNG seed used for the next sampled generation call.
+    ///
+    /// Controls the random state passed to `begin_stream_with_params` and
+    /// `generate_with_params`, enabling reproducible outputs.  The seed is
+    /// applied on the next call and then *not* automatically reset, so the
+    /// same seed will be reused on subsequent calls unless `set_rng_seed` or
+    /// `reset()` is called again.
+    ///
+    /// `reset()` restores the seed to the default `0x12345678`.
+    ///
+    /// ```javascript
+    /// engine.set_rng_seed(42);
+    /// const out1 = engine.generate_text("Hello", 50);
+    /// engine.set_rng_seed(42);
+    /// const out2 = engine.generate_text("Hello", 50);
+    /// // out1 === out2
+    /// ```
+    #[wasm_bindgen]
+    pub fn set_rng_seed(&mut self, seed: u32) {
+        self.rng_seed = seed;
+    }
+
     // -----------------------------------------------------------------------
     // Batch generation (returns all tokens at once)
     // -----------------------------------------------------------------------
@@ -1058,8 +1087,8 @@ impl FlareEngine {
         let mut text_accum = String::new();
         let t0 = now_ms();
         let mut gen = Generator::new(&mut self.model, params);
-        // Simple LCG for browser-side RNG (deterministic per call)
-        let mut state: u32 = 0x12345678;
+        // Simple LCG for browser-side RNG (seeded from self.rng_seed)
+        let mut state: u32 = self.rng_seed;
         let mut rng = move || {
             state = state.wrapping_mul(1664525).wrapping_add(1013904223);
             (state as f32) / (u32::MAX as f32)
@@ -1356,6 +1385,7 @@ impl FlareProgressiveLoader {
             stream_decode_start_ms: 0.0,
             stop_sequences: Vec::new(),
             stream_text_accum: String::new(),
+            rng_seed: 0x12345678,
         })
     }
 }
