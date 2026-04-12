@@ -452,4 +452,105 @@ mod tests {
             assert_eq!(msg.role, expected);
         }
     }
+
+    #[test]
+    fn test_gemma_system_treated_as_user_role() {
+        // Gemma maps both System and User → "user" turn, not "model"
+        let msgs = vec![ChatMessage {
+            role: Role::System,
+            content: "Be concise.".into(),
+        }];
+        let result = ChatTemplate::Gemma.apply(&msgs);
+        assert!(
+            result.contains("<start_of_turn>user\nBe concise.<end_of_turn>"),
+            "Gemma should map System → user turn: {result}"
+        );
+        assert!(
+            !result.contains("<start_of_turn>system"),
+            "Gemma has no system turn tag: {result}"
+        );
+    }
+
+    #[test]
+    fn test_phi3_system_wrapped_with_end_tag() {
+        // Phi-3 wraps system content with <|system|>...<|end|>
+        let msgs = vec![ChatMessage {
+            role: Role::System,
+            content: "You are concise.".into(),
+        }];
+        let result = ChatTemplate::Phi3.apply(&msgs);
+        assert!(
+            result.contains("<|system|>\nYou are concise.<|end|>"),
+            "Phi-3 system wrapping incorrect: {result}"
+        );
+    }
+
+    #[test]
+    fn test_llama3_begin_of_text_appears_once() {
+        // No matter how many messages, BOS should appear exactly once
+        let msgs: Vec<ChatMessage> = (0..5)
+            .map(|i| ChatMessage {
+                role: if i % 2 == 0 {
+                    Role::User
+                } else {
+                    Role::Assistant
+                },
+                content: format!("turn {i}"),
+            })
+            .collect();
+        let result = ChatTemplate::Llama3.apply(&msgs);
+        let count = result.matches("<|begin_of_text|>").count();
+        assert_eq!(
+            count, 1,
+            "<|begin_of_text|> must appear exactly once, found {count}"
+        );
+    }
+
+    #[test]
+    fn test_alpaca_system_not_wrapped_in_instruction() {
+        // Alpaca inlines the system message without "### Instruction:" header
+        let msgs = vec![
+            ChatMessage {
+                role: Role::System,
+                content: "Preamble.".into(),
+            },
+            ChatMessage {
+                role: Role::User,
+                content: "Question?".into(),
+            },
+        ];
+        let result = ChatTemplate::Alpaca.apply(&msgs);
+        // System content appears before the instruction block, not inside it
+        let sys_pos = result.find("Preamble.").unwrap();
+        let inst_pos = result.find("### Instruction:").unwrap();
+        assert!(
+            sys_pos < inst_pos,
+            "System content must come before ### Instruction:"
+        );
+    }
+
+    #[test]
+    fn test_chatml_role_order_preserved() {
+        // ChatML output must keep system < user < assistant order
+        let msgs = vec![
+            ChatMessage {
+                role: Role::System,
+                content: "SYS".into(),
+            },
+            ChatMessage {
+                role: Role::User,
+                content: "USR".into(),
+            },
+            ChatMessage {
+                role: Role::Assistant,
+                content: "AST".into(),
+            },
+        ];
+        let result = ChatTemplate::ChatML.apply(&msgs);
+        let sys_pos = result.find("SYS").unwrap();
+        let usr_pos = result.find("USR").unwrap();
+        let ast_pos = result.find("AST").unwrap();
+        assert!(sys_pos < usr_pos, "system must appear before user");
+        assert!(usr_pos < ast_pos, "user must appear before assistant");
+    }
 }
