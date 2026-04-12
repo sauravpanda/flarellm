@@ -445,4 +445,68 @@ mod tests {
         // Last token should correspond to 'A' = 0x41
         assert_eq!(*ids.last().unwrap(), 0x42); // 1-based byte token index
     }
+
+    #[test]
+    fn test_decode_empty_slice() {
+        let gguf = make_test_gguf();
+        let vocab = GgufVocab::from_gguf(&gguf).unwrap();
+        assert_eq!(vocab.decode(&[]), "");
+    }
+
+    #[test]
+    fn test_decode_token_out_of_bounds() {
+        let gguf = make_test_gguf();
+        let vocab = GgufVocab::from_gguf(&gguf).unwrap();
+        assert_eq!(vocab.decode_token(u32::MAX), None);
+    }
+
+    #[test]
+    fn test_decode_token_valid_id() {
+        let gguf = make_test_gguf();
+        let vocab = GgufVocab::from_gguf(&gguf).unwrap();
+        assert_eq!(vocab.decode_token(0), Some("<unk>"));
+        assert_eq!(vocab.decode_token(1), Some("<s>"));
+    }
+
+    #[test]
+    fn test_encode_token_normal_lookup() {
+        let gguf = make_test_gguf();
+        let vocab = GgufVocab::from_gguf(&gguf).unwrap();
+        assert_eq!(vocab.encode_token("\u{2581}hello"), Some(3));
+        assert_eq!(vocab.encode_token("\u{2581}world"), Some(4));
+    }
+
+    #[test]
+    fn test_token_type_from_unknown_id_is_normal() {
+        // Any unrecognized token type ID should fall back to Normal
+        assert_eq!(TokenType::from_id(0), TokenType::Normal);
+        assert_eq!(TokenType::from_id(99), TokenType::Normal);
+    }
+
+    #[test]
+    fn test_decode_skips_out_of_bounds_ids() {
+        let gguf = make_test_gguf();
+        let vocab = GgufVocab::from_gguf(&gguf).unwrap();
+        // Mixing valid and out-of-bounds IDs: out-of-bounds are silently skipped
+        let result = vocab.decode(&[3, 9999, 4]);
+        assert_eq!(result, " hello world");
+    }
+
+    #[test]
+    fn test_no_bos_eos_when_absent() {
+        let mut metadata = HashMap::new();
+        metadata.insert(
+            "tokenizer.ggml.tokens".into(),
+            MetadataValue::Array(vec![MetadataValue::String("<unk>".into())]),
+        );
+        let gguf = GgufFile {
+            version: 3,
+            metadata,
+            tensors: Vec::new(),
+            tensor_data_offset: 0,
+        };
+        let vocab = GgufVocab::from_gguf(&gguf).unwrap();
+        assert_eq!(vocab.bos_id, None);
+        assert_eq!(vocab.eos_id, None);
+    }
 }
