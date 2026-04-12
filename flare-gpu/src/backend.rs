@@ -40,6 +40,7 @@ const DEQUANT_MATVEC_Q4K_SHADER: &str = include_str!("../shaders/dequant_matvec_
 const DEQUANT_MATVEC_Q5K_SHADER: &str = include_str!("../shaders/dequant_matvec_q5k.wgsl");
 const DEQUANT_MATVEC_Q6K_SHADER: &str = include_str!("../shaders/dequant_matvec_q6k.wgsl");
 const DEQUANT_MATVEC_IQ4NL_SHADER: &str = include_str!("../shaders/dequant_matvec_iq4nl.wgsl");
+const DEQUANT_MATVEC_IQ4XS_SHADER: &str = include_str!("../shaders/dequant_matvec_iq4xs.wgsl");
 const DEQUANT_MATVEC_IQ2XXS_SHADER: &str = include_str!("../shaders/dequant_matvec_iq2xxs.wgsl");
 const DEQUANT_MATVEC_IQ2XS_SHADER: &str = include_str!("../shaders/dequant_matvec_iq2xs.wgsl");
 const DEQUANT_MATVEC_IQ3XXS_SHADER: &str = include_str!("../shaders/dequant_matvec_iq3xxs.wgsl");
@@ -800,6 +801,66 @@ impl WebGpuBackend {
             "dequant_matvec_iq4nl",
             DEQUANT_MATVEC_IQ4NL_SHADER,
             "dequant_matvec_iq4nl",
+            &layout_entries,
+            |cached| {
+                let bind_group =
+                    self.make_bind_group(cached, &raw_buf, &vec_buf, &out_buf, &params_buf);
+                self.dispatch_and_readback(
+                    &cached.pipeline,
+                    &bind_group,
+                    [num_rows as u32, batch as u32, 1],
+                    &out_buf,
+                    output_size,
+                )
+            },
+        );
+
+        self.pool.return_storage(raw_buf);
+        self.pool.return_storage(vec_buf);
+        self.pool.return_output(out_buf);
+        self.pool.return_uniform(params_buf);
+
+        result
+    }
+
+    /// Fused IQ4_XS dequantize + batched matrix-vector multiply.
+    ///
+    /// IQ4_XS (GGUF type 22) is a 4.25-bit quantization format using the 16-entry
+    /// KVALUES_IQ4NL lookup table with sub-group scales.  Each super-block is 136 bytes
+    /// (2 bytes f16 scale + 2 bytes scales_h + 4 bytes scales_l + 128 bytes qs)
+    /// covering 256 weights.
+    ///
+    /// - `raw_bytes`: packed GGUF tensor data — `num_rows × num_blocks_per_row × 136` bytes
+    /// - `input`: f32 input matrix of length `batch × num_blocks_per_row × 256`
+    /// - Returns `batch × num_rows` f32 dot products
+    pub fn dequant_matvec_iq4xs(
+        &self,
+        raw_bytes: &[u8],
+        input: &[f32],
+        num_rows: usize,
+        num_blocks_per_row: usize,
+        batch: usize,
+    ) -> Vec<f32> {
+        let output_size = num_rows as u64 * batch as u64 * 4;
+
+        // 136 bytes is u32-aligned — no padding needed.
+        let raw_buf = self.pool.get_storage(&self.device, &self.queue, raw_bytes);
+        let vec_buf = self
+            .pool
+            .get_storage(&self.device, &self.queue, bytemuck::cast_slice(input));
+        let out_buf = self.pool.get_output(&self.device, output_size);
+
+        let params: [u32; 3] = [num_rows as u32, num_blocks_per_row as u32, batch as u32];
+        let params_buf =
+            self.pool
+                .get_uniform(&self.device, &self.queue, bytemuck::cast_slice(&params));
+
+        let layout_entries = Self::standard_layout();
+        let result = self.cache.with_pipeline(
+            &self.device,
+            "dequant_matvec_iq4xs",
+            DEQUANT_MATVEC_IQ4XS_SHADER,
+            "dequant_matvec_iq4xs",
             &layout_entries,
             |cached| {
                 let bind_group =
@@ -2686,6 +2747,13 @@ impl ComputeBackend for WebGpuBackend {
                 batch,
             ),
             WeightFormat::IQ3XXS => self.dequant_matvec_iq3xxs(
+                &weight.data,
+                input,
+                num_rows,
+                weight.blocks_per_row,
+                batch,
+            ),
+            WeightFormat::IQ4XS => self.dequant_matvec_iq4xs(
                 &weight.data,
                 input,
                 num_rows,
