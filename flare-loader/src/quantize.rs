@@ -1585,6 +1585,193 @@ mod tests {
         assert!(output.iter().all(|&v| v == 0.0));
     }
 
+    /// Extended IQ2_S grid fixture with entries at high indices for qh-path testing.
+    fn iq2s_grid_full_fixture() -> Box<[u64; 1024]> {
+        let mut g = vec![0u64; 1024];
+        // entry 0: all bytes = 8 (default)
+        g[0] = 0x0808080808080808u64;
+        // entry 768 = 0x300 (qh bits 1:0 = 3, qs_lo = 0): all bytes = 4
+        g[768] = 0x0404040404040404u64;
+        // entry 256 = 0x100 (qh bits 1:0 = 1, qs_lo = 0): all bytes = 16
+        g[256] = 0x1010101010101010u64;
+        // entry 512 = 0x200 (qh bits 1:0 = 2, qs_lo = 0): all bytes = 12
+        g[512] = 0x0C0C0C0C0C0C0C0Cu64;
+        Box::new(g.try_into().unwrap())
+    }
+
+    #[test]
+    fn test_dequant_iq2s_high_grid_index_qh() {
+        // Verify 10-bit grid index: grid_idx = qs_lo | (((qh_byte >> (2*l)) & 3) << 8)
+        // Set qh[0] bits 1:0 = 3 → l=0 uses grid_idx = 768 (all bytes = 4)
+        let grid = iq2s_grid_full_fixture();
+        let mut block = vec![0u8; 82];
+        block[0] = 0x00;
+        block[1] = 0x3C; // d = 1.0
+                         // qs_lo[0] = 0 (l=0 of ib32=0)
+                         // qh[0] = 0x03 → bits 1:0 = 3 → grid_hi for l=0 is 3
+        block[66] = 0x03; // qh[0]
+        let mut output = [0.0f32; 256];
+        dequant_iq2s_block(&block, &grid, &mut output);
+        // dl = 1.0*(0.5+0)*0.25 = 0.125; grid[768] bytes = 4; sign = +1
+        let expected_l0 = 0.125f32 * 4.0;
+        for (i, &v) in output[..8].iter().enumerate() {
+            assert!(
+                (v - expected_l0).abs() < 1e-5,
+                "iq2s qh high: l=0 weight[{i}] = {v}, expected {expected_l0}"
+            );
+        }
+        // l=1 uses qh bits 3:2 = 0 → grid_idx = 0 → bytes = 8 → weight = 0.125*8 = 1.0
+        for (i, &v) in output[8..16].iter().enumerate() {
+            assert!(
+                (v - 1.0).abs() < 1e-5,
+                "iq2s qh high: l=1 weight[{i}] = {v}, expected 1.0"
+            );
+        }
+    }
+
+    #[test]
+    fn test_dequant_iq2s_qh_all_l_values() {
+        // Test all 4 l values in qh index selection for ib32=0
+        // qh[0] = 0b_11_10_01_00 (from LSB to MSB: l0=0, l1=1, l2=2, l3=3)
+        // but 8 bits: bits 1:0=l0, bits 3:2=l1, bits 5:4=l2, bits 7:6=l3
+        // So qh_byte = (0<<0) | (1<<2) | (2<<4) | (3<<6) = 0 + 4 + 32 + 192 = 228 = 0xE4
+        let grid = iq2s_grid_full_fixture();
+        let mut block = vec![0u8; 82];
+        block[0] = 0x00;
+        block[1] = 0x3C; // d = 1.0
+        block[66] = 0xE4; // qh[0]: l0→0, l1→1, l2→2, l3→3
+        let mut output = [0.0f32; 256];
+        dequant_iq2s_block(&block, &grid, &mut output);
+        // dl for l=0,1 uses lo nibble of scales[0]=0 → db0 = 0.125
+        // dl for l=2,3 uses hi nibble of scales[0]=0 → db1 = 0.125
+        // l=0: grid[0] bytes=8 → 0.125*8=1.0
+        // l=1: grid[256] bytes=16 → 0.125*16=2.0
+        // l=2: grid[512] bytes=12 → 0.125*12=1.5
+        // l=3: grid[768] bytes=4 → 0.125*4=0.5
+        let expected = [1.0f32, 2.0, 1.5, 0.5];
+        for (l, &exp) in expected.iter().enumerate() {
+            for (j, &v) in output[l * 8..(l + 1) * 8].iter().enumerate() {
+                assert!(
+                    (v - exp).abs() < 1e-5,
+                    "iq2s qh l={l} j={j}: got {v}, expected {exp}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_dequant_iq2s_hi_nibble_scale() {
+        // Hi nibble of scales[0] controls l=2,3; verify it works independently
+        let grid = iq2s_grid_fixture();
+        let mut block = make_iq2s_zero_block();
+        // scales[0] = 0xF0: lo=0 → db0=0.125, hi=15 → db1 = 1*(0.5+15)*0.25 = 3.875
+        block[74] = 0xF0;
+        let mut output = [0.0f32; 256];
+        dequant_iq2s_block(&block, &grid, &mut output);
+        let expected_lo = 0.125f32 * 8.0; // l=0,1 → 1.0
+        let expected_hi = (0.5f32 + 15.0) * 0.25 * 8.0; // l=2,3 → 31.0
+        for (i, &v) in output[..16].iter().enumerate() {
+            assert!(
+                (v - expected_lo).abs() < 1e-4,
+                "iq2s hi-nibble scale: l=0,1 weight[{i}] = {v}, expected {expected_lo}"
+            );
+        }
+        for (i, &v) in output[16..32].iter().enumerate() {
+            assert!(
+                (v - expected_hi).abs() < 1e-4,
+                "iq2s hi-nibble scale: l=2,3 weight[{i}] = {v}, expected {expected_hi}"
+            );
+        }
+        // weights 32..256 should still be 1.0 (scales[1..8] = 0)
+        for (i, &v) in output[32..].iter().enumerate() {
+            assert!(
+                (v - 1.0).abs() < 1e-5,
+                "iq2s hi-nibble: rest weight[{i}] = {v}, expected 1.0"
+            );
+        }
+    }
+
+    #[test]
+    fn test_dequant_iq2s_all_sign_bits() {
+        // signs[0] = 0xFF: all 8 weights in l=0 of ib32=0 are negated
+        let grid = iq2s_grid_fixture();
+        let mut block = make_iq2s_zero_block();
+        block[34] = 0xFF; // signs for l=0 of ib32=0: all bits set
+        let mut output = [0.0f32; 256];
+        dequant_iq2s_block(&block, &grid, &mut output);
+        // All 8 weights of l=0 should be -1.0
+        for (i, &v) in output[..8].iter().enumerate() {
+            assert!(
+                (v - (-1.0)).abs() < 1e-5,
+                "iq2s all signs: weight[{i}] = {v}, expected -1.0"
+            );
+        }
+        // Remaining 24 weights of ib32=0 should be +1.0 (unsigned)
+        for (i, &v) in output[8..32].iter().enumerate() {
+            assert!(
+                (v - 1.0).abs() < 1e-5,
+                "iq2s all signs: rest weight[{i}] = {v}, expected 1.0"
+            );
+        }
+    }
+
+    #[test]
+    fn test_dequant_iq2s_sign_individual_bits() {
+        // Verify each sign bit independently: signs[0] with alternating bits 0b01010101 = 0x55
+        let grid = iq2s_grid_fixture();
+        let mut block = make_iq2s_zero_block();
+        block[34] = 0x55; // bits 0,2,4,6 set → weights 0,2,4,6 of l=0 negated
+        let mut output = [0.0f32; 256];
+        dequant_iq2s_block(&block, &grid, &mut output);
+        for (j, &v) in output[..8].iter().enumerate() {
+            let expected = if j % 2 == 0 { -1.0f32 } else { 1.0 };
+            assert!(
+                (v - expected).abs() < 1e-5,
+                "iq2s sign bits: weight[{j}] = {v}, expected {expected}",
+            );
+        }
+    }
+
+    #[test]
+    fn test_dequant_iq2s_scale_nibble_zero() {
+        // scale nibble=0 for all ib32: dl = 1.0*(0.5+0)*0.25 = 0.125 → weight = 1.0
+        let grid = iq2s_grid_fixture();
+        let block = make_iq2s_zero_block(); // scales all 0
+        let mut output = [0.0f32; 256];
+        dequant_iq2s_block(&block, &grid, &mut output);
+        for (i, &v) in output.iter().enumerate() {
+            assert!(
+                (v - 1.0).abs() < 1e-5,
+                "iq2s nibble0: weight[{i}] = {v}, expected 1.0"
+            );
+        }
+    }
+
+    #[test]
+    fn test_dequant_iq2s_last_ib32() {
+        // Test that the last ib32 group (ib32=7) is processed correctly
+        let grid = iq2s_grid_fixture();
+        let mut block = make_iq2s_zero_block();
+        // scales[7] lo nibble = 7 → db0 = 1*(0.5+7)*0.25 = 1.875 → weight = 1.875*8 = 15.0
+        block[81] = 0x07;
+        let mut output = [0.0f32; 256];
+        dequant_iq2s_block(&block, &grid, &mut output);
+        let expected = (0.5f32 + 7.0) * 0.25 * 8.0; // 15.0
+        for (i, &v) in output[224..240].iter().enumerate() {
+            assert!(
+                (v - expected).abs() < 1e-4,
+                "iq2s last ib32: weight[{i}] = {v}, expected {expected}"
+            );
+        }
+        // Rest of ib32=7 (l=2,3) should use hi nibble=0 → 1.0
+        for (i, &v) in output[240..256].iter().enumerate() {
+            assert!(
+                (v - 1.0).abs() < 1e-5,
+                "iq2s last ib32 hi: weight[{i}] = {v}, expected 1.0"
+            );
+        }
+    }
+
     // ─── IQ1_S tests ─────────────────────────────────────────────────────────
 
     /// Build a minimal IQ1_S grid: entry 0 = all +1 bytes (0x01010101_01010101).
