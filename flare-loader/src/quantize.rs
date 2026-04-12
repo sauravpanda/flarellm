@@ -3004,4 +3004,167 @@ mod tests {
             output[16]
         );
     }
+
+    // ── IQ4_NL tests ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_dequant_iq4nl_short_block() {
+        let block = vec![0u8; 10]; // too short
+        let mut output = [42.0f32; 32]; // non-zero sentinel
+        dequant_iq4nl_block(&block, &mut output);
+        // short block → output unchanged (sentinel still 42.0)
+        assert!(
+            output.iter().all(|&v| (v - 42.0).abs() < 1e-5),
+            "iq4nl short block: output should be unchanged"
+        );
+    }
+
+    #[test]
+    fn test_dequant_iq4nl_zero_scale() {
+        let mut block = vec![0u8; 18];
+        // scale = 0.0 (f16 0x0000)
+        block[0] = 0x00;
+        block[1] = 0x00;
+        block[2..18].fill(0x88); // nibble=8 → KVALUES[8]=1, but scale=0 → 0
+        let mut output = [0.0f32; 32];
+        dequant_iq4nl_block(&block, &mut output);
+        for (i, &v) in output.iter().enumerate() {
+            assert!(
+                v.abs() < 1e-5,
+                "iq4nl zero scale: output[{i}] = {v}, expected 0.0"
+            );
+        }
+    }
+
+    #[test]
+    fn test_dequant_iq4nl_unit_scale_nibble8() {
+        // scale=1.0, all nibbles=8 → KVALUES_IQ4NL[8]=1 → output=1.0 for all 32.
+        let mut block = vec![0u8; 18];
+        block[0] = 0x00;
+        block[1] = 0x3C; // f16 1.0
+        block[2..18].fill(0x88);
+        let mut output = [0.0f32; 32];
+        dequant_iq4nl_block(&block, &mut output);
+        for (i, &v) in output.iter().enumerate() {
+            assert!(
+                (v - 1.0).abs() < 1e-5,
+                "iq4nl unit nibble8: output[{i}] = {v}, expected 1.0"
+            );
+        }
+    }
+
+    #[test]
+    fn test_dequant_iq4nl_min_nibble() {
+        // nibble=0 → KVALUES_IQ4NL[0]=-127; scale=1.0 → output=-127.0.
+        let mut block = vec![0u8; 18];
+        block[0] = 0x00;
+        block[1] = 0x3C; // f16 1.0
+                         // all bytes = 0x00 → both nibbles = 0
+        let mut output = [0.0f32; 32];
+        dequant_iq4nl_block(&block, &mut output);
+        for (i, &v) in output.iter().enumerate() {
+            assert!(
+                (v - (-127.0)).abs() < 1e-4,
+                "iq4nl min nibble: output[{i}] = {v}, expected -127.0"
+            );
+        }
+    }
+
+    #[test]
+    fn test_dequant_iq4nl_max_nibble() {
+        // nibble=15 → KVALUES_IQ4NL[15]=113; scale=1.0 → output=113.0.
+        let mut block = vec![0u8; 18];
+        block[0] = 0x00;
+        block[1] = 0x3C; // f16 1.0
+        block[2..18].fill(0xFF); // both nibbles = 15
+        let mut output = [0.0f32; 32];
+        dequant_iq4nl_block(&block, &mut output);
+        for (i, &v) in output.iter().enumerate() {
+            assert!(
+                (v - 113.0).abs() < 1e-4,
+                "iq4nl max nibble: output[{i}] = {v}, expected 113.0"
+            );
+        }
+    }
+
+    #[test]
+    fn test_dequant_iq4nl_negative_scale() {
+        // scale=-1.0, nibble=8→KVALUES[8]=1 → output=-1.0.
+        let mut block = vec![0u8; 18];
+        block[0] = 0x00;
+        block[1] = 0xBC; // f16 -1.0
+        block[2..18].fill(0x88);
+        let mut output = [0.0f32; 32];
+        dequant_iq4nl_block(&block, &mut output);
+        for (i, &v) in output.iter().enumerate() {
+            assert!(
+                (v - (-1.0)).abs() < 1e-5,
+                "iq4nl neg scale: output[{i}] = {v}, expected -1.0"
+            );
+        }
+    }
+
+    #[test]
+    fn test_dequant_iq4nl_two_nibbles_differ() {
+        // One byte = 0x80: lo=0 → KVALUES[0]=-127; hi=8 → KVALUES[8]=1. scale=1.0.
+        // Verifies lo nibble → output[2i] and hi nibble → output[2i+1].
+        let mut block = vec![0u8; 18];
+        block[0] = 0x00;
+        block[1] = 0x3C; // f16 1.0
+        block[2] = 0x80; // lo=0 (-127), hi=8 (1)
+        block[3..18].fill(0x88); // remaining all nibble=8 → 1.0
+        let mut output = [0.0f32; 32];
+        dequant_iq4nl_block(&block, &mut output);
+        // output[0]: lo nibble=0 → -127.0
+        assert!(
+            (output[0] - (-127.0)).abs() < 1e-4,
+            "iq4nl two_nibbles lo: got {}, expected -127.0",
+            output[0]
+        );
+        // output[1]: hi nibble=8 → 1.0
+        assert!(
+            (output[1] - 1.0).abs() < 1e-5,
+            "iq4nl two_nibbles hi: got {}, expected 1.0",
+            output[1]
+        );
+        // output[2..32]: all nibble=8 → 1.0
+        for (i, &v) in output[2..32].iter().enumerate() {
+            assert!(
+                (v - 1.0).abs() < 1e-5,
+                "iq4nl two_nibbles rest: output[{i}] = {v}, expected 1.0"
+            );
+        }
+    }
+
+    #[test]
+    fn test_dequant_iq4nl_all_kvalues_entries() {
+        // Use 8 bytes to exercise all 16 KVALUES_IQ4NL entries in order.
+        // Byte k = (k<<4)|(k-1) for k=1..8 gives pairs (0,1),(2,3),...,(14,15).
+        // bytes: 0x10, 0x32, 0x54, 0x76, 0x98, 0xBA, 0xDC, 0xFE; remaining=0x00.
+        // KVALUES_IQ4NL: [-127,-104,-83,-65,-49,-35,-22,-10, 1,13,25,38,53,69,89,113]
+        let mut block = vec![0u8; 18];
+        block[0] = 0x00;
+        block[1] = 0x3C; // f16 1.0
+        block[2] = 0x10; // lo=0→-127, hi=1→-104
+        block[3] = 0x32; // lo=2→ -83, hi=3→ -65
+        block[4] = 0x54; // lo=4→ -49, hi=5→ -35
+        block[5] = 0x76; // lo=6→ -22, hi=7→ -10
+        block[6] = 0x98; // lo=8→   1, hi=9→  13
+        block[7] = 0xBA; // lo=10→ 25, hi=11→ 38
+        block[8] = 0xDC; // lo=12→ 53, hi=13→ 69
+        block[9] = 0xFE; // lo=14→ 89, hi=15→113
+                         // block[10..18] = 0 → nibble=0 → -127.0 for output[20..32]
+        let mut output = [0.0f32; 32];
+        dequant_iq4nl_block(&block, &mut output);
+        let expected_first16: [f32; 16] = [
+            -127.0, -104.0, -83.0, -65.0, -49.0, -35.0, -22.0, -10.0, 1.0, 13.0, 25.0, 38.0, 53.0,
+            69.0, 89.0, 113.0,
+        ];
+        for (i, (&v, &exp)) in output[..16].iter().zip(expected_first16.iter()).enumerate() {
+            assert!(
+                (v - exp).abs() < 1e-4,
+                "iq4nl all_kvalues output[{i}]: got {v}, expected {exp}"
+            );
+        }
+    }
 }
