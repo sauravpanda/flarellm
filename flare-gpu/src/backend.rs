@@ -391,7 +391,8 @@ impl WebGpuBackend {
         let output_size = (num_blocks * 256) as u64 * 4;
 
         // Q6_K blocks are 210 bytes — pad to next multiple of 4 for wgpu.
-        let raw_buf = if raw_bytes.len().is_multiple_of(4) {
+        #[allow(clippy::manual_is_multiple_of)]
+        let raw_buf = if raw_bytes.len() % 4 == 0 {
             self.pool.get_storage(&self.device, &self.queue, raw_bytes)
         } else {
             let mut padded = raw_bytes.to_vec();
