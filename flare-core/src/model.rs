@@ -728,16 +728,34 @@ impl Model {
                     .as_ref()
                     .map(|t| t.data().to_vec());
 
+                // Single batched dispatch for gate and up projections.
+                let gate_batch =
+                    self.backend
+                        .batched_matmul(&w_gate, &normed_batch2, inter, dim, seq_len);
+                let up_batch =
+                    self.backend
+                        .batched_matmul(&w_up, &normed_batch2, inter, dim, seq_len);
+
+                // Per-token silu_mul / gelu_mul (CPU arithmetic, no GPU dispatch).
+                let ffn_hidden_batch: Vec<f32> = (0..seq_len)
+                    .flat_map(|t| {
+                        let gate_t = &gate_batch[t * inter..(t + 1) * inter];
+                        let up_t = &up_batch[t * inter..(t + 1) * inter];
+                        if config.architecture == Architecture::Gemma2 {
+                            gelu_mul_cpu(gate_t, up_t)
+                        } else {
+                            self.backend.silu_mul_vec(gate_t, up_t)
+                        }
+                    })
+                    .collect();
+
+                // Single batched dispatch for the down projection.
+                let down_batch =
+                    self.backend
+                        .batched_matmul(&w_down, &ffn_hidden_batch, dim, inter, seq_len);
+
                 for t in 0..seq_len {
-                    let normed_t = &normed_batch2[t * dim..(t + 1) * dim];
-                    let gate = self.backend.matvec(&w_gate, normed_t, inter, dim);
-                    let up = self.backend.matvec(&w_up, normed_t, inter, dim);
-                    let ffn_hidden = if config.architecture == Architecture::Gemma2 {
-                        gelu_mul_cpu(&gate, &up)
-                    } else {
-                        self.backend.silu_mul_vec(&gate, &up)
-                    };
-                    let down = self.backend.matvec(&w_down, &ffn_hidden, dim, inter);
+                    let down = down_batch[t * dim..(t + 1) * dim].to_vec();
                     let contrib = match &post_ffn_norm {
                         Some(n) => rmsnorm(&down, n, config.rms_norm_eps),
                         None => down,
