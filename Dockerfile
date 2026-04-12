@@ -30,6 +30,7 @@ COPY flare-loader     flare-loader/
 COPY flare-gpu        flare-gpu/
 COPY flare-simd       flare-simd/
 COPY flare-server     flare-server/
+COPY flarellm         flarellm/
 # flare-web is WASM-only; skip it to avoid needing wasm-pack in the builder
 COPY flare-web/Cargo.toml flare-web/Cargo.toml
 RUN mkdir -p flare-web/src && echo 'fn main() {}' > flare-web/src/lib.rs
