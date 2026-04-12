@@ -714,6 +714,23 @@ impl FlareEngine {
         self.kv_pos as u32
     }
 
+    /// How many tokens of context space remain before the window is full.
+    ///
+    /// Equivalent to `max_seq_len - tokens_used`. Returns 0 when the context is
+    /// already full or `max_seq_len` is 0.
+    ///
+    /// # JS example
+    /// ```javascript
+    /// if (engine.tokens_remaining < 64) {
+    ///   console.warn("Context window almost full — consider resetting.");
+    /// }
+    /// ```
+    #[wasm_bindgen(getter)]
+    pub fn tokens_remaining(&self) -> u32 {
+        let cap = self.model.config().max_seq_len;
+        cap.saturating_sub(self.kv_pos) as u32
+    }
+
     /// Fraction of the context window consumed (0.0 = empty, 1.0 = full).
     ///
     /// Equivalent to `tokens_used / max_seq_len`. Returns 0.0 if `max_seq_len` is 0.
@@ -812,6 +829,35 @@ impl FlareEngine {
             Some(vocab) => vocab.decode(&[id]),
             None => String::new(),
         }
+    }
+
+    /// Truncate `text` so that it fits within `budget` tokens when encoded.
+    ///
+    /// Encodes `text` with the embedded GGUF vocabulary, keeps the **last**
+    /// `budget` tokens (tail of the text is preferred, so recent context is
+    /// preserved), and decodes them back to a string.  Returns `text` unchanged
+    /// if it already fits or if no vocab is available.
+    ///
+    /// A typical call reserves space for the system prompt + generated output:
+    ///
+    /// ```javascript
+    /// // Keep only the tail of the conversation that fits in the context
+    /// const budget = engine.max_seq_len - 256; // leave 256 tokens for output
+    /// const trimmed = engine.truncate_to_context(conversationText, budget);
+    /// ```
+    #[wasm_bindgen]
+    pub fn truncate_to_context(&self, text: &str, budget: u32) -> String {
+        let vocab = match &self.gguf_vocab {
+            Some(v) => v,
+            None => return text.to_string(),
+        };
+        let tokens = vocab.encode(text);
+        let n = budget as usize;
+        if tokens.len() <= n {
+            return text.to_string();
+        }
+        // Keep the last `n` tokens (most recent context).
+        vocab.decode(&tokens[tokens.len() - n..])
     }
 
     /// Full text-in / text-out generation using the embedded GGUF vocabulary.
