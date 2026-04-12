@@ -1093,7 +1093,7 @@ mod tests {
     #[test]
     fn test_dequantize_tensor_f32_passthrough() {
         // F32: raw bytes are just little-endian f32 values
-        let val: f32 = 3.14;
+        let val: f32 = 42.5;
         let raw = val.to_le_bytes().to_vec();
         let result = super::dequantize_tensor(&raw, QuantFormat::F32, 1).unwrap();
         assert_eq!(result.len(), 1);
