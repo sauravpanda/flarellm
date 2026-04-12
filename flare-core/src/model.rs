@@ -352,6 +352,17 @@ pub trait ComputeBackend: Send + Sync {
              call Model::set_backend with a GPU backend before using quantized weights"
         )
     }
+
+    /// Serialise the driver-managed GPU pipeline cache to bytes.
+    ///
+    /// On backends that support `wgpu::Features::PIPELINE_CACHE` (Vulkan native),
+    /// this returns an opaque blob that can be passed to the backend constructor
+    /// on the next startup to skip shader recompilation.
+    ///
+    /// Returns an empty `Vec` on unsupported backends (WebGPU, Metal, DX12, CPU).
+    fn pipeline_cache_data(&self) -> Vec<u8> {
+        Vec::new()
+    }
 }
 
 /// Default CPU compute backend. Uses optimized scalar loops.
@@ -505,6 +516,11 @@ impl Model {
     /// Returns `true` if raw quantized weights have been set.
     pub fn has_raw_weights(&self) -> bool {
         self.raw_weights.is_some()
+    }
+
+    /// Return a reference to the current compute backend.
+    pub fn backend(&self) -> &dyn ComputeBackend {
+        self.backend.as_ref()
     }
 
     /// Replace the compute backend (e.g. with a GPU backend).
