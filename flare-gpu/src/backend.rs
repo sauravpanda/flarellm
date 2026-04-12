@@ -6,7 +6,7 @@ use thiserror::Error;
 
 use crate::buffers::{self, BufferPool};
 use crate::kv_cache::GpuKvCache;
-use crate::pipeline::{CachedPipeline, PipelineCache};
+use crate::pipeline::{try_create_wgpu_cache, CachedPipeline, PipelineCache};
 
 #[derive(Debug, Error)]
 pub enum GpuError {
@@ -76,6 +76,27 @@ impl WebGpuBackend {
     /// Create a new GPU backend. This is async because adapter/device
     /// request is async on both native and web.
     pub async fn new() -> Result<Self, GpuError> {
+        Self::new_impl(None).await
+    }
+
+    /// Create a new GPU backend pre-loaded with serialised pipeline cache data.
+    ///
+    /// On backends that support `Features::PIPELINE_CACHE` (Vulkan), the driver
+    /// can reuse compiled GPU machine code from a previous run, avoiding cold-start
+    /// shader recompilation.  Pass bytes previously obtained from
+    /// [`Self::pipeline_cache_data`].  On unsupported backends the data is silently
+    /// ignored and the backend behaves identically to [`Self::new`].
+    ///
+    /// # Safety of cache data
+    ///
+    /// The data must originate from the same (or ABI-compatible) device and driver.
+    /// `fallback: true` is set so the driver discards mismatched blobs without
+    /// causing undefined behaviour.
+    pub async fn new_with_cache(data: &[u8]) -> Result<Self, GpuError> {
+        Self::new_impl(Some(data)).await
+    }
+
+    async fn new_impl(cache_data: Option<&[u8]>) -> Result<Self, GpuError> {
         let instance = wgpu::Instance::default();
 
         let adapter = instance
@@ -87,11 +108,21 @@ impl WebGpuBackend {
             .await
             .ok_or(GpuError::NoAdapter)?;
 
+        // Enable PIPELINE_CACHE if the backend supports it (Vulkan).
+        // On WebGPU / Metal / DX12 the feature flag is absent; requesting an
+        // absent feature is an error, so we check first.
+        let adapter_features = adapter.features();
+        let extra_features = if adapter_features.contains(wgpu::Features::PIPELINE_CACHE) {
+            wgpu::Features::PIPELINE_CACHE
+        } else {
+            wgpu::Features::empty()
+        };
+
         let (device, queue) = adapter
             .request_device(
                 &wgpu::DeviceDescriptor {
                     label: Some("flare-gpu"),
-                    required_features: wgpu::Features::empty(),
+                    required_features: extra_features,
                     required_limits: wgpu::Limits::default(),
                     ..Default::default()
                 },
@@ -100,13 +131,32 @@ impl WebGpuBackend {
             .await
             .map_err(|e| GpuError::DeviceRequest(e.to_string()))?;
 
+        let pipeline_cache = match try_create_wgpu_cache(&device, adapter_features, cache_data) {
+            Some(wgpu_cache) => {
+                log::debug!("flare-gpu: driver pipeline cache enabled");
+                PipelineCache::new_with_wgpu_cache(wgpu_cache)
+            }
+            None => PipelineCache::new(),
+        };
+
         Ok(Self {
             device,
             queue,
-            cache: PipelineCache::new(),
+            cache: pipeline_cache,
             pool: BufferPool::new(),
             gpu_kv_cache: Mutex::new(None),
         })
+    }
+
+    /// Serialise the driver-managed pipeline cache to bytes.
+    ///
+    /// Store these bytes and pass them to [`Self::new_with_cache`] on the next
+    /// startup to skip shader recompilation on supported backends (Vulkan).
+    ///
+    /// Returns an empty `Vec` on backends that do not support pipeline caching
+    /// or when the driver has not produced any serialisable data yet.
+    pub fn get_pipeline_cache_bytes(&self) -> Vec<u8> {
+        self.cache.get_data()
     }
 
     pub fn device(&self) -> &wgpu::Device {
@@ -2421,6 +2471,10 @@ impl ComputeBackend for WebGpuBackend {
                 batch,
             ),
         }
+    }
+
+    fn pipeline_cache_data(&self) -> Vec<u8> {
+        self.get_pipeline_cache_bytes()
     }
 }
 

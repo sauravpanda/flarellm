@@ -265,6 +265,58 @@ impl FlareEngine {
         }
     }
 
+    /// Initialise the WebGPU backend using previously serialised pipeline cache
+    /// bytes (from `engine.pipeline_cache_data()`).
+    ///
+    /// On backends that support driver-managed pipeline caches (Vulkan native),
+    /// this allows the driver to reuse compiled GPU machine code from a previous
+    /// run, eliminating cold-start shader recompilation (typically 100ms–2s).
+    ///
+    /// On unsupported backends (WebGPU, Metal, DX12) this behaves identically to
+    /// `init_gpu()` — the cache bytes are silently ignored.
+    ///
+    /// ```javascript
+    /// const cached = localStorage.getItem('flare-pipeline-cache');
+    /// const cacheBytes = cached ? new Uint8Array(JSON.parse(cached)) : new Uint8Array();
+    /// await engine.init_gpu_with_cache(cacheBytes);
+    /// // After inference, persist the cache:
+    /// const data = engine.pipeline_cache_data();
+    /// if (data.length > 0) {
+    ///   localStorage.setItem('flare-pipeline-cache', JSON.stringify(Array.from(data)));
+    /// }
+    /// ```
+    #[wasm_bindgen]
+    pub async fn init_gpu_with_cache(&mut self, cache_data: &[u8]) -> bool {
+        if !webgpu_available() {
+            return false;
+        }
+        let result = if cache_data.is_empty() {
+            WebGpuBackend::new().await
+        } else {
+            WebGpuBackend::new_with_cache(cache_data).await
+        };
+        match result {
+            Ok(gpu) => {
+                self.model.set_backend(Box::new(gpu));
+                true
+            }
+            Err(_) => false,
+        }
+    }
+
+    /// Serialise the driver-managed GPU pipeline cache to bytes.
+    ///
+    /// Returns an opaque blob that can be passed to `init_gpu_with_cache()` on
+    /// the next startup to skip shader recompilation.  Store it in
+    /// `localStorage` or `IndexedDB` between page loads.
+    ///
+    /// Returns an empty `Uint8Array` if no GPU is active, or if the current
+    /// backend does not support pipeline caching (WebGPU, Metal, DX12).
+    #[wasm_bindgen(getter)]
+    pub fn pipeline_cache_data(&self) -> Vec<u8> {
+        self.model.backend().pipeline_cache_data()
+    }
+
     /// Load raw quantized weights from GGUF bytes so the GPU fused
     /// dequant+matvec kernels can be used during inference.
     ///
