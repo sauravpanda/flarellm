@@ -1143,6 +1143,46 @@ impl FlareEngine {
         self.begin_stream_healed_impl(prompt_tokens, max_tokens);
     }
 
+    /// Like `begin_stream_healed` but with full sampling parameters.
+    ///
+    /// Combines position-consistent prefill (see `begin_stream_healed`) with
+    /// the same temperature / top-p / top-k / repeat-penalty / min-p controls
+    /// available in `begin_stream_with_params`.
+    ///
+    /// # JS example
+    /// ```javascript
+    /// engine.reset();
+    /// const ids = engine.encode_text(engine.apply_chat_template(userMsg, sysMsg));
+    /// engine.begin_stream_healed_with_params(ids, 256, 0.8, 0.95, 40, 1.1, 0.0);
+    /// requestAnimationFrame(function tick() {
+    ///   const id = engine.next_token();
+    ///   if (id !== undefined) output.textContent += tokenizer.decode_one(id);
+    ///   if (!engine.stream_done) requestAnimationFrame(tick);
+    /// });
+    /// ```
+    #[allow(clippy::too_many_arguments)]
+    #[wasm_bindgen]
+    pub fn begin_stream_healed_with_params(
+        &mut self,
+        prompt_tokens: &[u32],
+        max_tokens: u32,
+        temperature: f32,
+        top_p: f32,
+        top_k: u32,
+        repeat_penalty: f32,
+        min_p: f32,
+    ) {
+        self.stream_params = SamplingParams {
+            temperature,
+            top_p,
+            top_k: top_k as usize,
+            repeat_penalty,
+            min_p,
+        };
+        self.stream_rng_state = self.rng_seed;
+        self.begin_stream_healed_impl(prompt_tokens, max_tokens);
+    }
+
     /// Internal prefill + state initialisation shared by both begin_stream variants.
     fn begin_stream_impl(&mut self, prompt_tokens: &[u32], max_tokens: u32) {
         let effective = self.with_bos(prompt_tokens);
