@@ -20,6 +20,7 @@ pub enum GpuError {
 const MATMUL_SHADER: &str = include_str!("../shaders/matmul.wgsl");
 const SILU_MUL_SHADER: &str = include_str!("../shaders/silu_mul.wgsl");
 const SOFTMAX_SHADER: &str = include_str!("../shaders/softmax.wgsl");
+const ATTENTION_SHADER: &str = include_str!("../shaders/attention.wgsl");
 
 /// WebGPU/wgpu compute backend.
 ///
@@ -174,6 +175,57 @@ impl WebGpuBackend {
                 },
                 wgpu::BindGroupEntry {
                     binding: 2,
+                    resource: params.as_entire_binding(),
+                },
+            ],
+        })
+    }
+
+    /// 5-binding layout for the attention shader:
+    /// q (read), k_cache (read), v_cache (read), output (read-write), params (uniform).
+    fn attention_layout() -> [wgpu::BindGroupLayoutEntry; 5] {
+        [
+            storage_ro_entry(0),
+            storage_ro_entry(1),
+            storage_ro_entry(2),
+            storage_rw_entry(3),
+            uniform_entry(4),
+        ]
+    }
+
+    /// Build a 5-entry bind group for the attention shader.
+    #[allow(clippy::too_many_arguments)]
+    fn make_attention_bind_group(
+        &self,
+        cached: &CachedPipeline,
+        q: &wgpu::Buffer,
+        k_cache: &wgpu::Buffer,
+        v_cache: &wgpu::Buffer,
+        out: &wgpu::Buffer,
+        params: &wgpu::Buffer,
+    ) -> wgpu::BindGroup {
+        self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: None,
+            layout: &cached.layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: q.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: k_cache.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: v_cache.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: out.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
                     resource: params.as_entire_binding(),
                 },
             ],
@@ -526,6 +578,114 @@ impl ComputeBackend for WebGpuBackend {
         );
 
         output.data_mut()[..result.len()].copy_from_slice(&result);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn grouped_query_attention(
+        &self,
+        q: &[f32],
+        k_cache: &[f32],
+        v_cache: &[f32],
+        num_heads: usize,
+        num_kv_heads: usize,
+        head_dim: usize,
+        seq_len: usize,
+        attn_softcap: f32,
+    ) -> Vec<f32> {
+        // Gemma-2 soft-cap is not implemented in the WGSL shader; fall back to CPU.
+        if attn_softcap != 0.0 {
+            return flare_core::model::cpu_grouped_query_attention(
+                q,
+                k_cache,
+                v_cache,
+                num_heads,
+                num_kv_heads,
+                head_dim,
+                seq_len,
+                attn_softcap,
+            );
+        }
+
+        let heads_per_kv = num_heads / num_kv_heads;
+        let kv_stride = num_kv_heads * head_dim;
+        let mut output = vec![0.0f32; num_heads * head_dim];
+        let scale = 1.0_f32 / (head_dim as f32).sqrt();
+
+        let layout_entries = Self::attention_layout();
+
+        for h in 0..num_heads {
+            let kv_head = h / heads_per_kv;
+            let q_head = &q[h * head_dim..(h + 1) * head_dim];
+
+            // Extract contiguous [seq_len, head_dim] slice for this KV head.
+            let mut k_head: Vec<f32> = Vec::with_capacity(seq_len * head_dim);
+            let mut v_head: Vec<f32> = Vec::with_capacity(seq_len * head_dim);
+            for t in 0..seq_len {
+                let offset = t * kv_stride + kv_head * head_dim;
+                k_head.extend_from_slice(&k_cache[offset..offset + head_dim]);
+                v_head.extend_from_slice(&v_cache[offset..offset + head_dim]);
+            }
+
+            let output_size = head_dim as u64 * 4;
+
+            let q_buf =
+                self.pool
+                    .get_storage(&self.device, &self.queue, bytemuck::cast_slice(q_head));
+            let k_buf =
+                self.pool
+                    .get_storage(&self.device, &self.queue, bytemuck::cast_slice(&k_head));
+            let v_buf =
+                self.pool
+                    .get_storage(&self.device, &self.queue, bytemuck::cast_slice(&v_head));
+            let out_buf = self.pool.get_output(&self.device, output_size);
+
+            // Params: seq_len, head_dim, scale
+            let params_data: [u32; 3] = [
+                seq_len as u32,
+                head_dim as u32,
+                scale.to_bits(), // pass f32 as u32 raw bits; shader reads as f32
+            ];
+            let params_buf = self.pool.get_uniform(
+                &self.device,
+                &self.queue,
+                bytemuck::cast_slice(&params_data),
+            );
+
+            let head_output = self.cache.with_pipeline(
+                &self.device,
+                "attention_scores",
+                ATTENTION_SHADER,
+                "attention_scores",
+                &layout_entries,
+                |cached| {
+                    let bind_group = self.make_attention_bind_group(
+                        cached,
+                        &q_buf,
+                        &k_buf,
+                        &v_buf,
+                        &out_buf,
+                        &params_buf,
+                    );
+                    self.dispatch_and_readback(
+                        &cached.pipeline,
+                        &bind_group,
+                        [1, 1, 1],
+                        &out_buf,
+                        output_size,
+                    )
+                },
+            );
+
+            output[h * head_dim..(h + 1) * head_dim].copy_from_slice(&head_output);
+
+            self.pool.return_storage(q_buf);
+            self.pool.return_storage(k_buf);
+            self.pool.return_storage(v_buf);
+            self.pool.return_output(out_buf);
+            self.pool.return_uniform(params_buf);
+        }
+
+        output
     }
 }
 

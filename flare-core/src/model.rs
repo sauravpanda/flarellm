@@ -40,6 +40,38 @@ pub trait ComputeBackend: Send + Sync {
     fn silu_mul_vec(&self, gate: &[f32], up: &[f32]) -> Vec<f32> {
         silu_mul_cpu(gate, up)
     }
+
+    /// Grouped-query attention for a single query position.
+    ///
+    /// - `q`: query vectors `[num_heads * head_dim]`
+    /// - `k_cache`: key cache `[seq_len * num_kv_heads * head_dim]`
+    /// - `v_cache`: value cache `[seq_len * num_kv_heads * head_dim]`
+    /// - `attn_softcap`: Gemma-2 logit soft-cap (0.0 = disabled)
+    ///
+    /// Returns `[num_heads * head_dim]`.
+    #[allow(clippy::too_many_arguments)]
+    fn grouped_query_attention(
+        &self,
+        q: &[f32],
+        k_cache: &[f32],
+        v_cache: &[f32],
+        num_heads: usize,
+        num_kv_heads: usize,
+        head_dim: usize,
+        seq_len: usize,
+        attn_softcap: f32,
+    ) -> Vec<f32> {
+        cpu_grouped_query_attention(
+            q,
+            k_cache,
+            v_cache,
+            num_heads,
+            num_kv_heads,
+            head_dim,
+            seq_len,
+            attn_softcap,
+        )
+    }
 }
 
 /// Default CPU compute backend. Uses optimized scalar loops.
@@ -259,15 +291,16 @@ impl Model {
             // Write K, V to cache
             self.kv_cache.write(layer_idx, &k_data, &v_data);
 
-            // Grouped-query attention
-            let attn_output = grouped_query_attention(
+            // Grouped-query attention — dispatch to backend (GPU or CPU)
+            let seq_len = self.kv_cache.len() + 1; // include current position
+            let attn_output = self.backend.grouped_query_attention(
                 &q_data,
-                &self.kv_cache,
-                layer_idx,
+                self.kv_cache.keys(layer_idx).data(),
+                self.kv_cache.values(layer_idx).data(),
                 num_heads,
                 num_kv_heads,
                 head_dim,
-                self.kv_cache.len() + 1, // include current position
+                seq_len,
                 config.attn_logit_softcap,
             );
 
@@ -752,12 +785,13 @@ pub fn apply_rope(data: &mut [f32], num_heads: usize, head_dim: usize, pos: usiz
     }
 }
 
-/// Grouped-query attention for a single token position.
+/// CPU implementation of grouped-query attention for a single token position.
+/// Exported so GPU backends can delegate to it for unsupported cases (e.g. soft-cap).
 #[allow(clippy::too_many_arguments)]
-fn grouped_query_attention(
-    q: &[f32], // [num_heads * head_dim]
-    kv_cache: &KvCache,
-    layer: usize,
+pub fn cpu_grouped_query_attention(
+    q: &[f32],       // [num_heads * head_dim]
+    k_cache: &[f32], // [seq_len * num_kv_heads * head_dim]
+    v_cache: &[f32], // [seq_len * num_kv_heads * head_dim]
     num_heads: usize,
     num_kv_heads: usize,
     head_dim: usize,
@@ -767,8 +801,6 @@ fn grouped_query_attention(
     let heads_per_kv = num_heads / num_kv_heads;
     let mut output = vec![0.0f32; num_heads * head_dim];
 
-    let k_cache = kv_cache.keys(layer).data();
-    let v_cache = kv_cache.values(layer).data();
     let kv_stride = num_kv_heads * head_dim;
 
     for h in 0..num_heads {
