@@ -345,6 +345,69 @@ impl FlareEngine {
         }
     }
 
+    /// Streaming text-in / text-out generation with a per-token JS callback.
+    ///
+    /// Encodes `prompt` with the embedded GGUF vocabulary, generates up to
+    /// `max_tokens` tokens, and calls `on_token(token_str)` with the decoded
+    /// text for each token as it is produced.  Returns the number of tokens
+    /// generated (excluding any EOS token).
+    ///
+    /// Returns 0 if no GGUF vocab is available.
+    ///
+    /// # Note on browser streaming
+    /// `on_token` is called synchronously inside WASM, so the browser will
+    /// not visually update between tokens.  For visible character-by-character
+    /// output, use `begin_stream` + `next_token` with `requestAnimationFrame`.
+    ///
+    /// # JS example
+    /// ```javascript
+    /// engine.reset();
+    /// let out = '';
+    /// const count = engine.generate_stream("What is Rust?", 128, (token) => {
+    ///   out += token;
+    /// });
+    /// output.textContent = out;
+    /// ```
+    #[wasm_bindgen]
+    pub fn generate_stream(
+        &mut self,
+        prompt: &str,
+        max_tokens: u32,
+        on_token: &js_sys::Function,
+    ) -> u32 {
+        // Encode and generate first, then decode per-token for callbacks.
+        let prompt_tokens = match &self.gguf_vocab {
+            Some(vocab) => vocab.encode(prompt),
+            None => return 0,
+        };
+        let params = SamplingParams {
+            temperature: 0.0,
+            ..Default::default()
+        };
+        let eos = self.eos_token_id;
+        // Generate all tokens — vocab and model are different fields so this
+        // is safe to split-borrow after the encode above.
+        let generated = {
+            let mut gen = Generator::new(&mut self.model, params);
+            gen.generate(
+                &prompt_tokens,
+                max_tokens as usize,
+                eos,
+                || 0.5,
+                |_, _| true,
+            )
+        };
+        let mut count = 0u32;
+        if let Some(vocab) = &self.gguf_vocab {
+            for id in &generated {
+                let token_str = vocab.decode(&[*id]);
+                let _ = on_token.call1(&JsValue::NULL, &JsValue::from_str(&token_str));
+                count += 1;
+            }
+        }
+        count
+    }
+
     // -----------------------------------------------------------------------
     // Token-by-token streaming API
     // -----------------------------------------------------------------------
