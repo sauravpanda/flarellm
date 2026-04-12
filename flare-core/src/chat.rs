@@ -391,4 +391,65 @@ mod tests {
             ChatTemplate::ChatML
         );
     }
+
+    #[test]
+    fn test_apply_empty_messages() {
+        // Templates always append a generation prompt even with no messages
+        let llama = ChatTemplate::Llama3.apply(&[]);
+        assert!(llama.contains("<|begin_of_text|>"));
+        assert!(llama.ends_with("<|start_header_id|>assistant<|end_header_id|>\n\n"));
+
+        let chatml = ChatTemplate::ChatML.apply(&[]);
+        assert!(chatml.ends_with("<|im_start|>assistant\n"));
+
+        // Raw format returns empty string for empty input
+        assert_eq!(ChatTemplate::Raw.apply(&[]), "");
+    }
+
+    #[test]
+    fn test_apply_system_only() {
+        let msgs = vec![ChatMessage {
+            role: Role::System,
+            content: "You are an AI.".into(),
+        }];
+        let result = ChatTemplate::ChatML.apply(&msgs);
+        assert!(result.contains("<|im_start|>system\n"));
+        assert!(result.contains("You are an AI."));
+        assert!(result.ends_with("<|im_start|>assistant\n"));
+    }
+
+    #[test]
+    fn test_from_architecture_unknown_fallback() {
+        // Unrecognized architecture falls back to ChatML
+        assert_eq!(
+            ChatTemplate::from_architecture("gpt4"),
+            ChatTemplate::ChatML
+        );
+        assert_eq!(ChatTemplate::from_architecture(""), ChatTemplate::ChatML);
+    }
+
+    #[test]
+    fn test_from_architecture_case_insensitive() {
+        // from_architecture lowercases the input before matching
+        assert_eq!(
+            ChatTemplate::from_architecture("LLAMA"),
+            ChatTemplate::Llama3
+        );
+        assert_eq!(
+            ChatTemplate::from_architecture("Qwen2"),
+            ChatTemplate::ChatML
+        );
+    }
+
+    #[test]
+    fn test_serde_role_all_variants() {
+        for (json, expected) in [
+            (r#"{"role":"system","content":"hi"}"#, Role::System),
+            (r#"{"role":"user","content":"hi"}"#, Role::User),
+            (r#"{"role":"assistant","content":"hi"}"#, Role::Assistant),
+        ] {
+            let msg: ChatMessage = serde_json::from_str(json).unwrap();
+            assert_eq!(msg.role, expected);
+        }
+    }
 }
