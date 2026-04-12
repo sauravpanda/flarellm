@@ -413,6 +413,7 @@ impl GgufFile {
 /// Map a `QuantFormat` to a GPU-accelerated `WeightFormat`, if one exists.
 fn quant_to_weight_format(q: QuantFormat) -> Option<WeightFormat> {
     match q {
+        QuantFormat::BF16 => Some(WeightFormat::BF16),
         QuantFormat::Q4_1 => Some(WeightFormat::Q4_1),
         QuantFormat::Q8_1 => Some(WeightFormat::Q8_1),
         QuantFormat::Q4_0 => Some(WeightFormat::Q4_0),
@@ -443,6 +444,14 @@ fn dequantize_tensor(raw: &[u8], dtype: QuantFormat, numel: usize) -> Result<Vec
             for (i, chunk) in raw.chunks_exact(2).enumerate() {
                 let bits = u16::from_le_bytes([chunk[0], chunk[1]]);
                 data[i] = quantize::f16_to_f32(bits);
+            }
+            Ok(data)
+        }
+        QuantFormat::BF16 => {
+            let mut data = vec![0.0f32; numel];
+            for (i, chunk) in raw.chunks_exact(2).enumerate() {
+                let bits = u16::from_le_bytes([chunk[0], chunk[1]]);
+                data[i] = quantize::bf16_to_f32(bits);
             }
             Ok(data)
         }

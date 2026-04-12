@@ -8,6 +8,7 @@ use crate::tensor::Tensor;
 /// Other quantization formats must be dequantized to f32 at load time.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WeightFormat {
+    BF16,
     Q2K,
     Q3K,
     Q4_0,
@@ -36,6 +37,7 @@ impl WeightFormat {
             | WeightFormat::Q5_1
             | WeightFormat::Q8_0
             | WeightFormat::Q8_1 => 32,
+            WeightFormat::BF16 => 1,
         }
     }
 }
