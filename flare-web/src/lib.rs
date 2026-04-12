@@ -790,6 +790,30 @@ impl FlareEngine {
         }
     }
 
+    /// Decode a single token ID to its text piece.
+    ///
+    /// Convenience wrapper around `decode_ids` for use directly inside a
+    /// `next_token()` loop so callers don't need a separate `FlareTokenizer`.
+    ///
+    /// Returns an empty string if no GGUF vocab is loaded.
+    ///
+    /// # JS example
+    /// ```javascript
+    /// engine.begin_stream(promptIds, 128);
+    /// requestAnimationFrame(function tick() {
+    ///   const id = engine.next_token();
+    ///   if (id !== undefined) output.textContent += engine.decode_token(id);
+    ///   if (!engine.stream_done) requestAnimationFrame(tick);
+    /// });
+    /// ```
+    #[wasm_bindgen]
+    pub fn decode_token(&self, id: u32) -> String {
+        match &self.gguf_vocab {
+            Some(vocab) => vocab.decode(&[id]),
+            None => String::new(),
+        }
+    }
+
     /// Full text-in / text-out generation using the embedded GGUF vocabulary.
     ///
     /// Encodes `prompt` with the embedded vocab, runs greedy generation for up
