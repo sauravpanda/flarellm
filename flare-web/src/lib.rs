@@ -258,9 +258,12 @@ pub struct FlareEngine {
     stream_rng_state: u32,
     /// Last token fed to the model (updated by begin_stream / next_token).
     stream_last_token: u32,
-    /// Rolling window of recent token IDs for repetition penalty (max 64 entries).
+    /// Rolling window of recent token IDs for repetition penalty.
     /// Seeded from the tail of the prompt and extended with each generated token.
     stream_recent_tokens: Vec<u32>,
+    /// Maximum number of recent tokens tracked for repetition penalty.
+    /// 0 disables repetition penalty entirely. Default: 64.
+    repeat_last_n: usize,
     /// Current sequence position (prompt length + tokens generated so far).
     stream_pos: usize,
     /// Remaining budget of tokens to generate in the current stream.
@@ -374,6 +377,7 @@ impl FlareEngine {
             stream_rng_state: 0x12345678,
             stream_last_token: 0,
             stream_recent_tokens: Vec::new(),
+            repeat_last_n: 64,
             stream_pos: 0,
             stream_remaining: 0,
             stream_done: true,
@@ -1207,12 +1211,18 @@ impl FlareEngine {
         self.stream_remaining = max_tokens as usize;
         self.stream_done = false;
         self.stream_stop_reason.clear();
-        // Seed the repetition-penalty window with the tail of the prompt (up to 64 tokens).
-        const REPEAT_WINDOW: usize = 64;
-        let n = effective.len().min(REPEAT_WINDOW);
+        // Seed the repetition-penalty window with the tail of the prompt.
+        let window = self.repeat_last_n;
+        let n = if window == 0 {
+            0
+        } else {
+            effective.len().min(window)
+        };
         self.stream_recent_tokens.clear();
-        self.stream_recent_tokens
-            .extend_from_slice(&effective[effective.len() - n..]);
+        if n > 0 {
+            self.stream_recent_tokens
+                .extend_from_slice(&effective[effective.len() - n..]);
+        }
         // Reset stop-sequence accumulator for this stream.
         self.stream_text_accum.clear();
     }
@@ -1246,11 +1256,17 @@ impl FlareEngine {
         self.stream_remaining = max_tokens as usize;
         self.stream_done = false;
         self.stream_stop_reason.clear();
-        const REPEAT_WINDOW: usize = 64;
-        let n = effective.len().min(REPEAT_WINDOW);
+        let window = self.repeat_last_n;
+        let n = if window == 0 {
+            0
+        } else {
+            effective.len().min(window)
+        };
         self.stream_recent_tokens.clear();
-        self.stream_recent_tokens
-            .extend_from_slice(&effective[effective.len() - n..]);
+        if n > 0 {
+            self.stream_recent_tokens
+                .extend_from_slice(&effective[effective.len() - n..]);
+        }
         self.stream_text_accum.clear();
     }
 
@@ -1318,12 +1334,13 @@ impl FlareEngine {
         self.stream_last_token = token_id;
         self.stream_pos += 1;
         self.kv_pos = self.stream_pos;
-        // Update rolling repetition-penalty window (max 64 tokens).
-        const REPEAT_WINDOW: usize = 64;
-        if self.stream_recent_tokens.len() >= REPEAT_WINDOW {
-            self.stream_recent_tokens.remove(0);
+        // Update rolling repetition-penalty window.
+        if self.repeat_last_n > 0 {
+            if self.stream_recent_tokens.len() >= self.repeat_last_n {
+                self.stream_recent_tokens.remove(0);
+            }
+            self.stream_recent_tokens.push(token_id);
         }
-        self.stream_recent_tokens.push(token_id);
         self.stream_remaining -= 1;
 
         if self.eos_token_id == Some(token_id) {
@@ -1444,6 +1461,27 @@ impl FlareEngine {
     #[wasm_bindgen]
     pub fn set_rng_seed(&mut self, seed: u32) {
         self.rng_seed = seed;
+    }
+
+    /// Set the repetition-penalty look-back window (number of recent tokens to
+    /// penalise).  Use `0` to disable repetition penalty entirely.  Default: 64.
+    ///
+    /// Takes effect on the next `begin_stream*` call.
+    ///
+    /// # JS example
+    /// ```javascript
+    /// engine.set_repeat_last_n(128); // wider window for creative writing
+    /// engine.set_repeat_last_n(0);   // disable repeat penalty
+    /// ```
+    #[wasm_bindgen]
+    pub fn set_repeat_last_n(&mut self, n: u32) {
+        self.repeat_last_n = n as usize;
+    }
+
+    /// Current repetition-penalty window size (0 = disabled).
+    #[wasm_bindgen(getter)]
+    pub fn repeat_last_n(&self) -> u32 {
+        self.repeat_last_n as u32
     }
 
     // -----------------------------------------------------------------------
@@ -1941,6 +1979,7 @@ impl FlareProgressiveLoader {
             stream_rng_state: 0x12345678,
             stream_last_token: 0,
             stream_recent_tokens: Vec::new(),
+            repeat_last_n: 64,
             stream_pos: 0,
             stream_remaining: 0,
             stream_done: true,
