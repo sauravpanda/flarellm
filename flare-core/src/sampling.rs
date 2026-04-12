@@ -358,4 +358,65 @@ mod tests {
         // Highest logit should have highest prob
         assert!(probs[2] > probs[1] && probs[1] > probs[0]);
     }
+
+    #[test]
+    fn test_greedy_negative_logits() {
+        // greedy should correctly pick the least-negative index
+        let logits = vec![-5.0, -1.0, -3.0, -0.5];
+        assert_eq!(sample_greedy(&logits), 3, "least-negative = index 3");
+    }
+
+    #[test]
+    fn test_temperature_zero_preserves_greedy_winner() {
+        // apply_temperature with 0.0 is a no-op; greedy on unchanged logits = same argmax
+        let logits = vec![0.5, 3.0, 1.5];
+        let mut scaled = logits.clone();
+        apply_temperature(&mut scaled, 0.0);
+        assert_eq!(
+            sample_greedy(&scaled),
+            sample_greedy(&logits),
+            "temp=0 noop should not change argmax"
+        );
+    }
+
+    #[test]
+    fn test_top_k_two_returns_one_of_top_two() {
+        // top_k=2 on [low, high, medium, very_low] — only tokens 1 and 2 are candidates
+        let logits = vec![0.1, 10.0, 5.0, 0.01];
+        for rng in [0.01f32, 0.5, 0.99] {
+            let token = sample_top_k(&logits, 2, rng);
+            assert!(
+                token == 1 || token == 2,
+                "top_k=2 must return token 1 or 2, got {token} for rng={rng}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_softmax_single_element() {
+        // softmax of a single logit is always [1.0]
+        let probs = softmax(&[42.0]);
+        assert_eq!(probs.len(), 1);
+        assert!(
+            (probs[0] - 1.0).abs() < 1e-6,
+            "single-element softmax = {}",
+            probs[0]
+        );
+    }
+
+    #[test]
+    fn test_repeat_penalty_reduces_positive_logit() {
+        // A positive logit at a repeated token position should be divided by the penalty
+        let mut logits = vec![1.0, 2.0, 3.0];
+        apply_repeat_penalty(&mut logits, &[2], 2.0);
+        // logits[2] was 3.0; 3.0 > 0 → divided by 2.0 = 1.5
+        assert!(
+            (logits[2] - 1.5).abs() < 1e-5,
+            "penalised logit = {}",
+            logits[2]
+        );
+        // Unaffected positions remain unchanged
+        assert_eq!(logits[0], 1.0);
+        assert_eq!(logits[1], 2.0);
+    }
 }
