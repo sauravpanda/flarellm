@@ -146,6 +146,9 @@ pub struct FlareEngine {
     stream_rng_state: u32,
     /// Last token fed to the model (updated by begin_stream / next_token).
     stream_last_token: u32,
+    /// Rolling window of recent token IDs for repetition penalty (max 64 entries).
+    /// Seeded from the tail of the prompt and extended with each generated token.
+    stream_recent_tokens: Vec<u32>,
     /// Current sequence position (prompt length + tokens generated so far).
     stream_pos: usize,
     /// Remaining budget of tokens to generate in the current stream.
@@ -228,6 +231,7 @@ impl FlareEngine {
             },
             stream_rng_state: 0x12345678,
             stream_last_token: 0,
+            stream_recent_tokens: Vec::new(),
             stream_pos: 0,
             stream_remaining: 0,
             stream_done: true,
@@ -383,6 +387,7 @@ impl FlareEngine {
     pub fn reset(&mut self) {
         self.model.reset();
         self.kv_pos = 0;
+        self.stream_recent_tokens.clear();
     }
 
     /// Get the vocabulary size of the loaded model.
@@ -766,9 +771,11 @@ impl FlareEngine {
     ///   probability ≥ `top_p` (1.0 = disabled; applied when < 1.0)
     /// - `top_k`: keep only the `top_k` highest-probability tokens before sampling
     ///   (0 = disabled; applied when `top_p` is 1.0 and `top_k` > 0)
+    /// - `repeat_penalty`: penalty applied to logits of recently-seen tokens to
+    ///   reduce repetition (1.0 = disabled, 1.1–1.3 = typical range)
     ///
     /// ```javascript
-    /// engine.begin_stream_with_params(promptIds, 200, 0.8, 0.95, 40);
+    /// engine.begin_stream_with_params(promptIds, 200, 0.8, 0.95, 40, 1.1);
     /// ```
     #[wasm_bindgen]
     pub fn begin_stream_with_params(
@@ -778,12 +785,13 @@ impl FlareEngine {
         temperature: f32,
         top_p: f32,
         top_k: u32,
+        repeat_penalty: f32,
     ) {
         self.stream_params = SamplingParams {
             temperature,
             top_p,
             top_k: top_k as usize,
-            repeat_penalty: 1.1,
+            repeat_penalty,
         };
         self.stream_rng_state = 0x12345678;
         self.begin_stream_impl(prompt_tokens, max_tokens);
@@ -807,6 +815,12 @@ impl FlareEngine {
         self.stream_last_token = *effective.last().unwrap_or(&0);
         self.stream_remaining = max_tokens as usize;
         self.stream_done = false;
+        // Seed the repetition-penalty window with the tail of the prompt (up to 64 tokens).
+        const REPEAT_WINDOW: usize = 64;
+        let n = effective.len().min(REPEAT_WINDOW);
+        self.stream_recent_tokens.clear();
+        self.stream_recent_tokens
+            .extend_from_slice(&effective[effective.len() - n..]);
     }
 
     /// Generate and return the next token ID, or `undefined` when the stream
@@ -834,6 +848,13 @@ impl FlareEngine {
             sampling::sample_greedy(logits_tensor.data())
         } else {
             let mut logits = logits_tensor.data().to_vec();
+            // Apply repetition penalty before temperature so penalty operates on
+            // raw logits (consistent with Generator::step and the llama.cpp convention).
+            sampling::apply_repeat_penalty(
+                &mut logits,
+                &self.stream_recent_tokens,
+                self.stream_params.repeat_penalty,
+            );
             sampling::apply_temperature(&mut logits, self.stream_params.temperature);
             // Advance LCG RNG state for this token.
             self.stream_rng_state = self
@@ -855,6 +876,12 @@ impl FlareEngine {
         self.stream_last_token = token_id;
         self.stream_pos += 1;
         self.kv_pos = self.stream_pos;
+        // Update rolling repetition-penalty window (max 64 tokens).
+        const REPEAT_WINDOW: usize = 64;
+        if self.stream_recent_tokens.len() >= REPEAT_WINDOW {
+            self.stream_recent_tokens.remove(0);
+        }
+        self.stream_recent_tokens.push(token_id);
         self.stream_remaining -= 1;
 
         if self.eos_token_id == Some(token_id) {
@@ -917,6 +944,7 @@ impl FlareEngine {
     /// - `temperature`: 0 = greedy, higher = more diverse
     /// - `top_p`: nucleus sampling (1.0 = disabled)
     /// - `top_k`: top-k sampling, applied when `top_p` is 1.0 (0 = disabled)
+    /// - `repeat_penalty`: repetition penalty applied to recently-seen tokens (1.0 = disabled)
     ///
     /// Stops early at EOS. Uses a fixed LCG RNG seed for reproducibility.
     #[wasm_bindgen]
@@ -927,13 +955,14 @@ impl FlareEngine {
         temperature: f32,
         top_p: f32,
         top_k: u32,
+        repeat_penalty: f32,
     ) -> Vec<u32> {
         let effective = self.with_bos(prompt_tokens);
         let params = SamplingParams {
             temperature,
             top_p,
             top_k: top_k as usize,
-            repeat_penalty: 1.1,
+            repeat_penalty,
         };
         let t0 = now_ms();
         let mut gen = Generator::new(&mut self.model, params);
@@ -1212,6 +1241,7 @@ impl FlareProgressiveLoader {
             },
             stream_rng_state: 0x12345678,
             stream_last_token: 0,
+            stream_recent_tokens: Vec::new(),
             stream_pos: 0,
             stream_remaining: 0,
             stream_done: true,
