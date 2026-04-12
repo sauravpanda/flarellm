@@ -218,4 +218,59 @@ mod tests {
         assert!(json.contains("chat.completion.chunk"));
         assert!(json.contains("Hi"));
     }
+
+    #[test]
+    fn test_deserialize_request_empty_messages() {
+        // Empty messages array is structurally valid (validation is the caller's job)
+        let json = r#"{"messages": []}"#;
+        let req: ChatCompletionRequest = serde_json::from_str(json).unwrap();
+        assert!(req.messages.is_empty());
+        assert_eq!(req.max_tokens, 256); // defaults applied
+    }
+
+    #[test]
+    fn test_deserialize_request_zero_max_tokens() {
+        let json = r#"{"messages": [], "max_tokens": 0}"#;
+        let req: ChatCompletionRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.max_tokens, 0);
+    }
+
+    #[test]
+    fn test_deserialize_request_model_field() {
+        // model field is optional — present case
+        let json = r#"{"model": "my-model", "messages": []}"#;
+        let req: ChatCompletionRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.model.as_deref(), Some("my-model"));
+
+        // absent case
+        let json2 = r#"{"messages": []}"#;
+        let req2: ChatCompletionRequest = serde_json::from_str(json2).unwrap();
+        assert!(req2.model.is_none());
+    }
+
+    #[test]
+    fn test_serialize_response_empty_content() {
+        let resp = ChatCompletionResponse::new("model", "".into(), 0, 0);
+        let json = serde_json::to_string(&resp).unwrap();
+        assert!(json.contains("\"total_tokens\":0"));
+        assert!(json.contains("\"content\":\"\""));
+    }
+
+    #[test]
+    fn test_serialize_chunk_with_finish_reason() {
+        let chunk = ChatCompletionChunk::new_delta("flare-1b", "id-99", None, Some("stop".into()));
+        let json = serde_json::to_string(&chunk).unwrap();
+        assert!(json.contains("\"finish_reason\":\"stop\""));
+        // content is None → should be absent (skip_serializing_if)
+        assert!(!json.contains("\"content\""));
+    }
+
+    #[test]
+    fn test_new_role_chunk() {
+        let chunk = ChatCompletionChunk::new_role("flare-1b", "id-42");
+        let json = serde_json::to_string(&chunk).unwrap();
+        assert!(json.contains("\"role\":\"assistant\""));
+        // content should be absent
+        assert!(!json.contains("\"content\""));
+    }
 }
