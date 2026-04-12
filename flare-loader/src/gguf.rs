@@ -88,6 +88,13 @@ impl MetadataValue {
             _ => None,
         }
     }
+
+    pub fn as_bool(&self) -> Option<bool> {
+        match self {
+            MetadataValue::Bool(v) => Some(*v),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
