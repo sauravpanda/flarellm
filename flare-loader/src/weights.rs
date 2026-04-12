@@ -1,10 +1,12 @@
 use std::collections::HashMap;
 use std::io::{Read, Seek};
 
+use flare_core::config::{Architecture, ModelConfig};
 use flare_core::model::{LayerWeights, ModelWeights};
 use flare_core::tensor::Tensor;
 
 use crate::gguf::{GgufError, GgufFile};
+use crate::safetensors::{SafeTensorInfo, SafeTensorsError, SafeTensorsFile};
 
 /// Load ModelWeights from a parsed GGUF file.
 ///
@@ -219,6 +221,234 @@ fn find_tensor(tensors: &HashMap<String, Tensor>, names: &[&str]) -> Result<Tens
     ))
 }
 
+// ---------------------------------------------------------------------------
+// SafeTensors loading
+// ---------------------------------------------------------------------------
+
+/// Infer a `ModelConfig` from the tensor shapes in a SafeTensors file.
+///
+/// Values that cannot be derived from weights alone (`rope_theta`,
+/// `rms_norm_eps`, `max_seq_len`) use standard defaults. For production use,
+/// parse the accompanying `config.json` and override these fields.
+pub fn infer_model_config_from_safetensors(
+    tensors: &HashMap<String, SafeTensorInfo>,
+) -> Result<ModelConfig, SafeTensorsError> {
+    // Embedding → [vocab_size, hidden_dim]
+    let emb = tensors
+        .get("model.embed_tokens.weight")
+        .ok_or_else(|| SafeTensorsError::TensorNotFound("model.embed_tokens.weight".into()))?;
+    let vocab_size = emb.shape[0];
+    let hidden_dim = emb.shape[1];
+
+    // Count transformer layers by probing for input_layernorm weights
+    let num_layers = (0usize..)
+        .take_while(|&i| {
+            tensors.contains_key(&format!("model.layers.{i}.input_layernorm.weight"))
+        })
+        .count();
+    if num_layers == 0 {
+        return Err(SafeTensorsError::TensorNotFound(
+            "model.layers.0.input_layernorm.weight".into(),
+        ));
+    }
+
+    // WQ shape → [num_heads * head_dim, hidden_dim]
+    let wq = tensors
+        .get("model.layers.0.self_attn.q_proj.weight")
+        .ok_or_else(|| {
+            SafeTensorsError::TensorNotFound("model.layers.0.self_attn.q_proj.weight".into())
+        })?;
+    let q_proj_out = wq.shape[0];
+
+    // WK shape → [num_kv_heads * head_dim, hidden_dim]
+    let wk = tensors
+        .get("model.layers.0.self_attn.k_proj.weight")
+        .ok_or_else(|| {
+            SafeTensorsError::TensorNotFound("model.layers.0.self_attn.k_proj.weight".into())
+        })?;
+    let k_proj_out = wk.shape[0];
+
+    // Infer head_dim: try common values in order of prevalence
+    let head_dim = [128usize, 64, 96, 48, 32]
+        .iter()
+        .copied()
+        .find(|&hd| q_proj_out % hd == 0 && k_proj_out % hd == 0)
+        .unwrap_or(64); // fallback — may be wrong for unusual architectures
+    let num_heads = q_proj_out / head_dim;
+    let num_kv_heads = k_proj_out / head_dim;
+
+    // Intermediate dim from gate proj shape → [intermediate_dim, hidden_dim]
+    let w_gate = tensors
+        .get("model.layers.0.mlp.gate_proj.weight")
+        .ok_or_else(|| {
+            SafeTensorsError::TensorNotFound("model.layers.0.mlp.gate_proj.weight".into())
+        })?;
+    let intermediate_dim = w_gate.shape[0];
+
+    Ok(ModelConfig {
+        architecture: Architecture::Llama,
+        vocab_size,
+        hidden_dim,
+        intermediate_dim,
+        num_layers,
+        num_heads,
+        num_kv_heads,
+        head_dim,
+        max_seq_len: 2048,
+        rope_theta: 10000.0,
+        rms_norm_eps: 1e-5,
+        attn_logit_softcap: 0.0,
+        final_logit_softcap: 0.0,
+    })
+}
+
+/// Like `find_tensor` but returns `SafeTensorsError`.
+fn find_st_tensor(
+    tensors: &HashMap<String, Tensor>,
+    names: &[&str],
+) -> Result<Tensor, SafeTensorsError> {
+    for name in names {
+        if let Some(t) = tensors.get(*name) {
+            return Ok(t.clone());
+        }
+    }
+    Err(SafeTensorsError::TensorNotFound(
+        names
+            .iter()
+            .map(|s| s.to_string())
+            .collect::<Vec<_>>()
+            .join(" | "),
+    ))
+}
+
+fn load_st_layer_weights(
+    tensors: &HashMap<String, Tensor>,
+    layer_idx: usize,
+) -> Result<LayerWeights, SafeTensorsError> {
+    let i = layer_idx;
+
+    let attn_norm = find_st_tensor(
+        tensors,
+        &[&format!("model.layers.{i}.input_layernorm.weight")],
+    )?;
+    let wq = find_st_tensor(
+        tensors,
+        &[&format!("model.layers.{i}.self_attn.q_proj.weight")],
+    )?;
+    let wk = find_st_tensor(
+        tensors,
+        &[&format!("model.layers.{i}.self_attn.k_proj.weight")],
+    )?;
+    let wv = find_st_tensor(
+        tensors,
+        &[&format!("model.layers.{i}.self_attn.v_proj.weight")],
+    )?;
+    let wo = find_st_tensor(
+        tensors,
+        &[&format!("model.layers.{i}.self_attn.o_proj.weight")],
+    )?;
+    let ffn_norm = find_st_tensor(
+        tensors,
+        &[&format!("model.layers.{i}.post_attention_layernorm.weight")],
+    )?;
+    let w_gate = find_st_tensor(
+        tensors,
+        &[&format!("model.layers.{i}.mlp.gate_proj.weight")],
+    )?;
+    let w_up =
+        find_st_tensor(tensors, &[&format!("model.layers.{i}.mlp.up_proj.weight")])?;
+    let w_down =
+        find_st_tensor(tensors, &[&format!("model.layers.{i}.mlp.down_proj.weight")])?;
+
+    let attn_q_bias = find_st_tensor(
+        tensors,
+        &[&format!("model.layers.{i}.self_attn.q_proj.bias")],
+    )
+    .ok();
+    let attn_k_bias = find_st_tensor(
+        tensors,
+        &[&format!("model.layers.{i}.self_attn.k_proj.bias")],
+    )
+    .ok();
+    let attn_v_bias = find_st_tensor(
+        tensors,
+        &[&format!("model.layers.{i}.self_attn.v_proj.bias")],
+    )
+    .ok();
+    let post_attn_norm = find_st_tensor(
+        tensors,
+        &[&format!("model.layers.{i}.post_attention_layernorm.weight")],
+    )
+    .ok();
+    let post_ffn_norm = find_st_tensor(
+        tensors,
+        &[&format!("model.layers.{i}.post_feedforward_layernorm.weight")],
+    )
+    .ok();
+
+    Ok(LayerWeights {
+        attn_norm,
+        wq,
+        wk,
+        wv,
+        wo,
+        ffn_norm,
+        w_gate,
+        w_up,
+        w_down,
+        attn_q_bias,
+        attn_k_bias,
+        attn_v_bias,
+        post_attn_norm,
+        post_ffn_norm,
+    })
+}
+
+/// Load `ModelWeights` and infer `ModelConfig` from a SafeTensors file.
+///
+/// Reads all tensors from `reader` in one pass, then maps them to the
+/// `LayerWeights` / `ModelWeights` structure using HuggingFace-style names
+/// (`model.layers.{i}.self_attn.q_proj.weight` etc.).
+///
+/// # Config inference
+/// `ModelConfig` fields that can be derived from tensor shapes are inferred
+/// automatically. Fields that require a separate `config.json`
+/// (`rope_theta`, `rms_norm_eps`, `max_seq_len`) are set to safe defaults.
+pub fn load_model_weights_from_safetensors<R: Read + Seek>(
+    sf: &SafeTensorsFile,
+    reader: &mut R,
+) -> Result<(ModelWeights, ModelConfig), SafeTensorsError> {
+    // Load all tensors into memory up front
+    let mut tensors: HashMap<String, Tensor> = HashMap::with_capacity(sf.tensors.len());
+    for name in sf.tensor_names() {
+        let tensor = sf.read_tensor(reader, name)?;
+        tensors.insert(name.to_string(), tensor);
+    }
+
+    let config = infer_model_config_from_safetensors(&sf.tensors)?;
+
+    let token_embedding =
+        find_st_tensor(&tensors, &["model.embed_tokens.weight"])?;
+    let output_norm = find_st_tensor(&tensors, &["model.norm.weight"])?;
+    let output_weight = find_st_tensor(&tensors, &["lm_head.weight"])
+        .unwrap_or_else(|_| token_embedding.clone());
+
+    let mut layers = Vec::with_capacity(config.num_layers);
+    for i in 0..config.num_layers {
+        layers.push(load_st_layer_weights(&tensors, i)?);
+    }
+
+    Ok((
+        ModelWeights {
+            token_embedding,
+            layers,
+            output_norm,
+            output_weight,
+        },
+        config,
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -363,5 +593,107 @@ mod tests {
         // Layer 5 doesn't exist
         let result = load_layer_weights(&tensors, 5);
         assert!(result.is_err());
+    }
+
+    // ---- SafeTensors config inference ----
+
+    fn make_st_info(shape: Vec<usize>) -> SafeTensorInfo {
+        let numel: usize = shape.iter().product::<usize>().max(1);
+        SafeTensorInfo {
+            name: String::new(),
+            dtype: crate::safetensors::Dtype::F32,
+            shape,
+            start: 0,
+            end: numel * 4,
+        }
+    }
+
+    fn build_st_tensors(
+        vocab: usize,
+        hidden: usize,
+        inter: usize,
+        num_heads: usize,
+        num_kv_heads: usize,
+        head_dim: usize,
+        num_layers: usize,
+    ) -> HashMap<String, SafeTensorInfo> {
+        let mut m = HashMap::new();
+        m.insert(
+            "model.embed_tokens.weight".into(),
+            make_st_info(vec![vocab, hidden]),
+        );
+        m.insert("model.norm.weight".into(), make_st_info(vec![hidden]));
+        m.insert(
+            "lm_head.weight".into(),
+            make_st_info(vec![vocab, hidden]),
+        );
+        for i in 0..num_layers {
+            m.insert(
+                format!("model.layers.{i}.input_layernorm.weight"),
+                make_st_info(vec![hidden]),
+            );
+            m.insert(
+                format!("model.layers.{i}.self_attn.q_proj.weight"),
+                make_st_info(vec![num_heads * head_dim, hidden]),
+            );
+            m.insert(
+                format!("model.layers.{i}.self_attn.k_proj.weight"),
+                make_st_info(vec![num_kv_heads * head_dim, hidden]),
+            );
+            m.insert(
+                format!("model.layers.{i}.self_attn.v_proj.weight"),
+                make_st_info(vec![num_kv_heads * head_dim, hidden]),
+            );
+            m.insert(
+                format!("model.layers.{i}.self_attn.o_proj.weight"),
+                make_st_info(vec![hidden, num_heads * head_dim]),
+            );
+            m.insert(
+                format!("model.layers.{i}.post_attention_layernorm.weight"),
+                make_st_info(vec![hidden]),
+            );
+            m.insert(
+                format!("model.layers.{i}.mlp.gate_proj.weight"),
+                make_st_info(vec![inter, hidden]),
+            );
+            m.insert(
+                format!("model.layers.{i}.mlp.up_proj.weight"),
+                make_st_info(vec![inter, hidden]),
+            );
+            m.insert(
+                format!("model.layers.{i}.mlp.down_proj.weight"),
+                make_st_info(vec![hidden, inter]),
+            );
+        }
+        m
+    }
+
+    #[test]
+    fn test_infer_config_from_safetensors() {
+        let tensors = build_st_tensors(32000, 4096, 11008, 32, 8, 128, 32);
+        let cfg = infer_model_config_from_safetensors(&tensors).unwrap();
+        assert_eq!(cfg.vocab_size, 32000);
+        assert_eq!(cfg.hidden_dim, 4096);
+        assert_eq!(cfg.intermediate_dim, 11008);
+        assert_eq!(cfg.num_layers, 32);
+        assert_eq!(cfg.num_heads, 32);
+        assert_eq!(cfg.num_kv_heads, 8);
+        assert_eq!(cfg.head_dim, 128);
+    }
+
+    #[test]
+    fn test_infer_config_gqa() {
+        // Llama-3.1-8B: hidden=4096, heads=32, kv_heads=8, head_dim=128
+        let tensors = build_st_tensors(128256, 4096, 14336, 32, 8, 128, 32);
+        let cfg = infer_model_config_from_safetensors(&tensors).unwrap();
+        assert_eq!(cfg.num_heads, 32);
+        assert_eq!(cfg.num_kv_heads, 8);
+        assert_eq!(cfg.head_dim, 128);
+    }
+
+    #[test]
+    fn test_infer_config_missing_embedding_fails() {
+        let m: HashMap<String, SafeTensorInfo> = HashMap::new();
+        assert!(infer_model_config_from_safetensors(&m).is_err());
     }
 }
