@@ -124,6 +124,11 @@ pub struct FlareEngine {
     gguf_vocab: Option<GgufVocab>,
     /// EOS token ID from GGUF metadata; generation stops when this token is produced.
     eos_token_id: Option<u32>,
+    /// BOS (beginning of sequence) token ID from GGUF metadata.
+    bos_token_id: Option<u32>,
+    /// Raw Jinja2 chat template string from `tokenizer.chat_template` in GGUF metadata.
+    /// `None` if the GGUF file did not include a chat template.
+    raw_chat_template: Option<String>,
     // --- Token-by-token streaming state ---
     /// Last token fed to the model (updated by begin_stream / next_token).
     stream_last_token: u32,
@@ -164,6 +169,15 @@ impl FlareEngine {
             .metadata
             .get("tokenizer.ggml.eos_token_id")
             .and_then(|v| v.as_u32());
+        let bos_token_id = gguf
+            .metadata
+            .get("tokenizer.ggml.bos_token_id")
+            .and_then(|v| v.as_u32());
+        let raw_chat_template = gguf
+            .metadata
+            .get("tokenizer.chat_template")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
         let gguf_vocab = GgufVocab::from_gguf(&gguf).ok();
         let config = gguf
             .to_model_config()
@@ -176,6 +190,8 @@ impl FlareEngine {
             chat_template,
             gguf_vocab,
             eos_token_id,
+            bos_token_id,
+            raw_chat_template,
             stream_last_token: 0,
             stream_pos: 0,
             stream_remaining: 0,
@@ -350,6 +366,26 @@ impl FlareEngine {
     #[wasm_bindgen(getter)]
     pub fn eos_token_id(&self) -> Option<u32> {
         self.eos_token_id
+    }
+
+    /// BOS (beginning of sequence) token ID from the GGUF model metadata, if present.
+    /// Some models require this to be prepended to the input token sequence.
+    #[wasm_bindgen(getter)]
+    pub fn bos_token_id(&self) -> Option<u32> {
+        self.bos_token_id
+    }
+
+    /// Raw Jinja2 chat template string from the GGUF model metadata, if present.
+    ///
+    /// This is the `tokenizer.chat_template` field embedded by the model author.
+    /// Use this with a JavaScript Jinja2 renderer (e.g. `nunjucks`) for accurate
+    /// prompt formatting across all model families, rather than relying on the
+    /// simplified built-in `apply_chat_template`.
+    ///
+    /// Returns `undefined` if the GGUF file did not include a chat template.
+    #[wasm_bindgen(getter)]
+    pub fn raw_chat_template(&self) -> Option<String> {
+        self.raw_chat_template.clone()
     }
 
     /// Maximum sequence length (context window size) of the loaded model.
@@ -877,6 +913,15 @@ impl FlareProgressiveLoader {
             .metadata
             .get("tokenizer.ggml.eos_token_id")
             .and_then(|v| v.as_u32());
+        let bos_token_id = gguf
+            .metadata
+            .get("tokenizer.ggml.bos_token_id")
+            .and_then(|v| v.as_u32());
+        let raw_chat_template = gguf
+            .metadata
+            .get("tokenizer.chat_template")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
         let gguf_vocab = GgufVocab::from_gguf(&gguf).ok();
         let config = gguf
             .to_model_config()
@@ -895,6 +940,8 @@ impl FlareProgressiveLoader {
             chat_template,
             gguf_vocab,
             eos_token_id,
+            bos_token_id,
+            raw_chat_template,
             stream_last_token: 0,
             stream_pos: 0,
             stream_remaining: 0,
