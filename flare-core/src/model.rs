@@ -201,6 +201,30 @@ pub trait ComputeBackend: Send + Sync {
         }
         output
     }
+
+    /// Apply RMSNorm to every row in `input` using the given `weight` vector.
+    ///
+    /// - `input`:  f32 batch `[batch × dim]`, row-major
+    /// - `weight`: f32 norm weights `[dim]`
+    /// - Returns:  f32 result `[batch × dim]`, row-major
+    ///
+    /// GPU backends override this for a single kernel dispatch;
+    /// the default loops over rows and calls the scalar `rmsnorm`.
+    fn batched_rmsnorm(
+        &self,
+        input: &[f32],
+        weight: &[f32],
+        dim: usize,
+        batch: usize,
+        eps: f32,
+    ) -> Vec<f32> {
+        (0..batch)
+            .flat_map(|b| {
+                let row = &input[b * dim..(b + 1) * dim];
+                rmsnorm(row, weight, eps)
+            })
+            .collect()
+    }
 }
 
 /// Default CPU compute backend. Uses optimized scalar loops.
@@ -602,15 +626,16 @@ impl Model {
         for layer_idx in 0..num_layers {
             // --- Attention block ---
 
-            // RMSNorm all rows
+            // RMSNorm all rows — single GPU dispatch.
             let normed_batch: Vec<f32> = {
                 let attn_norm: Vec<f32> = self.weights.layers[layer_idx].attn_norm.data().to_vec();
-                (0..seq_len)
-                    .flat_map(|t| {
-                        let row = &x_batch[t * dim..(t + 1) * dim];
-                        rmsnorm(row, &attn_norm, config.rms_norm_eps)
-                    })
-                    .collect()
+                self.backend.batched_rmsnorm(
+                    &x_batch,
+                    &attn_norm,
+                    dim,
+                    seq_len,
+                    config.rms_norm_eps,
+                )
             };
 
             // Q/K/V projections: single batched dispatch per matrix, then per-token bias+RoPE.
@@ -714,12 +739,8 @@ impl Model {
             // --- FFN block ---
             let normed_batch2: Vec<f32> = {
                 let ffn_norm: Vec<f32> = self.weights.layers[layer_idx].ffn_norm.data().to_vec();
-                (0..seq_len)
-                    .flat_map(|t| {
-                        let row = &x_batch[t * dim..(t + 1) * dim];
-                        rmsnorm(row, &ffn_norm, config.rms_norm_eps)
-                    })
-                    .collect()
+                self.backend
+                    .batched_rmsnorm(&x_batch, &ffn_norm, dim, seq_len, config.rms_norm_eps)
             };
 
             {
