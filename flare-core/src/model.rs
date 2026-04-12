@@ -9,6 +9,7 @@ use crate::tensor::Tensor;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WeightFormat {
     BF16,
+    F16,
     Q2K,
     Q3K,
     Q4_0,
@@ -37,7 +38,7 @@ impl WeightFormat {
             | WeightFormat::Q5_1
             | WeightFormat::Q8_0
             | WeightFormat::Q8_1 => 32,
-            WeightFormat::BF16 => 1,
+            WeightFormat::BF16 | WeightFormat::F16 => 1,
         }
     }
 }

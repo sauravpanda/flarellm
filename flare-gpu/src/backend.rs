@@ -27,6 +27,7 @@ const ATTENTION_SHADER: &str = include_str!("../shaders/attention.wgsl");
 const DEQUANT_Q4_1_SHADER: &str = include_str!("../shaders/dequant_q4_1.wgsl");
 const DEQUANT_Q4K_SHADER: &str = include_str!("../shaders/dequant_q4k.wgsl");
 const DEQUANT_MATVEC_BF16_SHADER: &str = include_str!("../shaders/dequant_matvec_bf16.wgsl");
+const DEQUANT_MATVEC_F16_SHADER: &str = include_str!("../shaders/dequant_matvec_f16.wgsl");
 const DEQUANT_MATVEC_Q2K_SHADER: &str = include_str!("../shaders/dequant_matvec_q2k.wgsl");
 const DEQUANT_MATVEC_Q3K_SHADER: &str = include_str!("../shaders/dequant_matvec_q3k.wgsl");
 const DEQUANT_MATVEC_Q4_0_SHADER: &str = include_str!("../shaders/dequant_matvec_q4_0.wgsl");
@@ -544,6 +545,74 @@ impl WebGpuBackend {
                 let bind_group =
                     self.make_bind_group(cached, &raw_buf, &vec_buf, &out_buf, &params_buf);
                 // One workgroup per output row.
+                self.dispatch_and_readback(
+                    &cached.pipeline,
+                    &bind_group,
+                    [num_rows as u32, batch as u32, 1],
+                    &out_buf,
+                    output_size,
+                )
+            },
+        );
+
+        self.pool.return_storage(raw_buf);
+        self.pool.return_storage(vec_buf);
+        self.pool.return_output(out_buf);
+        self.pool.return_uniform(params_buf);
+
+        result
+    }
+
+    /// Fused F16 dequantize + batched matrix-vector multiply.
+    ///
+    /// Reads packed F16 (IEEE 754 half-precision) weight data, converts each
+    /// value to F32 on-the-fly using WGSL's `unpack2x16float`, and accumulates
+    /// the dot products with `input` in the same kernel.
+    ///
+    /// - `raw_bytes`: F16 weight data — `num_rows × num_cols × 2` bytes
+    ///   (padded to 4-byte multiple by caller if needed)
+    /// - `input`: f32 input matrix of length `batch × num_cols`
+    /// - `num_blocks_per_row`: equals `num_cols` (weights_per_block = 1 for F16)
+    /// - Returns `batch × num_rows` f32 dot products
+    pub fn dequant_matvec_f16(
+        &self,
+        raw_bytes: &[u8],
+        input: &[f32],
+        num_rows: usize,
+        num_blocks_per_row: usize,
+        batch: usize,
+    ) -> Vec<f32> {
+        let output_size = num_rows as u64 * batch as u64 * 4;
+
+        // F16 data may not be u32-aligned — pad to next multiple of 4.
+        #[allow(clippy::manual_is_multiple_of)]
+        let raw_buf = if raw_bytes.len() % 4 == 0 {
+            self.pool.get_storage(&self.device, &self.queue, raw_bytes)
+        } else {
+            let mut padded = raw_bytes.to_vec();
+            padded.resize((padded.len() + 3) & !3, 0);
+            self.pool.get_storage(&self.device, &self.queue, &padded)
+        };
+        let vec_buf = self
+            .pool
+            .get_storage(&self.device, &self.queue, bytemuck::cast_slice(input));
+        let out_buf = self.pool.get_output(&self.device, output_size);
+
+        let params: [u32; 3] = [num_rows as u32, num_blocks_per_row as u32, batch as u32];
+        let params_buf =
+            self.pool
+                .get_uniform(&self.device, &self.queue, bytemuck::cast_slice(&params));
+
+        let layout_entries = Self::standard_layout();
+        let result = self.cache.with_pipeline(
+            &self.device,
+            "dequant_matvec_f16",
+            DEQUANT_MATVEC_F16_SHADER,
+            "dequant_matvec_f16",
+            &layout_entries,
+            |cached| {
+                let bind_group =
+                    self.make_bind_group(cached, &raw_buf, &vec_buf, &out_buf, &params_buf);
                 self.dispatch_and_readback(
                     &cached.pipeline,
                     &bind_group,
@@ -2216,6 +2285,9 @@ impl ComputeBackend for WebGpuBackend {
                 weight.blocks_per_row,
                 batch,
             ),
+            WeightFormat::F16 => {
+                self.dequant_matvec_f16(&weight.data, input, num_rows, weight.blocks_per_row, batch)
+            }
             WeightFormat::Q4_1 => self.dequant_matvec_q4_1(
                 &weight.data,
                 input,
