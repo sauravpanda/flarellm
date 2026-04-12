@@ -2589,6 +2589,49 @@ mod tests {
         }
     }
 
+    #[test]
+    fn test_dequant_iq3xxs_negative_d() {
+        // d = -1.0 → dl = -1*(0.5+0)*0.5 = -0.25; grid[0] bytes=4 → output = -0.25*4 = -1.0
+        let grid = iq3xxs_grid_fixture();
+        let mut block = make_iq3xxs_zero_block();
+        block[0] = 0x00;
+        block[1] = 0xBC; // f16 -1.0
+        let mut output = [0.0f32; 256];
+        dequant_iq3xxs_block(&block, &grid, &mut output);
+        for (i, &v) in output.iter().enumerate() {
+            assert!(
+                (v - (-1.0)).abs() < 1e-5,
+                "iq3xxs neg d: weight[{i}] = {v}, expected -1.0"
+            );
+        }
+    }
+
+    #[test]
+    fn test_dequant_iq3xxs_second_ib32() {
+        // ib32=1: aux32 at block[70..73]; sub_scale=3 in bits 31:28 → block[73]=0x30
+        // dl = 1*(0.5+3)*0.5 = 1.75; grid[0] bytes=4 → output[32..64] = 1.75*4 = 7.0
+        // ib32=0 sub_scale=0 → dl=0.25 → output[0..32] = 1.0
+        let grid = iq3xxs_grid_fixture();
+        let mut block = make_iq3xxs_zero_block();
+        block[73] = 0x30; // aux32[1] bits 31:28 = 3
+        let mut output = [0.0f32; 256];
+        dequant_iq3xxs_block(&block, &grid, &mut output);
+        let expected_ib1 = (0.5f32 + 3.0) * 0.5 * 4.0; // 7.0
+        for (i, &v) in output[32..64].iter().enumerate() {
+            assert!(
+                (v - expected_ib1).abs() < 1e-4,
+                "iq3xxs 2nd ib32: output[{}] = {v}, expected {expected_ib1}",
+                i + 32
+            );
+        }
+        for (i, &v) in output[0..32].iter().enumerate() {
+            assert!(
+                (v - 1.0).abs() < 1e-5,
+                "iq3xxs 2nd ib32 group0: output[{i}] = {v}, expected 1.0"
+            );
+        }
+    }
+
     // ── IQ2_XXS tests ─────────────────────────────────────────────────────────
 
     fn iq2xxs_grid_fixture() -> Box<[u64; 256]> {
@@ -4027,6 +4070,50 @@ mod tests {
             assert!(
                 (v - 5.0).abs() < 1e-5,
                 "iq3s last ib32 scale rest: weight[{i}] = {v}, expected 5.0"
+            );
+        }
+    }
+
+    #[test]
+    fn test_dequant_iq3s_negative_d() {
+        // d = -1.0 → db = -1*(1+2*0) = -1.0; grid[0] bytes=5 → output = -5.0 for all
+        let grid = iq3s_grid_fixture();
+        let mut block = make_iq3s_zero_block();
+        block[0] = 0x00;
+        block[1] = 0xBC; // f16 -1.0
+        let mut output = [0.0f32; 256];
+        dequant_iq3s_block(&block, &grid, &mut output);
+        for (i, &v) in output.iter().enumerate() {
+            assert!(
+                (v - (-5.0)).abs() < 1e-5,
+                "iq3s neg d: weight[{i}] = {v}, expected -5.0"
+            );
+        }
+    }
+
+    #[test]
+    fn test_dequant_iq3s_second_ib32() {
+        // ib32=0 scale: block[106] lo nibble = 0 → db=1.0 → output[0..32] = 5.0
+        // ib32=1 scale: block[106] hi nibble = 5 → nibble=5 → db=1*(1+10)=11.0 → output[32..64]=55.0
+        let grid = iq3s_grid_fixture();
+        let mut block = make_iq3s_zero_block();
+        block[106] = 0x50; // lo nibble=0 (ib32=0), hi nibble=5 (ib32=1)
+        let mut output = [0.0f32; 256];
+        dequant_iq3s_block(&block, &grid, &mut output);
+        // ib32=0: db=1.0, grid[0]=5 → 5.0
+        for (i, &v) in output[0..32].iter().enumerate() {
+            assert!(
+                (v - 5.0).abs() < 1e-5,
+                "iq3s 2nd ib32 group0: output[{i}] = {v}, expected 5.0"
+            );
+        }
+        // ib32=1: db=11.0, grid[0]=5 → 55.0
+        let expected = 11.0f32 * 5.0;
+        for (i, &v) in output[32..64].iter().enumerate() {
+            assert!(
+                (v - expected).abs() < 1e-4,
+                "iq3s 2nd ib32: output[{}] = {v}, expected {expected}",
+                i + 32
             );
         }
     }
