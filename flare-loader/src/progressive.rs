@@ -283,4 +283,75 @@ mod tests {
         assert!(config.cache_weights);
         assert_eq!(config.chunk_size, 2 * 1024 * 1024);
     }
+
+    #[test]
+    fn test_progress_partial_stages() {
+        // total_layers=2 → denominator=4 (embedding + 2 layers + output)
+        let progress = LoadProgress::new(2);
+        assert!((progress.progress() - 0.0).abs() < 1e-5);
+        progress.set_embedding_ready();
+        assert!((progress.progress() - 0.25).abs() < 1e-5); // 1/4
+        progress.mark_layer_loaded();
+        assert!((progress.progress() - 0.5).abs() < 1e-5); // 2/4
+        progress.mark_layer_loaded();
+        assert!((progress.progress() - 0.75).abs() < 1e-5); // 3/4
+        progress.set_output_ready();
+        assert!((progress.progress() - 1.0).abs() < 1e-5); // 4/4
+    }
+
+    #[test]
+    fn test_is_layer_ready_out_of_bounds() {
+        let progress = LoadProgress::new(4);
+        progress.mark_layer_loaded();
+        progress.mark_layer_loaded();
+        // 2 layers loaded → indices 0 and 1 ready; large index is not
+        assert!(!progress.is_layer_ready(1000));
+    }
+
+    #[test]
+    fn test_extract_layer_index_multi_digit() {
+        assert_eq!(extract_layer_index("blk.22.attn_q.weight"), Some(22));
+        assert_eq!(extract_layer_index("blk.100.ffn_down.weight"), Some(100));
+    }
+
+    #[test]
+    fn test_extract_layer_index_unexpected_prefix() {
+        assert_eq!(extract_layer_index("rope.freqs"), None);
+        assert_eq!(extract_layer_index("norm.weight"), None);
+    }
+
+    #[test]
+    fn test_load_plan_no_layer_tensors() {
+        // Only embedding and output — layer steps should be present but empty (size=0)
+        let tensors = vec![
+            ("token_embd.weight".into(), 0u64, 100u64),
+            ("output.weight".into(), 100, 100),
+        ];
+        let plan = LoadPlan::from_tensor_info(&tensors, 2);
+        assert_eq!(plan.steps[0].component, "embedding");
+        assert_eq!(plan.steps[1].component, "layer.0");
+        assert_eq!(plan.steps[1].size, 0);
+        assert_eq!(plan.steps[2].component, "layer.1");
+        assert_eq!(plan.steps[2].size, 0);
+        assert_eq!(plan.steps[3].component, "output");
+    }
+
+    #[test]
+    fn test_load_plan_layer_size_aggregation() {
+        // Two tensors in layer 0 — their sizes should be summed
+        let tensors = vec![
+            ("token_embd.weight".into(), 0u64, 50u64),
+            ("blk.0.attn_q.weight".into(), 50, 100),
+            ("blk.0.attn_k.weight".into(), 150, 200),
+            ("output.weight".into(), 350, 50),
+        ];
+        let plan = LoadPlan::from_tensor_info(&tensors, 1);
+        let layer_step = plan
+            .steps
+            .iter()
+            .find(|s| s.component == "layer.0")
+            .unwrap();
+        assert_eq!(layer_step.size, 300); // 100 + 200
+        assert_eq!(layer_step.offset, 50); // min of 50 and 150
+    }
 }
