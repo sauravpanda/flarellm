@@ -1154,7 +1154,7 @@ mod tests {
     #[test]
     #[ignore]
     fn test_dequant_q4k_matches_cpu() {
-        let mut raw = vec![0u8; 144];
+        let mut raw = [0u8; 144];
         // d = 1.0 as f16 LE
         raw[0] = 0x00;
         raw[1] = 0x3C;
@@ -1201,7 +1201,7 @@ mod tests {
     #[test]
     #[ignore]
     fn test_dequant_matvec_q4k_matches_cpu() {
-        let mut raw = vec![0u8; 144];
+        let mut raw = [0u8; 144];
         // d = 1.0 as f16 LE
         raw[0] = 0x00;
         raw[1] = 0x3C;
@@ -1217,7 +1217,7 @@ mod tests {
         }
 
         // Input: all ones
-        let input = vec![1.0f32; 256];
+        let input = [1.0f32; 256];
 
         let backend = pollster::block_on(WebGpuBackend::new()).expect("GPU backend unavailable");
         let result = backend.dequant_matvec_q4k(&raw, &input, 1, 1);
@@ -1238,7 +1238,7 @@ mod tests {
     #[test]
     #[ignore]
     fn test_dequant_matvec_q4k_multi_row() {
-        let mut block = vec![0u8; 144];
+        let mut block = [0u8; 144];
         block[0] = 0x00;
         block[1] = 0x3C; // d = 1.0
         for b in block[4..8].iter_mut() {
@@ -1251,7 +1251,7 @@ mod tests {
         // 3 rows × 1 block each
         let num_rows = 3usize;
         let raw: Vec<u8> = block.iter().copied().cycle().take(144 * num_rows).collect();
-        let input = vec![1.0f32; 256];
+        let input = [1.0f32; 256];
 
         let backend = pollster::block_on(WebGpuBackend::new()).expect("GPU backend unavailable");
         let result = backend.dequant_matvec_q4k(&raw, &input, num_rows, 1);
