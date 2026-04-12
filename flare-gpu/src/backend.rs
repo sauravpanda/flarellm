@@ -40,6 +40,7 @@ const DEQUANT_MATVEC_Q4K_SHADER: &str = include_str!("../shaders/dequant_matvec_
 const DEQUANT_MATVEC_Q5K_SHADER: &str = include_str!("../shaders/dequant_matvec_q5k.wgsl");
 const DEQUANT_MATVEC_Q6K_SHADER: &str = include_str!("../shaders/dequant_matvec_q6k.wgsl");
 const DEQUANT_MATVEC_IQ4NL_SHADER: &str = include_str!("../shaders/dequant_matvec_iq4nl.wgsl");
+const DEQUANT_MATVEC_IQ2XXS_SHADER: &str = include_str!("../shaders/dequant_matvec_iq2xxs.wgsl");
 const DEQUANT_Q5K_SHADER: &str = include_str!("../shaders/dequant_q5k.wgsl");
 const DEQUANT_Q6K_SHADER: &str = include_str!("../shaders/dequant_q6k.wgsl");
 const PREFILL_ATTENTION_SHADER: &str = include_str!("../shaders/prefill_attention.wgsl");
@@ -797,6 +798,72 @@ impl WebGpuBackend {
             "dequant_matvec_iq4nl",
             DEQUANT_MATVEC_IQ4NL_SHADER,
             "dequant_matvec_iq4nl",
+            &layout_entries,
+            |cached| {
+                let bind_group =
+                    self.make_bind_group(cached, &raw_buf, &vec_buf, &out_buf, &params_buf);
+                self.dispatch_and_readback(
+                    &cached.pipeline,
+                    &bind_group,
+                    [num_rows as u32, batch as u32, 1],
+                    &out_buf,
+                    output_size,
+                )
+            },
+        );
+
+        self.pool.return_storage(raw_buf);
+        self.pool.return_storage(vec_buf);
+        self.pool.return_output(out_buf);
+        self.pool.return_uniform(params_buf);
+
+        result
+    }
+
+    /// Fused IQ2_XXS dequantize + batched matrix-vector multiply.
+    ///
+    /// IQ2_XXS (GGUF type 16) is a 2.06-bit quantization format using a 256-entry
+    /// grid lookup table.  Each super-block is 66 bytes (2 bytes f16 scale + 64 bytes qs)
+    /// covering 256 weights.
+    ///
+    /// - `raw_bytes`: packed GGUF tensor data — `num_rows × num_blocks_per_row × 66` bytes
+    /// - `input`: f32 input matrix of length `batch × num_blocks_per_row × 256`
+    /// - Returns `batch × num_rows` f32 dot products
+    pub fn dequant_matvec_iq2xxs(
+        &self,
+        raw_bytes: &[u8],
+        input: &[f32],
+        num_rows: usize,
+        num_blocks_per_row: usize,
+        batch: usize,
+    ) -> Vec<f32> {
+        let output_size = num_rows as u64 * batch as u64 * 4;
+
+        // 66 bytes is not u32-aligned — pad to next multiple of 4.
+        #[allow(clippy::manual_is_multiple_of)]
+        let raw_buf = if raw_bytes.len() % 4 == 0 {
+            self.pool.get_storage(&self.device, &self.queue, raw_bytes)
+        } else {
+            let mut padded = raw_bytes.to_vec();
+            padded.resize((padded.len() + 3) & !3, 0);
+            self.pool.get_storage(&self.device, &self.queue, &padded)
+        };
+        let vec_buf = self
+            .pool
+            .get_storage(&self.device, &self.queue, bytemuck::cast_slice(input));
+        let out_buf = self.pool.get_output(&self.device, output_size);
+
+        let params: [u32; 3] = [num_rows as u32, num_blocks_per_row as u32, batch as u32];
+        let params_buf =
+            self.pool
+                .get_uniform(&self.device, &self.queue, bytemuck::cast_slice(&params));
+
+        let layout_entries = Self::standard_layout();
+        let result = self.cache.with_pipeline(
+            &self.device,
+            "dequant_matvec_iq2xxs",
+            DEQUANT_MATVEC_IQ2XXS_SHADER,
+            "dequant_matvec_iq2xxs",
             &layout_entries,
             |cached| {
                 let bind_group =
@@ -2464,6 +2531,13 @@ impl ComputeBackend for WebGpuBackend {
                 self.dequant_matvec_q6k(&weight.data, input, num_rows, weight.blocks_per_row, batch)
             }
             WeightFormat::IQ4NL => self.dequant_matvec_iq4nl(
+                &weight.data,
+                input,
+                num_rows,
+                weight.blocks_per_row,
+                batch,
+            ),
+            WeightFormat::IQ2XXS => self.dequant_matvec_iq2xxs(
                 &weight.data,
                 input,
                 num_rows,

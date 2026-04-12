@@ -16,6 +16,7 @@ pub enum QuantFormat {
     Q5K,
     Q6K,
     IQ4NL,
+    IQ2XXS,
     Unknown(u32),
 }
 
@@ -36,6 +37,7 @@ impl QuantFormat {
             12 => QuantFormat::Q4K,
             13 => QuantFormat::Q5K,
             14 => QuantFormat::Q6K,
+            16 => QuantFormat::IQ2XXS,
             20 => QuantFormat::IQ4NL,
             other => QuantFormat::Unknown(other),
         }
@@ -53,6 +55,7 @@ impl QuantFormat {
             QuantFormat::Q3K => 3.4,
             QuantFormat::Q6K => 6.6,
             QuantFormat::IQ4NL => 4.5, // 4 bits + 2-byte scale per 32 weights
+            QuantFormat::IQ2XXS => 2.0625, // 66 bytes per 256 weights
             QuantFormat::Unknown(_) => 32.0, // assume worst case
         }
     }
@@ -68,7 +71,8 @@ impl QuantFormat {
             | QuantFormat::Q3K
             | QuantFormat::Q4K
             | QuantFormat::Q5K
-            | QuantFormat::Q6K => 256,
+            | QuantFormat::Q6K
+            | QuantFormat::IQ2XXS => 256,
             QuantFormat::Unknown(_) => 1,
         }
     }
@@ -89,6 +93,7 @@ impl QuantFormat {
             QuantFormat::Q4K => 144, // 2 (d) + 2 (dmin) + 12 (scales) + 128 (qs)
             QuantFormat::Q5K => 176, // 2 (d) + 2 (dmin) + 12 (scales) + 32 (qh) + 128 (ql)
             QuantFormat::Q6K => 210, // 128 (ql) + 64 (qh) + 16 (scales) + 2 (d)
+            QuantFormat::IQ2XXS => 66, // 2 (d) + 64 (qs[32] × u16) for 256 weights
             QuantFormat::Unknown(_) => 4,
         }
     }
