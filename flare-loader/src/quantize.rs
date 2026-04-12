@@ -892,6 +892,103 @@ mod tests {
     }
 
     #[test]
+    fn test_f16_to_f32_negative_zero() {
+        // 0x8000 = negative zero in f16 (sign=1, exp=0, mant=0)
+        let val = f16_to_f32(0x8000);
+        assert_eq!(val, 0.0);
+        // Negative zero has its sign bit set
+        assert!(val.is_sign_negative());
+    }
+
+    #[test]
+    fn test_f16_to_f32_positive_infinity() {
+        // 0x7C00 = positive infinity in f16 (exp=31, mant=0)
+        let val = f16_to_f32(0x7C00);
+        assert!(val.is_infinite());
+        assert!(val.is_sign_positive());
+    }
+
+    #[test]
+    fn test_f16_to_f32_negative_infinity() {
+        // 0xFC00 = negative infinity in f16 (sign=1, exp=31, mant=0)
+        let val = f16_to_f32(0xFC00);
+        assert!(val.is_infinite());
+        assert!(val.is_sign_negative());
+    }
+
+    #[test]
+    fn test_f16_to_f32_nan() {
+        // 0x7E00 = NaN in f16 (exp=31, mant != 0)
+        let val = f16_to_f32(0x7E00);
+        assert!(val.is_nan());
+    }
+
+    #[test]
+    fn test_f16_to_f32_subnormal() {
+        // 0x0001 = smallest positive subnormal f16 (exp=0, mant=1)
+        let val = f16_to_f32(0x0001);
+        assert!(val > 0.0);
+        assert!(val < 1e-4);
+    }
+
+    #[test]
+    fn test_f16_to_f32_max_normal() {
+        // 0x7BFF = 65504.0 (max finite f16 value)
+        let val = f16_to_f32(0x7BFF);
+        assert!((val - 65504.0).abs() < 1.0);
+    }
+
+    #[test]
+    fn test_f16_to_f32_two() {
+        // 0x4000 = 2.0 in f16 (sign=0, exp=16, mant=0)
+        let val = f16_to_f32(0x4000);
+        assert!((val - 2.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_f16_to_f32_half() {
+        // 0x3800 = 0.5 in f16 (sign=0, exp=14, mant=0)
+        let val = f16_to_f32(0x3800);
+        assert!((val - 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_bf16_to_f32_one() {
+        // 0x3F80 = 1.0 in bf16 (same bit layout as f32 1.0, upper 16 bits)
+        let val = bf16_to_f32(0x3F80);
+        assert!((val - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_bf16_to_f32_zero() {
+        // 0x0000 = 0.0 in bf16
+        let val = bf16_to_f32(0x0000);
+        assert_eq!(val, 0.0);
+    }
+
+    #[test]
+    fn test_bf16_to_f32_negative_one() {
+        // 0xBF80 = -1.0 in bf16
+        let val = bf16_to_f32(0xBF80);
+        assert!((val - (-1.0)).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_bf16_to_f32_two() {
+        // 0x4000 = 2.0 in bf16
+        let val = bf16_to_f32(0x4000);
+        assert!((val - 2.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_bf16_to_f32_infinity() {
+        // 0x7F80 = positive infinity in bf16 (exp=255, mant=0)
+        let val = bf16_to_f32(0x7F80);
+        assert!(val.is_infinite());
+        assert!(val.is_sign_positive());
+    }
+
+    #[test]
     fn test_quant_format_from_gguf() {
         assert_eq!(QuantFormat::from_gguf_type(0), QuantFormat::F32);
         assert_eq!(QuantFormat::from_gguf_type(2), QuantFormat::Q4_0);
