@@ -787,6 +787,58 @@ impl FlareEngine {
         }
     }
 
+    /// Full text-in / text-out generation with explicit sampling parameters.
+    ///
+    /// Like `generate_text` but with the full set of sampling controls:
+    ///
+    /// - `temperature`: 0 = greedy, higher = more diverse
+    /// - `top_p`: nucleus sampling (1.0 = disabled)
+    /// - `top_k`: top-k sampling, applied when `top_p` is 1.0 and `min_p` is 0.0 (0 = disabled)
+    /// - `repeat_penalty`: repetition penalty (1.0 = disabled)
+    /// - `min_p`: min-p threshold (0.0 = disabled)
+    ///
+    /// Returns the decoded generated text. Returns an empty string if no GGUF vocab is available.
+    /// Respects stop sequences registered via `add_stop_sequence`.
+    ///
+    /// # JS example
+    /// ```javascript
+    /// engine.reset();
+    /// const response = engine.generate_text_with_params(
+    ///   "What is Rust?", 128, 0.8, 0.95, 40, 1.1, 0.0
+    /// );
+    /// output.textContent = response;
+    /// ```
+    #[allow(clippy::too_many_arguments)]
+    #[wasm_bindgen]
+    pub fn generate_text_with_params(
+        &mut self,
+        prompt: &str,
+        max_tokens: u32,
+        temperature: f32,
+        top_p: f32,
+        top_k: u32,
+        repeat_penalty: f32,
+        min_p: f32,
+    ) -> String {
+        let raw_tokens = match &self.gguf_vocab {
+            Some(vocab) => vocab.encode(prompt),
+            None => return String::new(),
+        };
+        let token_ids = self.generate_with_params(
+            &raw_tokens,
+            max_tokens,
+            temperature,
+            top_p,
+            top_k,
+            repeat_penalty,
+            min_p,
+        );
+        match &self.gguf_vocab {
+            Some(vocab) => vocab.decode(&token_ids),
+            None => String::new(),
+        }
+    }
+
     /// Streaming text-in / text-out generation with a per-token JS callback.
     ///
     /// Encodes `prompt` with the embedded GGUF vocabulary, generates up to
