@@ -585,20 +585,12 @@ mod tests {
         // d = 1.0 (f16: 0x3C00 → bytes [0x00, 0x3C])
         let mut block = vec![0u8; 110];
         // hmask[0..32]: all 0xFF → hmask bit set for all weights
-        for i in 0..32 {
-            block[i] = 0xFF;
-        }
+        block[0..32].fill(0xFF);
         // qs[32..96]: all 0x55 → low2=1 for all positions
-        for i in 32..96 {
-            block[i] = 0x55;
-        }
+        block[32..96].fill(0x55);
         // scales_raw[96..108]: b[0..7]=1, b[8..11]=0xA0 → all 8 scales = 33 → signed = 1
-        for i in 0..8 {
-            block[96 + i] = 1;
-        }
-        for i in 0..4 {
-            block[96 + 8 + i] = 0xA0;
-        }
+        block[96..104].fill(1);
+        block[104..108].fill(0xA0);
         // d at bytes 108..110
         block[108] = 0x00;
         block[109] = 0x3C; // f16 1.0
@@ -606,12 +598,8 @@ mod tests {
         let mut output = [0.0f32; 256];
         dequant_q3k_block(&block, &mut output);
 
-        for i in 0..256 {
-            assert!(
-                (output[i] - 1.0).abs() < 1e-4,
-                "expected 1.0 at {i}, got {}",
-                output[i]
-            );
+        for (i, &val) in output.iter().enumerate() {
+            assert!((val - 1.0).abs() < 1e-4, "expected 1.0 at {i}, got {val}");
         }
     }
 
