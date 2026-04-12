@@ -273,6 +273,78 @@ impl FlareEngine {
         }
     }
 
+    /// Encode `text` to token IDs using the embedded GGUF vocabulary.
+    ///
+    /// Returns an empty array if no GGUF vocab is available.
+    ///
+    /// # JS example
+    /// ```javascript
+    /// const ids = engine.encode_text("Hello, world!");
+    /// const output = engine.generate_tokens(ids, 64);
+    /// ```
+    #[wasm_bindgen]
+    pub fn encode_text(&self, text: &str) -> Vec<u32> {
+        match &self.gguf_vocab {
+            Some(vocab) => vocab.encode(text),
+            None => Vec::new(),
+        }
+    }
+
+    /// Decode token IDs to text using the embedded GGUF vocabulary.
+    ///
+    /// Returns an empty string if no GGUF vocab is available.
+    ///
+    /// # JS example
+    /// ```javascript
+    /// const text = engine.decode_ids(generatedIds);
+    /// ```
+    #[wasm_bindgen]
+    pub fn decode_ids(&self, ids: &[u32]) -> String {
+        match &self.gguf_vocab {
+            Some(vocab) => vocab.decode(ids),
+            None => String::new(),
+        }
+    }
+
+    /// Full text-in / text-out generation using the embedded GGUF vocabulary.
+    ///
+    /// Encodes `prompt` with the embedded vocab, runs greedy generation for up
+    /// to `max_tokens` steps, then decodes the output back to text. Stops
+    /// automatically at EOS.
+    ///
+    /// Returns an empty string if no GGUF vocab is available.
+    ///
+    /// # JS example
+    /// ```javascript
+    /// engine.reset();
+    /// const response = engine.generate_text("What is Rust?", 128);
+    /// output.textContent = response;
+    /// ```
+    #[wasm_bindgen]
+    pub fn generate_text(&mut self, prompt: &str, max_tokens: u32) -> String {
+        let prompt_tokens = match &self.gguf_vocab {
+            Some(vocab) => vocab.encode(prompt),
+            None => return String::new(),
+        };
+        let params = SamplingParams {
+            temperature: 0.0,
+            ..Default::default()
+        };
+        let eos = self.eos_token_id;
+        let mut gen = Generator::new(&mut self.model, params);
+        let generated = gen.generate(
+            &prompt_tokens,
+            max_tokens as usize,
+            eos,
+            || 0.5,
+            |_, _| true,
+        );
+        match &self.gguf_vocab {
+            Some(vocab) => vocab.decode(&generated),
+            None => String::new(),
+        }
+    }
+
     // -----------------------------------------------------------------------
     // Token-by-token streaming API
     // -----------------------------------------------------------------------

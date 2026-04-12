@@ -155,6 +155,7 @@
       <button id="generate" disabled>Send</button>
       <button id="stop" disabled>Stop</button>
       <button id="clear" disabled>Clear conversation</button>
+      <button id="quick-test" disabled title="Run a quick test using the embedded GGUF tokenizer (no tokenizer.json needed)">Quick test</button>
       <label style="font-size:0.85rem;">
         Max tokens:&nbsp;<input type="number" id="max-tokens" value="128"
           min="1" max="512" style="width:5rem;margin-bottom:0;">
@@ -196,6 +197,7 @@
     const $generate      = $('generate');
     const $stop          = $('stop');
     const $clear         = $('clear');
+    const $quickTest     = $('quick-test');
     const $maxTokens     = $('max-tokens');
     const $chat          = $('chat');
     const $genStats      = $('gen-stats');
@@ -339,6 +341,7 @@
       $promptIn.disabled = false;
       $systemIn.disabled = false;
       $clear.disabled = false;
+      $quickTest.disabled = false;
       $tmplBadge.textContent = tmplName;
       $tmplBadge.style.display = '';
       hideProgress();
@@ -499,6 +502,28 @@
     // ---------- Clear conversation ----------
     $clear.addEventListener('click', () => {
       clearChat();
+    });
+
+    // ---------- Quick test (generate_text — no tokenizer.json needed) ----------
+    $quickTest.addEventListener('click', () => {
+      if (!engine || streaming) return;
+      const prompt = $promptIn.value.trim() || 'Hello';
+      $genStats.textContent = 'Running quick test…';
+      const t0 = performance.now();
+      engine.reset();
+      const result = engine.generate_text(prompt, parseInt($maxTokens.value, 10) || 64);
+      const ms = performance.now() - t0;
+      if (result) {
+        appendBubble('user', prompt);
+        appendBubble('assistant', result);
+        history.push({ role: 'user', content: prompt });
+        history.push({ role: 'assistant', content: result });
+        $promptIn.value = '';
+        $tokenCounter.textContent = '';
+        $genStats.textContent = `Quick test done in ${ms.toFixed(0)} ms (embedded GGUF tokenizer)`;
+      } else {
+        $genStats.textContent = 'Quick test unavailable: no embedded GGUF tokenizer in this model.';
+      }
     });
 
     // ---------- Stop ----------
