@@ -12,7 +12,7 @@
 //!
 //! - [`core`] — model, tensor, sampling, generation (always available)
 //! - [`loader`] — GGUF / SafeTensors loading (enabled by `loader` feature, default)
-//! - [`gpu`] — WebGPU compute backend (enabled by `gpu` feature)
+//! - `gpu` — WebGPU compute backend (enabled by `gpu` feature)
 //!
 //! ## Quick start
 //!

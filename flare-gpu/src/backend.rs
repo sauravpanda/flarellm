@@ -1,8 +1,11 @@
+use std::sync::Mutex;
+
 use flare_core::model::ComputeBackend;
 use flare_core::tensor::Tensor;
 use thiserror::Error;
 
 use crate::buffers::{self, BufferPool};
+use crate::kv_cache::GpuKvCache;
 use crate::pipeline::{CachedPipeline, PipelineCache};
 
 #[derive(Debug, Error)]
@@ -32,12 +35,20 @@ const DEQUANT_Q4K_SHADER: &str = include_str!("../shaders/dequant_q4k.wgsl");
 /// Pipelines are cached on first use to avoid per-call shader compilation.
 /// Buffers are pooled so that repeated calls with the same tensor sizes reuse
 /// already-allocated GPU memory instead of allocating and freeing each time.
+///
+/// When `init_gpu_kv_cache` is called (automatically from `Model::set_backend`),
+/// the backend allocates `GpuKvCache` — GPU-resident ring buffers for K/V.
+/// Subsequent attention calls use those buffers directly, eliminating the
+/// CPU→GPU re-upload of the entire KV cache on every generated token.
 pub struct WebGpuBackend {
     device: wgpu::Device,
     queue: wgpu::Queue,
     cache: PipelineCache,
     /// Buffer pool: eliminates ~1–2 ms per-allocation overhead on repeated calls.
     pool: BufferPool,
+    /// GPU-resident KV cache.  `None` until `init_gpu_kv_cache` is called.
+    /// `Mutex` provides interior mutability so trait methods can take `&self`.
+    gpu_kv_cache: Mutex<Option<GpuKvCache>>,
 }
 
 impl WebGpuBackend {
@@ -73,6 +84,7 @@ impl WebGpuBackend {
             queue,
             cache: PipelineCache::new(),
             pool: BufferPool::new(),
+            gpu_kv_cache: Mutex::new(None),
         })
     }
 
@@ -727,11 +739,15 @@ impl ComputeBackend for WebGpuBackend {
                     .get_storage(&self.device, &self.queue, bytemuck::cast_slice(&v_head));
             let out_buf = self.pool.get_output(&self.device, output_size);
 
-            // Params: seq_len, head_dim, scale
-            let params_data: [u32; 3] = [
+            // Params: seq_len, head_dim, scale, num_kv_heads, kv_head_idx.
+            // The K/V slice is already per-head (extracted above), so num_kv_heads=1
+            // and kv_head_idx=0 — the shader indexes as t*1*head_dim + 0*head_dim + d.
+            let params_data: [u32; 5] = [
                 seq_len as u32,
                 head_dim as u32,
                 scale.to_bits(), // pass f32 as u32 raw bits; shader reads as f32
+                1u32,            // num_kv_heads: per-head slice layout
+                0u32,            // kv_head_idx: always 0 for per-head slices
             ];
             let params_buf = self.pool.get_uniform(
                 &self.device,
@@ -769,6 +785,153 @@ impl ComputeBackend for WebGpuBackend {
             self.pool.return_storage(q_buf);
             self.pool.return_storage(k_buf);
             self.pool.return_storage(v_buf);
+            self.pool.return_output(out_buf);
+            self.pool.return_uniform(params_buf);
+        }
+
+        output
+    }
+
+    fn init_gpu_kv_cache(
+        &self,
+        num_layers: usize,
+        max_seq_len: usize,
+        num_kv_heads: usize,
+        head_dim: usize,
+    ) {
+        let kv = GpuKvCache::new(
+            &self.device,
+            num_layers,
+            max_seq_len,
+            num_kv_heads,
+            head_dim,
+        );
+        *self
+            .gpu_kv_cache
+            .lock()
+            .expect("gpu_kv_cache mutex poisoned") = Some(kv);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn gpu_kv_write(
+        &self,
+        layer: usize,
+        position: usize,
+        _num_kv_heads: usize,
+        _head_dim: usize,
+        key: &[f32],
+        value: &[f32],
+    ) {
+        if let Some(ref kv) = *self
+            .gpu_kv_cache
+            .lock()
+            .expect("gpu_kv_cache mutex poisoned")
+        {
+            kv.write(&self.queue, layer, position, key, value);
+        }
+    }
+
+    fn has_gpu_kv_cache(&self) -> bool {
+        self.gpu_kv_cache
+            .lock()
+            .expect("gpu_kv_cache mutex poisoned")
+            .is_some()
+    }
+
+    /// Grouped-query attention using GPU-resident K/V buffers.
+    ///
+    /// Binds the full per-layer K/V GPU buffer directly — no CPU-side extraction
+    /// and no per-head CPU→GPU upload.  The WGSL shader handles head-stride
+    /// indexing via `num_kv_heads` and `kv_head_idx` params.
+    #[allow(clippy::too_many_arguments)]
+    fn grouped_query_attention_from_gpu_cache(
+        &self,
+        q: &[f32],
+        layer: usize,
+        num_heads: usize,
+        num_kv_heads: usize,
+        head_dim: usize,
+        seq_len: usize,
+        attn_softcap: f32,
+    ) -> Vec<f32> {
+        let guard = self
+            .gpu_kv_cache
+            .lock()
+            .expect("gpu_kv_cache mutex poisoned");
+        let kv = guard
+            .as_ref()
+            .expect("grouped_query_attention_from_gpu_cache called without GPU KV cache");
+
+        // Gemma-2 soft-cap is not implemented in the WGSL shader; fall back to CPU.
+        // The CPU path re-reads K/V from the GPU-resident buffers would require
+        // readback, which defeats the purpose.  Since Gemma-2 models are not the
+        // primary use-case for GPU inference today, panic loudly instead.
+        assert_eq!(
+            attn_softcap, 0.0,
+            "attn_logit_softcap != 0.0 is not supported with GPU KV cache"
+        );
+
+        let heads_per_kv = num_heads / num_kv_heads;
+        let mut output = vec![0.0f32; num_heads * head_dim];
+        let scale = 1.0_f32 / (head_dim as f32).sqrt();
+
+        let layout_entries = Self::attention_layout();
+
+        for h in 0..num_heads {
+            let kv_head = h / heads_per_kv;
+            let q_head = &q[h * head_dim..(h + 1) * head_dim];
+
+            let output_size = head_dim as u64 * 4;
+
+            // Upload Q for this head; bind the full-layer K/V GPU buffers directly.
+            let q_buf =
+                self.pool
+                    .get_storage(&self.device, &self.queue, bytemuck::cast_slice(q_head));
+            let out_buf = self.pool.get_output(&self.device, output_size);
+
+            // Params include num_kv_heads and kv_head_idx so the shader can index
+            // the interleaved full-layer K/V buffer without any CPU extraction.
+            let params_data: [u32; 5] = [
+                seq_len as u32,
+                head_dim as u32,
+                scale.to_bits(),
+                num_kv_heads as u32,
+                kv_head as u32,
+            ];
+            let params_buf = self.pool.get_uniform(
+                &self.device,
+                &self.queue,
+                bytemuck::cast_slice(&params_data),
+            );
+
+            let head_output = self.cache.with_pipeline(
+                &self.device,
+                "attention_scores",
+                ATTENTION_SHADER,
+                "attention_scores",
+                &layout_entries,
+                |cached| {
+                    let bind_group = self.make_attention_bind_group(
+                        cached,
+                        &q_buf,
+                        kv.key_buf(layer),
+                        kv.val_buf(layer),
+                        &out_buf,
+                        &params_buf,
+                    );
+                    self.dispatch_and_readback(
+                        &cached.pipeline,
+                        &bind_group,
+                        [1, 1, 1],
+                        &out_buf,
+                        output_size,
+                    )
+                },
+            );
+
+            output[h * head_dim..(h + 1) * head_dim].copy_from_slice(&head_output);
+
+            self.pool.return_storage(q_buf);
             self.pool.return_output(out_buf);
             self.pool.return_uniform(params_buf);
         }
