@@ -357,6 +357,39 @@ pub fn dequant_q5k_block(block: &[u8], output: &mut [f32; 256]) {
     }
 }
 
+/// Dequantize a Q2_K block: 256 weights, 84 bytes (matches llama.cpp `block_q2_K`).
+///
+/// Block layout:
+/// - `qs[64]` — 2-bit quantized values, 4 weights per byte
+/// - `scales[16]` — per-super-block nibbles: low nibble = scale, high nibble = min
+/// - `d[2]` — f16 overall delta
+/// - `dmin[2]` — f16 overall min delta
+///
+/// For weight `i`: `output[i] = d * (scales[i/16] & 0xF) * q2 - dmin * (scales[i/16] >> 4)`
+/// where `q2 = (qs[i/4] >> (2*(i%4))) & 3`.
+pub fn dequant_q2k_block(block: &[u8], output: &mut [f32; 256]) {
+    if block.len() < 84 {
+        for v in output.iter_mut() {
+            *v = 0.0;
+        }
+        return;
+    }
+
+    let qs = &block[0..64];
+    let scales = &block[64..80];
+    let d = f16_to_f32(u16::from_le_bytes([block[80], block[81]]));
+    let dmin = f16_to_f32(u16::from_le_bytes([block[82], block[83]]));
+
+    for i in 0..256usize {
+        let sub = i / 16;
+        let scale_nibble = (scales[sub] & 0x0F) as f32;
+        let min_nibble = (scales[sub] >> 4) as f32;
+        let shift = (i % 4) * 2;
+        let q2 = ((qs[i / 4] >> shift) & 0x3) as f32;
+        output[i] = d * scale_nibble * q2 - dmin * min_nibble;
+    }
+}
+
 /// Convert f16 (as u16 bits) to f32.
 pub fn f16_to_f32(bits: u16) -> f32 {
     let sign = ((bits >> 15) & 1) as u32;
@@ -552,20 +585,12 @@ mod tests {
         // d = 1.0 (f16: 0x3C00 → bytes [0x00, 0x3C])
         let mut block = vec![0u8; 110];
         // hmask[0..32]: all 0xFF → hmask bit set for all weights
-        for i in 0..32 {
-            block[i] = 0xFF;
-        }
+        block[0..32].fill(0xFF);
         // qs[32..96]: all 0x55 → low2=1 for all positions
-        for i in 32..96 {
-            block[i] = 0x55;
-        }
+        block[32..96].fill(0x55);
         // scales_raw[96..108]: b[0..7]=1, b[8..11]=0xA0 → all 8 scales = 33 → signed = 1
-        for i in 0..8 {
-            block[96 + i] = 1;
-        }
-        for i in 0..4 {
-            block[96 + 8 + i] = 0xA0;
-        }
+        block[96..104].fill(1);
+        block[104..108].fill(0xA0);
         // d at bytes 108..110
         block[108] = 0x00;
         block[109] = 0x3C; // f16 1.0
@@ -573,11 +598,60 @@ mod tests {
         let mut output = [0.0f32; 256];
         dequant_q3k_block(&block, &mut output);
 
-        for i in 0..256 {
+        for (i, &val) in output.iter().enumerate() {
+            assert!((val - 1.0).abs() < 1e-4, "expected 1.0 at {i}, got {val}");
+        }
+    }
+
+    #[test]
+    fn test_dequant_q2k_zeroed() {
+        // All-zero block: all weights should be 0.0
+        let block = vec![0u8; 84];
+        let mut output = [1.0f32; 256];
+        dequant_q2k_block(&block, &mut output);
+        for (i, &val) in output.iter().enumerate() {
             assert!(
-                (output[i] - 1.0).abs() < 1e-4,
-                "expected 1.0 at {i}, got {}",
-                output[i]
+                val.abs() < 1e-5,
+                "q2k zeroed: expected 0.0 at {i}, got {val}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_dequant_q2k_short_block() {
+        // Too-short block should zero-fill
+        let block = vec![0u8; 10];
+        let mut output = [1.0f32; 256];
+        dequant_q2k_block(&block, &mut output);
+        assert!(output.iter().all(|&v| v == 0.0));
+    }
+
+    #[test]
+    fn test_dequant_q2k_nonzero() {
+        // Build a block where output = d * scale * q2 - dmin * min.
+        //
+        // Strategy: set dmin=0, d=1.0, scale nibble=2 for all sub-blocks, q2=1 for all weights.
+        // Expected: output[i] = 1.0 * 2.0 * 1.0 - 0.0 = 2.0 for all i.
+        //
+        // Block layout:
+        //   qs[0..64]: q2=1 for all 256 weights → each byte = 0x55 (01 repeated 4×)
+        //   scales[64..80]: scale nibble=2, min nibble=0 → each byte = 0x02
+        //   d at [80..82]: f16 1.0 = 0x3C00 → [0x00, 0x3C]
+        //   dmin at [82..84]: f16 0.0 = 0x0000 → [0x00, 0x00]
+        let mut block = vec![0u8; 84];
+        block[0..64].fill(0x55); // q2=1 for all 4 weights per byte
+        block[64..80].fill(0x02); // scale nibble=2, min nibble=0
+        block[80] = 0x00;
+        block[81] = 0x3C; // f16 1.0 for d
+                          // dmin stays 0x0000
+
+        let mut output = [0.0f32; 256];
+        dequant_q2k_block(&block, &mut output);
+
+        for (i, &val) in output.iter().enumerate() {
+            assert!(
+                (val - 2.0).abs() < 1e-4,
+                "q2k nonzero: expected 2.0 at {i}, got {val}"
             );
         }
     }

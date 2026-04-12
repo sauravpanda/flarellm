@@ -389,6 +389,7 @@ fn dequantize_tensor(raw: &[u8], dtype: QuantFormat, numel: usize) -> Result<Vec
             }
             Ok(data)
         }
+        QuantFormat::Q2K => dequant_k_blocks(numel, 256, 84, raw, quantize::dequant_q2k_block),
         QuantFormat::Q3K => dequant_k_blocks(numel, 256, 110, raw, quantize::dequant_q3k_block),
         QuantFormat::Q6K => dequant_k_blocks(numel, 256, 210, raw, quantize::dequant_q6k_block),
         QuantFormat::Q4K => dequant_k_blocks(numel, 256, 144, raw, quantize::dequant_q4k_block),
