@@ -165,4 +165,74 @@ mod tests {
         t.scale(2.0);
         assert_eq!(t.data(), &[2.0, 4.0, 6.0]);
     }
+
+    #[test]
+    fn test_scale_negative() {
+        let mut t = Tensor::from_vec(vec![1.0, -2.0, 3.0], &[3]).unwrap();
+        t.scale(-1.0);
+        assert_eq!(t.data(), &[-1.0, 2.0, -3.0]);
+    }
+
+    #[test]
+    fn test_scale_zero() {
+        let mut t = Tensor::from_vec(vec![1.0, 2.0, 3.0], &[3]).unwrap();
+        t.scale(0.0);
+        for &v in t.data() {
+            assert_eq!(v, 0.0);
+        }
+    }
+
+    #[test]
+    fn test_add_inplace_shape_mismatch() {
+        let mut a = Tensor::from_vec(vec![1.0, 2.0, 3.0], &[3]).unwrap();
+        let b = Tensor::from_vec(vec![1.0, 2.0], &[2]).unwrap();
+        assert!(a.add_inplace(&b).is_err());
+    }
+
+    #[test]
+    fn test_reshape_incompatible() {
+        let mut t = Tensor::zeros(&[2, 3]);
+        assert!(
+            t.reshape(&[2, 4]).is_err(),
+            "reshape to incompatible numel should fail"
+        );
+    }
+
+    #[test]
+    fn test_reshape_same_numel() {
+        let mut t = Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3]).unwrap();
+        t.reshape(&[6]).unwrap();
+        assert_eq!(t.shape(), &[6]);
+        assert_eq!(t.numel(), 6);
+        assert_eq!(t.data(), &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+    }
+
+    #[test]
+    fn test_numel_shapes() {
+        assert_eq!(Tensor::zeros(&[4]).numel(), 4);
+        assert_eq!(Tensor::zeros(&[2, 3]).numel(), 6);
+        assert_eq!(Tensor::zeros(&[2, 3, 4]).numel(), 24);
+    }
+
+    #[test]
+    fn test_ndim() {
+        assert_eq!(Tensor::zeros(&[4]).ndim(), 1);
+        assert_eq!(Tensor::zeros(&[2, 3]).ndim(), 2);
+        assert_eq!(Tensor::zeros(&[2, 3, 4]).ndim(), 3);
+    }
+
+    #[test]
+    fn test_strides_row_major() {
+        // [2, 3, 4] → strides = [12, 4, 1]
+        let t = Tensor::zeros(&[2, 3, 4]);
+        assert_eq!(t.strides(), &[12, 4, 1]);
+    }
+
+    #[test]
+    fn test_zeros_3d() {
+        let t = Tensor::zeros(&[2, 3, 4]);
+        assert_eq!(t.shape(), &[2, 3, 4]);
+        assert_eq!(t.numel(), 24);
+        assert!(t.data().iter().all(|&v| v == 0.0));
+    }
 }
