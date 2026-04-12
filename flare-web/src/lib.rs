@@ -1411,6 +1411,65 @@ impl FlareEngine {
     }
 
     // -----------------------------------------------------------------------
+    // Perplexity API
+    // -----------------------------------------------------------------------
+
+    /// Compute the perplexity of `text` under the loaded model.
+    ///
+    /// Encodes `text` with the embedded GGUF vocabulary, runs one forward pass
+    /// per token, and measures the log-probability of each correct next-token
+    /// prediction.  Perplexity = exp(−mean(log_probs)).
+    ///
+    /// The KV cache is reset **before and after** the evaluation so the engine
+    /// returns to a clean state.
+    ///
+    /// Returns `f32::INFINITY` if the text encodes to fewer than 2 tokens or if
+    /// no GGUF vocabulary is available.
+    ///
+    /// # JS example
+    /// ```javascript
+    /// const ppl = engine.compute_perplexity("The quick brown fox");
+    /// console.log("Perplexity:", ppl);
+    /// ```
+    #[wasm_bindgen]
+    pub fn compute_perplexity(&mut self, text: &str) -> f32 {
+        let raw_tokens = match &self.gguf_vocab {
+            Some(vocab) => vocab.encode(text),
+            None => return f32::INFINITY,
+        };
+        let tokens = self.with_bos(&raw_tokens);
+        if tokens.len() < 2 {
+            return f32::INFINITY;
+        }
+
+        // Reset before evaluation to start from a clean KV state.
+        self.model.reset();
+
+        let n = tokens.len();
+        let mut total_log_prob: f64 = 0.0;
+
+        for i in 0..(n - 1) {
+            let input_token = tokens[i];
+            let target_token = tokens[i + 1] as usize;
+            let logits_tensor = self.model.forward(input_token, i);
+            let logits = logits_tensor.data();
+            // Numerically-stable log-softmax at target_token.
+            let max_l = logits.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+            let sum_exp: f32 = logits.iter().map(|&x| (x - max_l).exp()).sum();
+            let log_prob = (logits[target_token] - max_l) - sum_exp.ln();
+            total_log_prob += log_prob as f64;
+        }
+
+        // Reset after evaluation, restoring clean state for subsequent inference.
+        self.model.reset();
+        self.kv_pos = 0;
+        self.stream_done = true;
+
+        let nll = -total_log_prob / (n - 1) as f64;
+        nll.exp() as f32
+    }
+
+    // -----------------------------------------------------------------------
     // Last-step logits API
     // -----------------------------------------------------------------------
 
