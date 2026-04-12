@@ -126,6 +126,9 @@ pub struct FlareEngine {
     eos_token_id: Option<u32>,
     /// BOS (beginning of sequence) token ID from GGUF metadata.
     bos_token_id: Option<u32>,
+    /// Whether to automatically prepend the BOS token before generation.
+    /// Sourced from `tokenizer.ggml.add_bos_token` in GGUF metadata.
+    add_bos_token: bool,
     /// Raw Jinja2 chat template string from `tokenizer.chat_template` in GGUF metadata.
     /// `None` if the GGUF file did not include a chat template.
     raw_chat_template: Option<String>,
@@ -173,6 +176,11 @@ impl FlareEngine {
             .metadata
             .get("tokenizer.ggml.bos_token_id")
             .and_then(|v| v.as_u32());
+        let add_bos_token = gguf
+            .metadata
+            .get("tokenizer.ggml.add_bos_token")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
         let raw_chat_template = gguf
             .metadata
             .get("tokenizer.chat_template")
@@ -191,6 +199,7 @@ impl FlareEngine {
             gguf_vocab,
             eos_token_id,
             bos_token_id,
+            add_bos_token,
             raw_chat_template,
             stream_last_token: 0,
             stream_pos: 0,
@@ -375,6 +384,17 @@ impl FlareEngine {
         self.bos_token_id
     }
 
+    /// Whether the model requests automatic BOS token prepending.
+    ///
+    /// Sourced from `tokenizer.ggml.add_bos_token` in the GGUF metadata.
+    /// When `true`, all generation methods (`generate_tokens`, `begin_stream`,
+    /// `generate_text`, `generate_stream`) automatically prepend the BOS token
+    /// to the input token sequence unless it is already the first token.
+    #[wasm_bindgen(getter)]
+    pub fn add_bos_token(&self) -> bool {
+        self.add_bos_token
+    }
+
     /// Raw Jinja2 chat template string from the GGUF model metadata, if present.
     ///
     /// This is the `tokenizer.chat_template` field embedded by the model author.
@@ -417,6 +437,20 @@ impl FlareEngine {
     ///
     /// Returns an empty array if no GGUF vocab is available.
     ///
+    /// Prepend the BOS token to `tokens` if `add_bos_token` is set and the
+    /// sequence does not already start with the BOS token ID.
+    fn with_bos<'a>(&self, tokens: &'a [u32]) -> std::borrow::Cow<'a, [u32]> {
+        if let (true, Some(bos)) = (self.add_bos_token, self.bos_token_id) {
+            if tokens.first() != Some(&bos) {
+                let mut v = Vec::with_capacity(tokens.len() + 1);
+                v.push(bos);
+                v.extend_from_slice(tokens);
+                return std::borrow::Cow::Owned(v);
+            }
+        }
+        std::borrow::Cow::Borrowed(tokens)
+    }
+
     /// # JS example
     /// ```javascript
     /// const ids = engine.encode_text("Hello, world!");
@@ -462,10 +496,11 @@ impl FlareEngine {
     /// ```
     #[wasm_bindgen]
     pub fn generate_text(&mut self, prompt: &str, max_tokens: u32) -> String {
-        let prompt_tokens = match &self.gguf_vocab {
+        let raw_tokens = match &self.gguf_vocab {
             Some(vocab) => vocab.encode(prompt),
             None => return String::new(),
         };
+        let prompt_tokens = self.with_bos(&raw_tokens);
         let params = SamplingParams {
             temperature: 0.0,
             ..Default::default()
@@ -520,10 +555,11 @@ impl FlareEngine {
         on_token: &js_sys::Function,
     ) -> u32 {
         // Encode and generate first, then decode per-token for callbacks.
-        let prompt_tokens = match &self.gguf_vocab {
+        let raw_tokens = match &self.gguf_vocab {
             Some(vocab) => vocab.encode(prompt),
             None => return 0,
         };
+        let prompt_tokens = self.with_bos(&raw_tokens);
         let params = SamplingParams {
             temperature: 0.0,
             ..Default::default()
@@ -577,9 +613,10 @@ impl FlareEngine {
     /// ```
     #[wasm_bindgen]
     pub fn begin_stream(&mut self, prompt_tokens: &[u32], max_tokens: u32) {
+        let effective = self.with_bos(prompt_tokens);
         let t0 = now_ms();
         let mut pos = 0usize;
-        for &tok in prompt_tokens {
+        for &tok in effective.iter() {
             self.model.forward(tok, pos);
             pos += 1;
         }
@@ -588,7 +625,7 @@ impl FlareEngine {
         self.last_tokens_generated = 0;
         self.stream_decode_start_ms = 0.0;
         self.stream_pos = pos;
-        self.stream_last_token = *prompt_tokens.last().unwrap_or(&0);
+        self.stream_last_token = *effective.last().unwrap_or(&0);
         self.stream_remaining = max_tokens as usize;
         self.stream_done = false;
     }
@@ -653,6 +690,7 @@ impl FlareEngine {
     /// Stops early at EOS. Returns a Uint32Array of generated token IDs.
     #[wasm_bindgen]
     pub fn generate_tokens(&mut self, prompt_tokens: &[u32], max_tokens: u32) -> Vec<u32> {
+        let effective = self.with_bos(prompt_tokens);
         let params = SamplingParams {
             temperature: 0.0,
             ..Default::default()
@@ -660,7 +698,7 @@ impl FlareEngine {
         let t0 = now_ms();
         let mut gen = Generator::new(&mut self.model, params);
         let result = gen.generate(
-            prompt_tokens,
+            &effective,
             max_tokens as usize,
             self.eos_token_id,
             || 0.5,
@@ -682,6 +720,7 @@ impl FlareEngine {
         temperature: f32,
         top_p: f32,
     ) -> Vec<u32> {
+        let effective = self.with_bos(prompt_tokens);
         let params = SamplingParams {
             temperature,
             top_p,
@@ -697,7 +736,7 @@ impl FlareEngine {
             (state as f32) / (u32::MAX as f32)
         };
         let result = gen.generate(
-            prompt_tokens,
+            &effective,
             max_tokens as usize,
             self.eos_token_id,
             &mut rng,
@@ -917,6 +956,11 @@ impl FlareProgressiveLoader {
             .metadata
             .get("tokenizer.ggml.bos_token_id")
             .and_then(|v| v.as_u32());
+        let add_bos_token = gguf
+            .metadata
+            .get("tokenizer.ggml.add_bos_token")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
         let raw_chat_template = gguf
             .metadata
             .get("tokenizer.chat_template")
@@ -941,6 +985,7 @@ impl FlareProgressiveLoader {
             gguf_vocab,
             eos_token_id,
             bos_token_id,
+            add_bos_token,
             raw_chat_template,
             stream_last_token: 0,
             stream_pos: 0,
