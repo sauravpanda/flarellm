@@ -32,6 +32,7 @@ const DEQUANT_Q5K_SHADER: &str = include_str!("../shaders/dequant_q5k.wgsl");
 const DEQUANT_Q6K_SHADER: &str = include_str!("../shaders/dequant_q6k.wgsl");
 const PREFILL_ATTENTION_SHADER: &str = include_str!("../shaders/prefill_attention.wgsl");
 const DEQUANT_Q3K_SHADER: &str = include_str!("../shaders/dequant_q3k.wgsl");
+const BATCHED_MATVEC_SHADER: &str = include_str!("../shaders/batched_matvec.wgsl");
 
 /// WebGPU/wgpu compute backend.
 ///
@@ -600,6 +601,67 @@ impl WebGpuBackend {
 
         self.pool.return_storage(raw_buf);
         self.pool.return_storage(vec_buf);
+        self.pool.return_output(out_buf);
+        self.pool.return_uniform(params_buf);
+
+        result
+    }
+
+    /// Batched matrix-vector multiply on the GPU.
+    ///
+    /// For each batch item `b` in `0..batch`:
+    ///   `output[b * out_rows + i] = Σ_j weight[i * in_cols + j] * input[b * in_cols + j]`
+    ///
+    /// - `weight`: f32 matrix `[out_rows × in_cols]`, row-major — same for all items
+    /// - `input`:  f32 batch `[batch × in_cols]`, row-major — one row per batch item
+    /// - Returns:  f32 result `[batch × out_rows]`, row-major
+    ///
+    /// Dispatch: `[out_rows, batch, 1]`, workgroup size 64 with tree reduction.
+    pub fn batched_matvec(
+        &self,
+        weight: &[f32],
+        input: &[f32],
+        out_rows: usize,
+        in_cols: usize,
+        batch: usize,
+    ) -> Vec<f32> {
+        let output_size = (batch * out_rows) as u64 * 4;
+
+        let weight_buf =
+            self.pool
+                .get_storage(&self.device, &self.queue, bytemuck::cast_slice(weight));
+        let input_buf =
+            self.pool
+                .get_storage(&self.device, &self.queue, bytemuck::cast_slice(input));
+        let out_buf = self.pool.get_output(&self.device, output_size);
+
+        let params: [u32; 3] = [out_rows as u32, in_cols as u32, batch as u32];
+        let params_buf =
+            self.pool
+                .get_uniform(&self.device, &self.queue, bytemuck::cast_slice(&params));
+
+        let layout_entries = Self::standard_layout();
+        let result = self.cache.with_pipeline(
+            &self.device,
+            "batched_matvec",
+            BATCHED_MATVEC_SHADER,
+            "batched_matvec",
+            &layout_entries,
+            |cached| {
+                let bind_group =
+                    self.make_bind_group(cached, &weight_buf, &input_buf, &out_buf, &params_buf);
+                self.dispatch_and_readback(
+                    &cached.pipeline,
+                    &bind_group,
+                    [out_rows as u32, batch as u32, 1],
+                    &out_buf,
+                    output_size,
+                )
+            },
+        );
+
+        self.pool.return_storage(weight_buf);
+        self.pool.return_storage(input_buf);
         self.pool.return_output(out_buf);
         self.pool.return_uniform(params_buf);
 
@@ -1319,6 +1381,17 @@ impl ComputeBackend for WebGpuBackend {
             head_dim,
             attn_softcap,
         )
+    }
+
+    fn batched_matmul(
+        &self,
+        weight: &[f32],
+        input: &[f32],
+        out_rows: usize,
+        in_cols: usize,
+        batch: usize,
+    ) -> Vec<f32> {
+        self.batched_matvec(weight, input, out_rows, in_cols, batch)
     }
 }
 
