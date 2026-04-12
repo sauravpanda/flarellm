@@ -8,6 +8,8 @@
 
 pub mod backend;
 pub mod buffers;
+pub mod kv_cache;
 pub mod pipeline;
 
 pub use backend::WebGpuBackend;
+pub use kv_cache::GpuKvCache;

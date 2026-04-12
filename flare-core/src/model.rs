@@ -72,6 +72,61 @@ pub trait ComputeBackend: Send + Sync {
             attn_softcap,
         )
     }
+
+    /// Initialize GPU-resident KV cache storage for backends that support it.
+    ///
+    /// Call this once after [`Model::set_backend`] to allocate GPU-side
+    /// ring-buffer storage for all layers.  Backends that do not support GPU
+    /// KV cache (e.g. `CpuBackend`) provide a no-op default.
+    fn init_gpu_kv_cache(
+        &self,
+        _num_layers: usize,
+        _max_seq_len: usize,
+        _num_kv_heads: usize,
+        _head_dim: usize,
+    ) {
+    }
+
+    /// Write a new K/V pair into the GPU-resident cache (no CPU readback).
+    ///
+    /// For backends without GPU KV cache this is a no-op.
+    #[allow(clippy::too_many_arguments)]
+    fn gpu_kv_write(
+        &self,
+        _layer: usize,
+        _position: usize,
+        _num_kv_heads: usize,
+        _head_dim: usize,
+        _key: &[f32],
+        _value: &[f32],
+    ) {
+    }
+
+    /// Returns `true` if a GPU-resident KV cache has been initialized.
+    fn has_gpu_kv_cache(&self) -> bool {
+        false
+    }
+
+    /// Grouped-query attention using GPU-resident KV cache buffers.
+    ///
+    /// Avoids re-uploading the KV cache from CPU on each forward pass —
+    /// the data written by [`gpu_kv_write`] is used directly.
+    ///
+    /// Only valid after [`init_gpu_kv_cache`] has been called
+    /// (`has_gpu_kv_cache()` returns `true`).
+    #[allow(clippy::too_many_arguments)]
+    fn grouped_query_attention_from_gpu_cache(
+        &self,
+        _q: &[f32],
+        _layer: usize,
+        _num_heads: usize,
+        _num_kv_heads: usize,
+        _head_dim: usize,
+        _seq_len: usize,
+        _attn_softcap: f32,
+    ) -> Vec<f32> {
+        panic!("GPU KV cache is not initialized — call init_gpu_kv_cache first");
+    }
 }
 
 /// Default CPU compute backend. Uses optimized scalar loops.
@@ -201,9 +256,20 @@ impl Model {
     }
 
     /// Replace the compute backend (e.g. with a GPU backend).
+    ///
+    /// After swapping the backend, initializes GPU-resident KV cache storage
+    /// if the new backend supports it (default: no-op for CPU backends).
+    ///
     /// Returns the previous backend.
     pub fn set_backend(&mut self, backend: Box<dyn ComputeBackend>) -> Box<dyn ComputeBackend> {
-        std::mem::replace(&mut self.backend, backend)
+        let old = std::mem::replace(&mut self.backend, backend);
+        self.backend.init_gpu_kv_cache(
+            self.config.num_layers,
+            self.config.max_seq_len,
+            self.config.num_kv_heads,
+            self.config.head_dim,
+        );
+        old
     }
 
     pub fn config(&self) -> &ModelConfig {
@@ -288,21 +354,37 @@ impl Model {
                 config.rope_theta,
             );
 
-            // Write K, V to cache
+            // Write K, V to CPU cache (always) and GPU cache (if initialized).
+            // The GPU write is a host→device queue.write_buffer — no readback.
             self.kv_cache.write(layer_idx, &k_data, &v_data);
+            self.backend
+                .gpu_kv_write(layer_idx, pos, num_kv_heads, head_dim, &k_data, &v_data);
 
-            // Grouped-query attention — dispatch to backend (GPU or CPU)
+            // Grouped-query attention — use GPU-resident cache when available to
+            // avoid re-uploading the full KV cache on every token.
             let seq_len = self.kv_cache.len() + 1; // include current position
-            let attn_output = self.backend.grouped_query_attention(
-                &q_data,
-                self.kv_cache.keys(layer_idx).data(),
-                self.kv_cache.values(layer_idx).data(),
-                num_heads,
-                num_kv_heads,
-                head_dim,
-                seq_len,
-                config.attn_logit_softcap,
-            );
+            let attn_output = if self.backend.has_gpu_kv_cache() {
+                self.backend.grouped_query_attention_from_gpu_cache(
+                    &q_data,
+                    layer_idx,
+                    num_heads,
+                    num_kv_heads,
+                    head_dim,
+                    seq_len,
+                    config.attn_logit_softcap,
+                )
+            } else {
+                self.backend.grouped_query_attention(
+                    &q_data,
+                    self.kv_cache.keys(layer_idx).data(),
+                    self.kv_cache.values(layer_idx).data(),
+                    num_heads,
+                    num_kv_heads,
+                    head_dim,
+                    seq_len,
+                    config.attn_logit_softcap,
+                )
+            };
 
             // Output projection
             let attn_proj =
@@ -590,13 +672,21 @@ impl Model {
             }
         }
 
-        // Write computed K/V to cache and advance position for each token
+        // Write computed K/V to CPU cache and GPU cache (if initialized),
+        // then advance the ring-buffer position once per token.
+        let cache_pos = self.kv_cache.position(); // position before prefill tokens
         for t in 0..seq_len {
             for layer_idx in 0..num_layers {
-                self.kv_cache.write(
+                let k_slice = &k_all[layer_idx][t * kv_dim..(t + 1) * kv_dim];
+                let v_slice = &v_all[layer_idx][t * kv_dim..(t + 1) * kv_dim];
+                self.kv_cache.write(layer_idx, k_slice, v_slice);
+                self.backend.gpu_kv_write(
                     layer_idx,
-                    &k_all[layer_idx][t * kv_dim..(t + 1) * kv_dim],
-                    &v_all[layer_idx][t * kv_dim..(t + 1) * kv_dim],
+                    cache_pos + t,
+                    num_kv_heads,
+                    head_dim,
+                    k_slice,
+                    v_slice,
                 );
             }
             self.kv_cache.advance();

@@ -4,16 +4,24 @@
 // This shader computes attention scores (Q @ K^T) for one query position
 // against all KV cache positions. Used during autoregressive generation
 // where we compute attention for the newest token against the full cache.
+//
+// The K/V buffers may be either:
+//   • Per-head slices  [seq_len, head_dim]:              num_kv_heads=1, kv_head_idx=0
+//   • Full-layer cache [seq_len, num_kv_heads, head_dim]: actual num_kv_heads / kv_head_idx
+//
+// Indexing: k_cache[t * num_kv_heads * head_dim + kv_head_idx * head_dim + d]
 
-@group(0) @binding(0) var<storage, read> q: array<f32>;      // [head_dim]
-@group(0) @binding(1) var<storage, read> k_cache: array<f32>; // [seq_len, head_dim]
-@group(0) @binding(2) var<storage, read> v_cache: array<f32>; // [seq_len, head_dim]
+@group(0) @binding(0) var<storage, read> q: array<f32>;       // [head_dim]
+@group(0) @binding(1) var<storage, read> k_cache: array<f32>; // [seq_len, num_kv_heads, head_dim]
+@group(0) @binding(2) var<storage, read> v_cache: array<f32>; // [seq_len, num_kv_heads, head_dim]
 @group(0) @binding(3) var<storage, read_write> output: array<f32>; // [head_dim]
 
 struct Params {
     seq_len: u32,
     head_dim: u32,
     scale: f32,
+    num_kv_heads: u32, // 1 for per-head slice layout, actual value for full-layer layout
+    kv_head_idx: u32,  // which KV head to attend to
 }
 @group(0) @binding(4) var<uniform> params: Params;
 
@@ -30,12 +38,14 @@ fn attention_scores(
     let tid = lid.x;
     let seq_len = params.seq_len;
     let head_dim = params.head_dim;
+    let kv_stride = params.num_kv_heads * head_dim;
+    let kv_head_base = params.kv_head_idx * head_dim;
 
     // Phase 1: Compute Q @ K^T scores
     // Each thread handles one or more sequence positions
     for (var t: u32 = tid; t < seq_len; t = t + wg_size.x) {
         var dot: f32 = 0.0;
-        let k_offset = t * head_dim;
+        let k_offset = t * kv_stride + kv_head_base;
         for (var d: u32 = 0u; d < head_dim; d = d + 1u) {
             dot = dot + q[d] * k_cache[k_offset + d];
         }
@@ -79,7 +89,7 @@ fn attention_scores(
     for (var d: u32 = tid; d < head_dim; d = d + wg_size.x) {
         var acc: f32 = 0.0;
         for (var t: u32 = 0u; t < seq_len; t = t + 1u) {
-            acc = acc + scores[t] * v_cache[t * head_dim + d];
+            acc = acc + scores[t] * v_cache[t * kv_stride + kv_head_base + d];
         }
         output[d] = acc;
     }
