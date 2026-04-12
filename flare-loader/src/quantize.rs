@@ -706,7 +706,10 @@ mod tests {
         let mut output = [1.0f32; 32];
         dequant_q4_1_block(&block, &mut output);
         for (i, &val) in output.iter().enumerate() {
-            assert!(val.abs() < 1e-5, "q4_1 zeroed: expected 0.0 at {i}, got {val}");
+            assert!(
+                val.abs() < 1e-5,
+                "q4_1 zeroed: expected 0.0 at {i}, got {val}"
+            );
         }
     }
 
@@ -762,7 +765,10 @@ mod tests {
         let mut output = [1.0f32; 32];
         dequant_q8_1_block(&block, &mut output);
         for (i, &val) in output.iter().enumerate() {
-            assert!(val.abs() < 1e-5, "q8_1 zeroed: expected 0.0 at {i}, got {val}");
+            assert!(
+                val.abs() < 1e-5,
+                "q8_1 zeroed: expected 0.0 at {i}, got {val}"
+            );
         }
     }
 
