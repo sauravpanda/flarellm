@@ -26,6 +26,7 @@ const SOFTMAX_SHADER: &str = include_str!("../shaders/softmax.wgsl");
 const ATTENTION_SHADER: &str = include_str!("../shaders/attention.wgsl");
 const DEQUANT_Q4_1_SHADER: &str = include_str!("../shaders/dequant_q4_1.wgsl");
 const DEQUANT_Q4K_SHADER: &str = include_str!("../shaders/dequant_q4k.wgsl");
+const DEQUANT_MATVEC_Q4_1_SHADER: &str = include_str!("../shaders/dequant_matvec_q4_1.wgsl");
 const DEQUANT_MATVEC_Q4K_SHADER: &str = include_str!("../shaders/dequant_matvec_q4k.wgsl");
 const DEQUANT_MATVEC_Q5K_SHADER: &str = include_str!("../shaders/dequant_matvec_q5k.wgsl");
 const DEQUANT_MATVEC_Q6K_SHADER: &str = include_str!("../shaders/dequant_matvec_q6k.wgsl");
@@ -496,6 +497,64 @@ impl WebGpuBackend {
     }
 
     /// Fused Q4_K dequantize + matrix-vector multiply.
+    /// Fused Q4_1 dequantize + matrix-vector multiply.
+    ///
+    /// Reads packed Q4_1 weight data, dequantizes each block on-the-fly, and
+    /// accumulates the dot product with `input` in the same kernel — halving
+    /// the effective memory bandwidth compared to a separate dequant + matvec.
+    ///
+    /// - `raw_bytes`: packed GGUF tensor data — `num_rows × num_blocks_per_row × 20` bytes
+    /// - `input`: f32 input vector of length `num_blocks_per_row × 32`
+    /// - Returns `num_rows` f32 dot products
+    pub fn dequant_matvec_q4_1(
+        &self,
+        raw_bytes: &[u8],
+        input: &[f32],
+        num_rows: usize,
+        num_blocks_per_row: usize,
+    ) -> Vec<f32> {
+        let output_size = num_rows as u64 * 4;
+
+        let raw_buf = self.pool.get_storage(&self.device, &self.queue, raw_bytes);
+        let vec_buf = self
+            .pool
+            .get_storage(&self.device, &self.queue, bytemuck::cast_slice(input));
+        let out_buf = self.pool.get_output(&self.device, output_size);
+
+        let params: [u32; 2] = [num_rows as u32, num_blocks_per_row as u32];
+        let params_buf =
+            self.pool
+                .get_uniform(&self.device, &self.queue, bytemuck::cast_slice(&params));
+
+        let layout_entries = Self::standard_layout();
+        let result = self.cache.with_pipeline(
+            &self.device,
+            "dequant_matvec_q4_1",
+            DEQUANT_MATVEC_Q4_1_SHADER,
+            "dequant_matvec_q4_1",
+            &layout_entries,
+            |cached| {
+                let bind_group =
+                    self.make_bind_group(cached, &raw_buf, &vec_buf, &out_buf, &params_buf);
+                // One workgroup per output row.
+                self.dispatch_and_readback(
+                    &cached.pipeline,
+                    &bind_group,
+                    [num_rows as u32, 1, 1],
+                    &out_buf,
+                    output_size,
+                )
+            },
+        );
+
+        self.pool.return_storage(raw_buf);
+        self.pool.return_storage(vec_buf);
+        self.pool.return_output(out_buf);
+        self.pool.return_uniform(params_buf);
+
+        result
+    }
+
     ///
     /// Reads packed Q4_K weight data, dequantizes each block on-the-fly, and
     /// accumulates the dot product with `input` in the same kernel — halving
@@ -1749,6 +1808,77 @@ mod tests {
                 "q4_1 hi mismatch at [{}]: got {}, expected 1.0",
                 i * 2 + 1,
                 result[i * 2 + 1]
+            );
+        }
+    }
+
+    /// Verify GPU Q4_1 fused dequant+matvec against CPU reference.
+    ///
+    /// One block: d=1.0, m=0.0, all qs bytes = 0x12 (lo=2, hi=1).
+    /// Input vector: all 1.0.
+    /// Expected dot product: Σ(d*q+m) × 1.0 for all 32 weights.
+    /// = Σ [2, 1, 2, 1, ... (16 pairs)] = 16×2 + 16×1 = 48.
+    ///
+    /// Requires a GPU adapter; run with: `cargo test -p flarellm-gpu -- --ignored`
+    #[test]
+    #[ignore]
+    fn test_dequant_matvec_q4_1_matches_cpu() {
+        let mut raw = vec![0u8; 20];
+        // d = 1.0 as f16 LE: 0x3C00 → bytes [0x00, 0x3C]
+        raw[0] = 0x00;
+        raw[1] = 0x3C;
+        // m = 0.0 (already zero)
+        // qs[16]: lo nibble = 2, hi nibble = 1 → byte = 0x12
+        for b in raw[4..20].iter_mut() {
+            *b = 0x12;
+        }
+
+        let input = vec![1.0f32; 32];
+
+        let backend = pollster::block_on(WebGpuBackend::new()).expect("GPU backend unavailable");
+        let result = backend.dequant_matvec_q4_1(&raw, &input, 1, 1);
+
+        assert_eq!(result.len(), 1, "expected 1 output");
+        // weights: [2,1]*16 → dot with [1]*32 = 16*2 + 16*1 = 48
+        assert!(
+            (result[0] - 48.0).abs() < 1e-2,
+            "dequant_matvec_q4_1 mismatch: got {}, expected 48.0",
+            result[0]
+        );
+    }
+
+    /// Verify GPU Q4_1 fused dequant+matvec with multiple rows.
+    ///
+    /// Two rows, same block data. Each output should be 48.0.
+    ///
+    /// Requires a GPU adapter; run with: `cargo test -p flarellm-gpu -- --ignored`
+    #[test]
+    #[ignore]
+    fn test_dequant_matvec_q4_1_multi_row() {
+        let mut raw = vec![0u8; 40]; // 2 rows × 1 block × 20 bytes
+        for row in 0..2 {
+            let base = row * 20;
+            // d = 1.0 as f16 LE
+            raw[base] = 0x00;
+            raw[base + 1] = 0x3C;
+            // qs: lo=2, hi=1
+            for b in raw[base + 4..base + 20].iter_mut() {
+                *b = 0x12;
+            }
+        }
+
+        let input = vec![1.0f32; 32];
+
+        let backend = pollster::block_on(WebGpuBackend::new()).expect("GPU backend unavailable");
+        let result = backend.dequant_matvec_q4_1(&raw, &input, 2, 1);
+
+        assert_eq!(result.len(), 2, "expected 2 outputs");
+        for (i, &v) in result.iter().enumerate() {
+            assert!(
+                (v - 48.0).abs() < 1e-2,
+                "dequant_matvec_q4_1 multi_row mismatch at row {}: got {}, expected 48.0",
+                i,
+                v
             );
         }
     }
