@@ -203,19 +203,30 @@ fn load_model_from_path(
     Ok((model, tokenizer, chat_template))
 }
 
-async fn health() -> &'static str {
-    "ok"
+async fn health(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let model_field = if state.model.is_some() {
+        serde_json::Value::String(state.model_name.clone())
+    } else {
+        serde_json::Value::Null
+    };
+    Json(serde_json::json!({
+        "status": "ok",
+        "model": model_field,
+    }))
 }
 
 async fn list_models(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let ready = state.model.is_some();
+    let created = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
     Json(serde_json::json!({
         "object": "list",
         "data": [{
             "id": state.model_name,
             "object": "model",
+            "created": created,
             "owned_by": "local",
-            "ready": ready,
         }]
     }))
 }
@@ -358,7 +369,17 @@ async fn non_stream_response(
     };
 
     let prompt = format_prompt(&req.messages, template);
-    let prompt_tokens = encode_prompt(&prompt, tokenizer);
+    let mut prompt_tokens = encode_prompt(&prompt, tokenizer);
+    // Truncate from the left if the prompt exceeds the model's context window.
+    let max_seq = model.config().max_seq_len;
+    if prompt_tokens.len() > max_seq {
+        let excess = prompt_tokens.len() - max_seq;
+        eprintln!(
+            "prompt truncated from {} to {max_seq} tokens",
+            prompt_tokens.len()
+        );
+        prompt_tokens.drain(..excess);
+    }
     let prompt_token_count = prompt_tokens.len();
     let eos_token = get_eos(tokenizer);
 
@@ -414,7 +435,17 @@ async fn stream_response(
     let id = format!("chatcmpl-stream-{}", rand_id());
 
     let prompt = format_prompt(&req.messages, template);
-    let prompt_tokens = encode_prompt(&prompt, tokenizer);
+    let mut prompt_tokens = encode_prompt(&prompt, tokenizer);
+    // Truncate from the left if the prompt exceeds the model's context window.
+    let max_seq = model.config().max_seq_len;
+    if prompt_tokens.len() > max_seq {
+        let excess = prompt_tokens.len() - max_seq;
+        eprintln!(
+            "prompt truncated from {} to {max_seq} tokens",
+            prompt_tokens.len()
+        );
+        prompt_tokens.drain(..excess);
+    }
     let eos_token = get_eos(tokenizer);
 
     let params = SamplingParams {
@@ -521,7 +552,10 @@ mod tests {
 
         assert_eq!(resp.status(), StatusCode::OK);
         let body = resp.into_body().collect().await.unwrap().to_bytes();
-        assert_eq!(body.as_ref(), b"ok");
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["status"], "ok");
+        // model is null when no model is loaded
+        assert_eq!(json["model"], serde_json::Value::Null);
     }
 
     #[tokio::test]
@@ -537,6 +571,9 @@ mod tests {
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(json["object"], "list");
         assert_eq!(json["data"][0]["id"], "test-model");
+        assert_eq!(json["data"][0]["object"], "model");
+        assert_eq!(json["data"][0]["owned_by"], "local");
+        assert!(json["data"][0]["created"].is_number());
     }
 
     #[tokio::test]
