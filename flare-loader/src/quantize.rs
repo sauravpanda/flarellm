@@ -4437,4 +4437,70 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn test_block_size_known_formats() {
+        assert_eq!(QuantFormat::F32.block_size(), 1);
+        assert_eq!(QuantFormat::F16.block_size(), 1);
+        assert_eq!(QuantFormat::BF16.block_size(), 1);
+        assert_eq!(QuantFormat::Q4_0.block_size(), 32);
+        assert_eq!(QuantFormat::Q8_0.block_size(), 32);
+        assert_eq!(QuantFormat::Q2K.block_size(), 256);
+        assert_eq!(QuantFormat::Unknown(99).block_size(), 1);
+    }
+
+    #[test]
+    fn test_block_bytes_known_formats() {
+        assert_eq!(QuantFormat::F32.block_bytes(), 4);
+        assert_eq!(QuantFormat::F16.block_bytes(), 2);
+        assert_eq!(QuantFormat::Q4_0.block_bytes(), 18);
+        assert_eq!(QuantFormat::Q8_0.block_bytes(), 34);
+        assert_eq!(QuantFormat::Q4K.block_bytes(), 144);
+        assert_eq!(QuantFormat::Unknown(99).block_bytes(), 4);
+    }
+
+    #[test]
+    fn test_bits_per_weight_extremes() {
+        assert!((QuantFormat::F32.bits_per_weight() - 32.0).abs() < 1e-5);
+        assert!((QuantFormat::IQ1S.bits_per_weight() - 1.5625).abs() < 1e-5);
+        // Unknown falls back to 32.0 (worst-case assumption)
+        assert!((QuantFormat::Unknown(42).bits_per_weight() - 32.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_bytes_for_elements_zero() {
+        // Zero elements → zero bytes for any format
+        assert_eq!(QuantFormat::F32.bytes_for_elements(0), 0);
+        assert_eq!(QuantFormat::Q4_0.bytes_for_elements(0), 0);
+        assert_eq!(QuantFormat::Q8_0.bytes_for_elements(0), 0);
+    }
+
+    #[test]
+    fn test_bytes_for_elements_exact_block() {
+        // Exactly one Q4_0 block: 32 elements → 18 bytes
+        assert_eq!(QuantFormat::Q4_0.bytes_for_elements(32), 18);
+        // Two Q8_0 blocks: 64 elements → 2 × 34 = 68 bytes
+        assert_eq!(QuantFormat::Q8_0.bytes_for_elements(64), 68);
+        // F32: 4 elements → 4 × 4 = 16 bytes
+        assert_eq!(QuantFormat::F32.bytes_for_elements(4), 16);
+    }
+
+    #[test]
+    fn test_dequant_q8_0_single_nonzero_value() {
+        // Q8_0: 2 bytes scale (f16 = 1.0) + 32 bytes i8
+        // Only first i8 is nonzero (+1), rest are 0
+        let mut block = vec![0x00u8, 0x3C]; // f16 1.0
+        block.push(1); // first value = 1 × scale = 1.0
+        block.extend_from_slice(&[0u8; 31]); // rest zeros
+        let mut output = [0.0f32; 32];
+        dequant_q8_0_block(&block, &mut output);
+        assert!(
+            (output[0] - 1.0).abs() < 1e-5,
+            "first value should be 1.0, got {}",
+            output[0]
+        );
+        for (i, &v) in output[1..].iter().enumerate() {
+            assert!(v.abs() < 1e-6, "output[{}] should be 0.0, got {}", i + 1, v);
+        }
+    }
 }
