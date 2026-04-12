@@ -446,7 +446,11 @@ fn quant_to_weight_format(q: QuantFormat) -> Option<WeightFormat> {
 }
 
 /// Dequantize raw bytes to f32 based on quantization format.
-fn dequantize_tensor(raw: &[u8], dtype: QuantFormat, numel: usize) -> Result<Vec<f32>, GgufError> {
+pub(crate) fn dequantize_tensor(
+    raw: &[u8],
+    dtype: QuantFormat,
+    numel: usize,
+) -> Result<Vec<f32>, GgufError> {
     match dtype {
         QuantFormat::F32 => {
             let mut data = vec![0.0f32; numel];
@@ -1082,5 +1086,108 @@ mod tests {
             result.is_none(),
             "missing ffn_down should cause load to return None"
         );
+    }
+
+    // ── dequantize_tensor direct tests ────────────────────────────────────────
+
+    #[test]
+    fn test_dequantize_tensor_f32_passthrough() {
+        // F32: raw bytes are just little-endian f32 values
+        let val: f32 = 42.5;
+        let raw = val.to_le_bytes().to_vec();
+        let result = super::dequantize_tensor(&raw, QuantFormat::F32, 1).unwrap();
+        assert_eq!(result.len(), 1);
+        assert!(
+            (result[0] - val).abs() < 1e-6,
+            "f32 passthrough: got {}",
+            result[0]
+        );
+    }
+
+    #[test]
+    fn test_dequantize_tensor_f32_multiple() {
+        // F32: two values
+        let mut raw = Vec::new();
+        raw.extend_from_slice(&1.0f32.to_le_bytes());
+        raw.extend_from_slice(&(-2.0f32).to_le_bytes());
+        let result = super::dequantize_tensor(&raw, QuantFormat::F32, 2).unwrap();
+        assert_eq!(result.len(), 2);
+        assert!((result[0] - 1.0).abs() < 1e-6);
+        assert!((result[1] - (-2.0)).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_dequantize_tensor_f16() {
+        // F16: 0x3C00 = 1.0, 0xBC00 = -1.0
+        let raw = vec![0x00u8, 0x3C, 0x00, 0xBC];
+        let result = super::dequantize_tensor(&raw, QuantFormat::F16, 2).unwrap();
+        assert_eq!(result.len(), 2);
+        assert!((result[0] - 1.0).abs() < 1e-6, "f16[0] = {}", result[0]);
+        assert!((result[1] - (-1.0)).abs() < 1e-6, "f16[1] = {}", result[1]);
+    }
+
+    #[test]
+    fn test_dequantize_tensor_bf16() {
+        // BF16: 0x3F80 = 1.0, 0xBF80 = -1.0
+        let raw = vec![0x80u8, 0x3F, 0x80, 0xBF];
+        let result = super::dequantize_tensor(&raw, QuantFormat::BF16, 2).unwrap();
+        assert_eq!(result.len(), 2);
+        assert!((result[0] - 1.0).abs() < 1e-6, "bf16[0] = {}", result[0]);
+        assert!((result[1] - (-1.0)).abs() < 1e-6, "bf16[1] = {}", result[1]);
+    }
+
+    #[test]
+    fn test_dequantize_tensor_q8_0() {
+        // Q8_0 block: scale f16=1.0 (0x3C00) + 32 bytes of i8=0 → all 0.0
+        let mut raw = vec![0u8; 34];
+        raw[0] = 0x00;
+        raw[1] = 0x3C; // scale = 1.0
+                       // qs[0..32] all 0 → weights all 0.0
+        let result = super::dequantize_tensor(&raw, QuantFormat::Q8_0, 32).unwrap();
+        assert_eq!(result.len(), 32);
+        for (i, &v) in result.iter().enumerate() {
+            assert!(v.abs() < 1e-6, "q8_0 zero: result[{i}] = {v}");
+        }
+    }
+
+    #[test]
+    fn test_dequantize_tensor_q8_0_nonzero() {
+        // Q8_0 block: scale=1.0, qs[0]=5 → result[0]=5.0
+        let mut raw = vec![0u8; 34];
+        raw[0] = 0x00;
+        raw[1] = 0x3C; // scale = 1.0
+        raw[2] = 5i8 as u8; // qs[0] = 5
+        let result = super::dequantize_tensor(&raw, QuantFormat::Q8_0, 32).unwrap();
+        assert!(
+            (result[0] - 5.0).abs() < 1e-5,
+            "q8_0 nonzero: result[0] = {}",
+            result[0]
+        );
+    }
+
+    #[test]
+    fn test_dequantize_tensor_q4_0() {
+        // Q4_0 block (18 bytes): scale=1.0, all nibbles=8 → weight=(8-8)*1.0=0.0
+        let mut raw = vec![0u8; 18];
+        raw[0] = 0x00;
+        raw[1] = 0x3C; // scale = 1.0
+        raw[2..18].fill(0x88); // all nibbles = 8 → (8-8)*scale = 0.0
+        let result = super::dequantize_tensor(&raw, QuantFormat::Q4_0, 32).unwrap();
+        assert_eq!(result.len(), 32);
+        for (i, &v) in result.iter().enumerate() {
+            assert!(v.abs() < 1e-6, "q4_0 zero: result[{i}] = {v}");
+        }
+    }
+
+    #[test]
+    fn test_dequantize_tensor_unsupported_quant() {
+        // Unknown quant format should return UnsupportedQuant error
+        let raw = vec![0u8; 18];
+        let result = super::dequantize_tensor(&raw, QuantFormat::Unknown(999), 32);
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            GgufError::UnsupportedQuant(_) => {}
+            e => panic!("expected UnsupportedQuant, got {e:?}"),
+        }
     }
 }
