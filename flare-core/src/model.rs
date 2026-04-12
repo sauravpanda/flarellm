@@ -9,9 +9,11 @@ use crate::tensor::Tensor;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WeightFormat {
     Q2K,
+    Q3K,
     Q4_0,
     Q4_1,
     Q4K,
+    Q5_0,
     Q5K,
     Q6K,
     Q8_1,
@@ -21,8 +23,12 @@ impl WeightFormat {
     /// Number of weights per block for this format.
     pub fn weights_per_block(self) -> usize {
         match self {
-            WeightFormat::Q2K | WeightFormat::Q4K | WeightFormat::Q5K | WeightFormat::Q6K => 256,
-            WeightFormat::Q4_0 | WeightFormat::Q4_1 | WeightFormat::Q8_1 => 32,
+            WeightFormat::Q2K
+            | WeightFormat::Q3K
+            | WeightFormat::Q4K
+            | WeightFormat::Q5K
+            | WeightFormat::Q6K => 256,
+            WeightFormat::Q4_0 | WeightFormat::Q4_1 | WeightFormat::Q5_0 | WeightFormat::Q8_1 => 32,
         }
     }
 }
