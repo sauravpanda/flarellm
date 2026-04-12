@@ -520,6 +520,12 @@ impl FlareEngine {
         self.model.config().hidden_dim as u32
     }
 
+    /// Get the number of attention heads.
+    #[wasm_bindgen(getter)]
+    pub fn num_heads(&self) -> u32 {
+        self.model.config().num_heads as u32
+    }
+
     /// Name of the auto-detected chat template (e.g. `"ChatML"`, `"Llama3"`,
     /// `"Alpaca"`, `"Raw"`).  Use this to display the template in the UI and
     /// decide whether to call `apply_chat_template` before encoding.
