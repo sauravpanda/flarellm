@@ -238,4 +238,97 @@ mod tests {
         assert_eq!(cache.len(), 1); // still 1
         assert!((cache.keys(0).data()[0] - 2.0).abs() < 1e-5);
     }
+
+    #[test]
+    fn test_head_dim_one() {
+        // Single element head dim: kv_size = 1 * 1 = 1
+        let mut cache = KvCache::new(1, 8, 1, 1);
+        for i in 0..8 {
+            cache.write(0, &[i as f32], &[i as f32 * 2.0]);
+            cache.advance();
+        }
+        assert_eq!(cache.len(), 8);
+        let k = cache.keys(0).data();
+        for (i, &val) in k.iter().enumerate() {
+            assert!(
+                (val - i as f32).abs() < 1e-5,
+                "slot {i}: expected {i}, got {val}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_single_layer_cache() {
+        // 1 layer should behave identically to multi-layer for its own data
+        let mut cache = KvCache::new(1, 4, 2, 4);
+        let kv_size = 2 * 4;
+        let key: Vec<f32> = (0..kv_size).map(|x| x as f32).collect();
+        let val: Vec<f32> = (0..kv_size).map(|x| x as f32 + 100.0).collect();
+        cache.write(0, &key, &val);
+        cache.advance();
+
+        assert_eq!(cache.len(), 1);
+        assert_eq!(cache.position(), 1);
+        assert!((cache.keys(0).data()[0] - 0.0).abs() < 1e-5);
+        assert!((cache.values(0).data()[0] - 100.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_position_at_capacity() {
+        // After writing exactly max_seq_len tokens, position wraps to 0
+        let max = 6;
+        let mut cache = KvCache::new(1, max, 1, 1);
+        for i in 0..max {
+            cache.write(0, &[i as f32], &[0.0]);
+            cache.advance();
+        }
+        assert_eq!(cache.len(), max);
+        assert_eq!(cache.position(), 0);
+    }
+
+    #[test]
+    fn test_len_does_not_exceed_max_seq_len() {
+        let max = 4;
+        let mut cache = KvCache::new(1, max, 1, 1);
+        for i in 0..20 {
+            cache.write(0, &[i as f32], &[0.0]);
+            cache.advance();
+        }
+        assert_eq!(cache.len(), max);
+    }
+
+    #[test]
+    fn test_is_empty_after_clear() {
+        let mut cache = KvCache::new(2, 8, 2, 4);
+        let kv_size = 2 * 4;
+        let key = vec![1.0; kv_size];
+        let val = vec![1.0; kv_size];
+        for _ in 0..3 {
+            cache.write(0, &key, &val);
+            cache.write(1, &key, &val);
+            cache.advance();
+        }
+        assert!(!cache.is_empty());
+        cache.clear();
+        assert!(cache.is_empty());
+        assert_eq!(cache.position(), 0);
+    }
+
+    #[test]
+    fn test_large_head_dim() {
+        // head_dim=256, verify allocation and write/read work correctly
+        let head_dim = 256;
+        let num_kv_heads = 4;
+        let kv_size = num_kv_heads * head_dim;
+        let mut cache = KvCache::new(1, 2, num_kv_heads, head_dim);
+        let key: Vec<f32> = (0..kv_size).map(|x| x as f32).collect();
+        let val: Vec<f32> = vec![0.5; kv_size];
+        cache.write(0, &key, &val);
+        cache.advance();
+
+        assert_eq!(cache.len(), 1);
+        let k = cache.keys(0).data();
+        assert!((k[0] - 0.0).abs() < 1e-5);
+        assert!((k[kv_size - 1] - (kv_size - 1) as f32).abs() < 1e-5);
+    }
 }
