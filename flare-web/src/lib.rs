@@ -759,6 +759,17 @@ impl FlareEngine {
     /// }
     /// requestAnimationFrame(tick);
     /// ```
+    /// Begin a token-by-token stream with sampling parameters including top-k.
+    ///
+    /// - `temperature`: controls randomness (0 = greedy, higher = more random)
+    /// - `top_p`: nucleus sampling — keep the smallest token set whose cumulative
+    ///   probability ≥ `top_p` (1.0 = disabled; applied when < 1.0)
+    /// - `top_k`: keep only the `top_k` highest-probability tokens before sampling
+    ///   (0 = disabled; applied when `top_p` is 1.0 and `top_k` > 0)
+    ///
+    /// ```javascript
+    /// engine.begin_stream_with_params(promptIds, 200, 0.8, 0.95, 40);
+    /// ```
     #[wasm_bindgen]
     pub fn begin_stream_with_params(
         &mut self,
@@ -766,11 +777,12 @@ impl FlareEngine {
         max_tokens: u32,
         temperature: f32,
         top_p: f32,
+        top_k: u32,
     ) {
         self.stream_params = SamplingParams {
             temperature,
             top_p,
-            top_k: 40,
+            top_k: top_k as usize,
             repeat_penalty: 1.1,
         };
         self.stream_rng_state = 0x12345678;
@@ -829,7 +841,15 @@ impl FlareEngine {
                 .wrapping_mul(1664525)
                 .wrapping_add(1013904223);
             let rng_val = (self.stream_rng_state as f32) / (u32::MAX as f32);
-            sampling::sample_top_p(&logits, self.stream_params.top_p, rng_val)
+            // Mirror Generator::step() logic: top_p takes precedence; fall back
+            // to top_k when top_p is 1.0 (disabled); otherwise sample all tokens.
+            if self.stream_params.top_p < 1.0 {
+                sampling::sample_top_p(&logits, self.stream_params.top_p, rng_val)
+            } else if self.stream_params.top_k > 0 {
+                sampling::sample_top_k(&logits, self.stream_params.top_k, rng_val)
+            } else {
+                sampling::sample_top_p(&logits, 1.0, rng_val)
+            }
         };
 
         self.stream_last_token = token_id;
@@ -892,8 +912,13 @@ impl FlareEngine {
         result
     }
 
-    /// Generate with sampling parameters. Stops early at EOS.
-    /// Uses a fixed LCG RNG seed for reproducibility.
+    /// Generate a batch of tokens with explicit sampling parameters.
+    ///
+    /// - `temperature`: 0 = greedy, higher = more diverse
+    /// - `top_p`: nucleus sampling (1.0 = disabled)
+    /// - `top_k`: top-k sampling, applied when `top_p` is 1.0 (0 = disabled)
+    ///
+    /// Stops early at EOS. Uses a fixed LCG RNG seed for reproducibility.
     #[wasm_bindgen]
     pub fn generate_with_params(
         &mut self,
@@ -901,12 +926,13 @@ impl FlareEngine {
         max_tokens: u32,
         temperature: f32,
         top_p: f32,
+        top_k: u32,
     ) -> Vec<u32> {
         let effective = self.with_bos(prompt_tokens);
         let params = SamplingParams {
             temperature,
             top_p,
-            top_k: 40,
+            top_k: top_k as usize,
             repeat_penalty: 1.1,
         };
         let t0 = now_ms();
