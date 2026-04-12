@@ -184,4 +184,55 @@ mod tests {
         // 8-bit should equal param count (1 byte per param)
         assert_eq!(mem8, config.estimate_param_count());
     }
+
+    #[test]
+    fn test_config_clone_is_equal() {
+        let config = tiny_config();
+        let cloned = config.clone();
+        assert_eq!(cloned.vocab_size, config.vocab_size);
+        assert_eq!(cloned.hidden_dim, config.hidden_dim);
+        assert_eq!(cloned.num_layers, config.num_layers);
+        assert_eq!(cloned.architecture, config.architecture);
+        assert_eq!(cloned.max_seq_len, config.max_seq_len);
+    }
+
+    #[test]
+    fn test_default_config_dimensions() {
+        // Smoke-test that the Default impl reflects Llama-3.2-1B dimensions
+        let config = ModelConfig::default();
+        assert_eq!(config.hidden_dim, 2048);
+        assert_eq!(config.num_layers, 16);
+        assert_eq!(config.vocab_size, 128256);
+        assert_eq!(config.architecture, Architecture::Llama);
+    }
+
+    #[test]
+    fn test_estimate_param_count_two_layers() {
+        // Same tiny_config but with 2 layers: params = embed + 2*per_layer + output
+        let config = ModelConfig {
+            num_layers: 2,
+            ..tiny_config()
+        };
+        // per_layer = 152 (from tiny_config comment)
+        let single = tiny_config().estimate_param_count();
+        let per_layer = 152usize;
+        let expected = single + per_layer; // +1 layer
+        assert_eq!(config.estimate_param_count(), expected);
+    }
+
+    #[test]
+    fn test_weight_memory_zero_bits() {
+        // 0 bits_per_weight → 0 bytes regardless of param count
+        let config = tiny_config();
+        assert_eq!(config.estimate_weight_memory(0.0), 0);
+    }
+
+    #[test]
+    fn test_kv_cache_scales_linearly_with_seq_len() {
+        // Doubling seq_len must exactly double the KV cache estimate
+        let config = tiny_config();
+        let mem1 = config.estimate_kv_cache_memory(64, 8.0);
+        let mem2 = config.estimate_kv_cache_memory(128, 8.0);
+        assert_eq!(mem2, mem1 * 2, "KV cache should be proportional to seq_len");
+    }
 }
