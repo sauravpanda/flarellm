@@ -32,7 +32,7 @@ use flare_core::model::Model;
 use flare_core::sampling::{self, SamplingParams};
 use flare_core::tokenizer::{BpeTokenizer, Tokenizer};
 use flare_gpu::WebGpuBackend;
-use flare_loader::gguf::GgufFile;
+use flare_loader::gguf::{GgufFile, MetadataValue};
 use flare_loader::tokenizer::GgufVocab;
 use flare_loader::weights::{load_model_weights, load_model_weights_with_progress};
 use wasm_bindgen::prelude::*;
@@ -110,6 +110,86 @@ fn now_ms() -> f64 {
     }
 }
 
+/// Serialise a single GGUF metadata value to a JSON fragment.
+///
+/// Returns `None` for large arrays (> 64 entries) or arrays whose elements
+/// cannot be serialised, so those keys are silently omitted from the output.
+fn metadata_value_to_json(val: &MetadataValue) -> Option<String> {
+    match val {
+        MetadataValue::Uint8(v) => Some(v.to_string()),
+        MetadataValue::Int8(v) => Some(v.to_string()),
+        MetadataValue::Uint16(v) => Some(v.to_string()),
+        MetadataValue::Int16(v) => Some(v.to_string()),
+        MetadataValue::Uint32(v) => Some(v.to_string()),
+        MetadataValue::Int32(v) => Some(v.to_string()),
+        MetadataValue::Uint64(v) => Some(v.to_string()),
+        MetadataValue::Int64(v) => Some(v.to_string()),
+        MetadataValue::Float32(v) => {
+            if v.is_nan() || v.is_infinite() {
+                Some("null".to_string())
+            } else {
+                Some(v.to_string())
+            }
+        }
+        MetadataValue::Float64(v) => {
+            if v.is_nan() || v.is_infinite() {
+                Some("null".to_string())
+            } else {
+                Some(v.to_string())
+            }
+        }
+        MetadataValue::Bool(v) => Some(if *v { "true" } else { "false" }.to_string()),
+        MetadataValue::String(s) => {
+            let escaped = s
+                .replace('\\', "\\\\")
+                .replace('"', "\\\"")
+                .replace('\n', "\\n")
+                .replace('\r', "\\r")
+                .replace('\t', "\\t");
+            Some(format!("\"{}\"", escaped))
+        }
+        MetadataValue::Array(items) => {
+            // Skip large arrays to keep the JSON payload small.
+            if items.len() > 64 {
+                return None;
+            }
+            let parts: Vec<String> = items.iter().filter_map(metadata_value_to_json).collect();
+            if parts.len() == items.len() {
+                Some(format!("[{}]", parts.join(",")))
+            } else {
+                None
+            }
+        }
+    }
+}
+
+/// Build a JSON object string from GGUF metadata.
+///
+/// Keys containing `"tokens"`, `"merges"`, `"scores"`, or `"added_tokens"` are
+/// skipped because they hold large vocabulary arrays that would make the payload
+/// impractical.  The remaining scalar and small-array values are serialised
+/// in sorted key order for stable output.
+fn build_metadata_json(gguf: &GgufFile) -> String {
+    const SKIP: &[&str] = &["tokens", "merges", "scores", "added_tokens"];
+
+    let mut keys: Vec<&String> = gguf.metadata.keys().collect();
+    keys.sort();
+
+    let mut pairs: Vec<String> = Vec::new();
+    for key in keys {
+        if SKIP.iter().any(|p| key.contains(p)) {
+            continue;
+        }
+        let val = &gguf.metadata[key];
+        if let Some(json_val) = metadata_value_to_json(val) {
+            let escaped_key = key.replace('\\', "\\\\").replace('"', "\\\"");
+            pairs.push(format!("\"{}\":{}", escaped_key, json_val));
+        }
+    }
+
+    format!("{{{}}}", pairs.join(","))
+}
+
 /// Flare LLM inference engine, exported to JS.
 ///
 /// Holds a loaded model and runs greedy/sampled token generation.
@@ -181,6 +261,10 @@ pub struct FlareEngine {
     /// User-configurable LCG seed applied to the next generation call.
     /// Defaults to `0x12345678`; reset to default by `reset()`.
     rng_seed: u32,
+    // --- GGUF metadata ---
+    /// Pre-built JSON string of scalar GGUF metadata (large vocabulary arrays excluded).
+    /// Empty string `"{}"` for non-GGUF models.
+    metadata_json: String,
 }
 
 #[wasm_bindgen]
@@ -218,6 +302,7 @@ impl FlareEngine {
             .unwrap_or("")
             .to_string();
         let gguf_vocab = GgufVocab::from_gguf(&gguf).ok();
+        let metadata_json = build_metadata_json(&gguf);
         let config = gguf
             .to_model_config()
             .map_err(|e| JsError::new(&format!("Model config error: {e}")))?;
@@ -252,6 +337,7 @@ impl FlareEngine {
             stop_sequences: Vec::new(),
             stream_text_accum: String::new(),
             rng_seed: 0x12345678,
+            metadata_json,
         })
     }
 
@@ -527,6 +613,24 @@ impl FlareEngine {
     #[wasm_bindgen(getter)]
     pub fn model_name(&self) -> String {
         self.model_name.clone()
+    }
+
+    /// All GGUF model metadata as a JSON string.
+    ///
+    /// Returns a JSON object mapping each metadata key to its value.
+    /// Large vocabulary arrays (`tokenizer.ggml.tokens`, `.merges`, `.scores`,
+    /// `.added_tokens`) are omitted to keep the payload practical.
+    /// Small arrays (≤ 64 entries) are included as JSON arrays.
+    ///
+    /// Returns `"{}"` if the model was not loaded from a GGUF file.
+    ///
+    /// ```javascript
+    /// const meta = JSON.parse(engine.metadata_json);
+    /// console.log(meta["llama.context_length"]); // e.g. 4096
+    /// ```
+    #[wasm_bindgen(getter)]
+    pub fn metadata_json(&self) -> String {
+        self.metadata_json.clone()
     }
 
     /// Maximum sequence length (context window size) of the loaded model.
@@ -1346,6 +1450,7 @@ impl FlareProgressiveLoader {
             .unwrap_or("")
             .to_string();
         let gguf_vocab = GgufVocab::from_gguf(&gguf).ok();
+        let metadata_json = build_metadata_json(&gguf);
         let config = gguf
             .to_model_config()
             .map_err(|e| JsError::new(&format!("model config error: {e}")))?;
@@ -1386,6 +1491,7 @@ impl FlareProgressiveLoader {
             stop_sequences: Vec::new(),
             stream_text_accum: String::new(),
             rng_seed: 0x12345678,
+            metadata_json,
         })
     }
 }
