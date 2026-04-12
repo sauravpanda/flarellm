@@ -29,6 +29,7 @@ const DEQUANT_Q4K_SHADER: &str = include_str!("../shaders/dequant_q4k.wgsl");
 const DEQUANT_MATVEC_Q4K_SHADER: &str = include_str!("../shaders/dequant_matvec_q4k.wgsl");
 const DEQUANT_Q5K_SHADER: &str = include_str!("../shaders/dequant_q5k.wgsl");
 const DEQUANT_Q6K_SHADER: &str = include_str!("../shaders/dequant_q6k.wgsl");
+const PREFILL_ATTENTION_SHADER: &str = include_str!("../shaders/prefill_attention.wgsl");
 
 /// WebGPU/wgpu compute backend.
 ///
@@ -390,7 +391,8 @@ impl WebGpuBackend {
         let output_size = (num_blocks * 256) as u64 * 4;
 
         // Q6_K blocks are 210 bytes — pad to next multiple of 4 for wgpu.
-        let raw_buf = if raw_bytes.len().is_multiple_of(4) {
+        #[allow(clippy::manual_is_multiple_of)]
+        let raw_buf = if raw_bytes.len() % 4 == 0 {
             self.pool.get_storage(&self.device, &self.queue, raw_bytes)
         } else {
             let mut padded = raw_bytes.to_vec();
@@ -521,6 +523,91 @@ impl WebGpuBackend {
                 },
             ],
         })
+    }
+
+    /// Batched causal prefill attention for all token positions in a sequence.
+    ///
+    /// Dispatches one workgroup per `(query_pos, head)` pair so all positions
+    /// are processed in parallel.  Position `t` attends causally to keys at
+    /// positions `0..=t`.
+    ///
+    /// - `q`: `[seq_len * num_heads * head_dim]`
+    /// - `k`: `[seq_len * num_kv_heads * head_dim]`
+    /// - `v`: `[seq_len * num_kv_heads * head_dim]`
+    /// - Returns `[seq_len * num_heads * head_dim]`
+    #[allow(clippy::too_many_arguments)]
+    pub fn prefill_attention(
+        &self,
+        q: &[f32],
+        k: &[f32],
+        v: &[f32],
+        seq_len: usize,
+        num_heads: usize,
+        num_kv_heads: usize,
+        head_dim: usize,
+        attn_softcap: f32,
+    ) -> Vec<f32> {
+        let q_dim = num_heads * head_dim;
+        let output_size = (seq_len * q_dim) as u64 * 4;
+
+        let q_buf = self
+            .pool
+            .get_storage(&self.device, &self.queue, bytemuck::cast_slice(q));
+        let k_buf = self
+            .pool
+            .get_storage(&self.device, &self.queue, bytemuck::cast_slice(k));
+        let v_buf = self
+            .pool
+            .get_storage(&self.device, &self.queue, bytemuck::cast_slice(v));
+        let out_buf = self.pool.get_output(&self.device, output_size);
+
+        let scale = 1.0_f32 / (head_dim as f32).sqrt();
+        let params: [u32; 6] = [
+            seq_len as u32,
+            num_heads as u32,
+            num_kv_heads as u32,
+            head_dim as u32,
+            scale.to_bits(),
+            attn_softcap.to_bits(),
+        ];
+        let params_buf =
+            self.pool
+                .get_uniform(&self.device, &self.queue, bytemuck::cast_slice(&params));
+
+        let layout_entries = Self::attention_layout();
+        let result = self.cache.with_pipeline(
+            &self.device,
+            "prefill_attention",
+            PREFILL_ATTENTION_SHADER,
+            "prefill_attention",
+            &layout_entries,
+            |cached| {
+                let bind_group = self.make_attention_bind_group(
+                    cached,
+                    &q_buf,
+                    &k_buf,
+                    &v_buf,
+                    &out_buf,
+                    &params_buf,
+                );
+                // Dispatch [seq_len, num_heads, 1]: one workgroup per (position, head).
+                self.dispatch_and_readback(
+                    &cached.pipeline,
+                    &bind_group,
+                    [seq_len as u32, num_heads as u32, 1],
+                    &out_buf,
+                    output_size,
+                )
+            },
+        );
+
+        self.pool.return_storage(q_buf);
+        self.pool.return_storage(k_buf);
+        self.pool.return_storage(v_buf);
+        self.pool.return_output(out_buf);
+        self.pool.return_uniform(params_buf);
+
+        result
     }
 }
 
@@ -1096,6 +1183,29 @@ impl ComputeBackend for WebGpuBackend {
 
         output
     }
+
+    fn prefill_attention_gpu(
+        &self,
+        q: &[f32],
+        k: &[f32],
+        v: &[f32],
+        seq_len: usize,
+        num_heads: usize,
+        num_kv_heads: usize,
+        head_dim: usize,
+        attn_softcap: f32,
+    ) -> Vec<f32> {
+        self.prefill_attention(
+            q,
+            k,
+            v,
+            seq_len,
+            num_heads,
+            num_kv_heads,
+            head_dim,
+            attn_softcap,
+        )
+    }
 }
 
 // WASM is single-threaded; wgpu's JS-backed types don't impl Send/Sync but it's
@@ -1470,6 +1580,64 @@ mod tests {
             assert!(
                 (gpu - cpu).abs() < 1e-3,
                 "q6k mismatch at [{j}]: gpu={gpu}, cpu={cpu}"
+            );
+        }
+    }
+
+    /// Verify GPU batched prefill attention matches the CPU reference.
+    ///
+    /// Uses a 3-position, 2-head, head_dim=4 setup:
+    ///   Q = K = V = identity-like pattern (ones on diagonal per head).
+    ///   Compares GPU output against `cpu_grouped_query_attention` per position.
+    ///
+    /// Requires a GPU adapter; run with: `cargo test -p flarellm-gpu -- --ignored`
+    #[test]
+    #[ignore]
+    fn test_prefill_attention_matches_cpu() {
+        use flare_core::model::cpu_grouped_query_attention;
+
+        let seq_len = 4usize;
+        let num_heads = 2usize;
+        let num_kv_heads = 2usize;
+        let head_dim = 8usize;
+        let q_dim = num_heads * head_dim;
+        let kv_dim = num_kv_heads * head_dim;
+
+        // Fill Q, K, V with deterministic values.
+        let total_q = seq_len * q_dim;
+        let total_kv = seq_len * kv_dim;
+        let q: Vec<f32> = (0..total_q).map(|i| (i as f32) * 0.1).collect();
+        let k: Vec<f32> = (0..total_kv).map(|i| (i as f32) * 0.05).collect();
+        let v: Vec<f32> = (0..total_kv).map(|i| 1.0 / (1.0 + i as f32)).collect();
+
+        // CPU reference: compute per-position causal attention.
+        let mut cpu_out = vec![0.0f32; seq_len * q_dim];
+        for t in 0..seq_len {
+            let q_t = &q[t * q_dim..(t + 1) * q_dim];
+            let k_t = &k[0..(t + 1) * kv_dim];
+            let v_t = &v[0..(t + 1) * kv_dim];
+            let attn_t = cpu_grouped_query_attention(
+                q_t,
+                k_t,
+                v_t,
+                num_heads,
+                num_kv_heads,
+                head_dim,
+                t + 1,
+                0.0,
+            );
+            cpu_out[t * q_dim..(t + 1) * q_dim].copy_from_slice(&attn_t);
+        }
+
+        let backend = pollster::block_on(WebGpuBackend::new()).expect("GPU backend unavailable");
+        let gpu_out =
+            backend.prefill_attention(&q, &k, &v, seq_len, num_heads, num_kv_heads, head_dim, 0.0);
+
+        assert_eq!(gpu_out.len(), cpu_out.len());
+        for (i, (&g, &c)) in gpu_out.iter().zip(cpu_out.iter()).enumerate() {
+            assert!(
+                (g - c).abs() < 1e-4,
+                "prefill_attention mismatch at [{i}]: gpu={g}, cpu={c}"
             );
         }
     }
