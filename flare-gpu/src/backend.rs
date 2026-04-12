@@ -570,9 +570,9 @@ impl WebGpuBackend {
             scale.to_bits(),
             attn_softcap.to_bits(),
         ];
-        let params_buf = self
-            .pool
-            .get_uniform(&self.device, &self.queue, bytemuck::cast_slice(&params));
+        let params_buf =
+            self.pool
+                .get_uniform(&self.device, &self.queue, bytemuck::cast_slice(&params));
 
         let layout_entries = Self::attention_layout();
         let result = self.cache.with_pipeline(
@@ -1195,7 +1195,16 @@ impl ComputeBackend for WebGpuBackend {
         head_dim: usize,
         attn_softcap: f32,
     ) -> Vec<f32> {
-        self.prefill_attention(q, k, v, seq_len, num_heads, num_kv_heads, head_dim, attn_softcap)
+        self.prefill_attention(
+            q,
+            k,
+            v,
+            seq_len,
+            num_heads,
+            num_kv_heads,
+            head_dim,
+            attn_softcap,
+        )
     }
 }
 
@@ -1607,12 +1616,22 @@ mod tests {
             let q_t = &q[t * q_dim..(t + 1) * q_dim];
             let k_t = &k[0..(t + 1) * kv_dim];
             let v_t = &v[0..(t + 1) * kv_dim];
-            let attn_t = cpu_grouped_query_attention(q_t, k_t, v_t, num_heads, num_kv_heads, head_dim, t + 1, 0.0);
+            let attn_t = cpu_grouped_query_attention(
+                q_t,
+                k_t,
+                v_t,
+                num_heads,
+                num_kv_heads,
+                head_dim,
+                t + 1,
+                0.0,
+            );
             cpu_out[t * q_dim..(t + 1) * q_dim].copy_from_slice(&attn_t);
         }
 
         let backend = pollster::block_on(WebGpuBackend::new()).expect("GPU backend unavailable");
-        let gpu_out = backend.prefill_attention(&q, &k, &v, seq_len, num_heads, num_kv_heads, head_dim, 0.0);
+        let gpu_out =
+            backend.prefill_attention(&q, &k, &v, seq_len, num_heads, num_kv_heads, head_dim, 0.0);
 
         assert_eq!(gpu_out.len(), cpu_out.len());
         for (i, (&g, &c)) in gpu_out.iter().zip(cpu_out.iter()).enumerate() {
