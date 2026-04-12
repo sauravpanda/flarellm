@@ -354,4 +354,84 @@ mod tests {
         assert_eq!(layer_step.size, 300); // 100 + 200
         assert_eq!(layer_step.offset, 50); // min of 50 and 150
     }
+
+    #[test]
+    fn test_load_progress_zero_layers() {
+        // zero total_layers is a valid edge case (e.g. config parsing failed)
+        let progress = LoadProgress::new(0);
+        assert_eq!(progress.total_count(), 0);
+        assert_eq!(progress.loaded_count(), 0);
+        // With 0 layers, is_complete requires embedding + output only
+        progress.set_embedding_ready();
+        progress.set_output_ready();
+        assert!(
+            progress.is_complete(),
+            "0-layer model should be complete after embedding+output"
+        );
+    }
+
+    #[test]
+    fn test_can_start_inference_requires_embedding() {
+        // Loading layers without embedding must not allow inference start
+        let progress = LoadProgress::new(4);
+        progress.mark_layer_loaded();
+        progress.mark_layer_loaded();
+        assert!(
+            !progress.can_start_inference(),
+            "inference must not start without embedding, even if layers are loaded"
+        );
+        progress.set_embedding_ready();
+        assert!(
+            progress.can_start_inference(),
+            "inference can start once embedding + 1 layer ready"
+        );
+    }
+
+    #[test]
+    fn test_is_complete_requires_output() {
+        // All transformer layers + embedding loaded, but no output → not complete
+        let progress = LoadProgress::new(2);
+        progress.set_embedding_ready();
+        progress.mark_layer_loaded();
+        progress.mark_layer_loaded();
+        assert!(
+            !progress.is_complete(),
+            "must not be complete without output projection"
+        );
+        progress.set_output_ready();
+        assert!(progress.is_complete());
+    }
+
+    #[test]
+    fn test_load_plan_empty_tensor_list() {
+        // Empty tensor list → plan has only the (empty) layer placeholders
+        let plan = LoadPlan::from_tensor_info(&[], 3);
+        // 3 layer slots, no embedding, no output
+        let layer_components: Vec<&str> = plan.steps.iter().map(|s| s.component.as_str()).collect();
+        assert_eq!(layer_components, ["layer.0", "layer.1", "layer.2"]);
+    }
+
+    #[test]
+    fn test_load_plan_model_layers_prefix() {
+        // Tensors using "model.layers.N." prefix should be assigned to the correct layer step
+        let tensors = vec![
+            ("token_embd.weight".into(), 0u64, 64u64),
+            ("model.layers.0.self_attn.q_proj.weight".into(), 64, 128),
+            ("model.layers.1.self_attn.q_proj.weight".into(), 192, 128),
+            ("lm_head.weight".into(), 320, 64),
+        ];
+        let plan = LoadPlan::from_tensor_info(&tensors, 2);
+        let l0 = plan
+            .steps
+            .iter()
+            .find(|s| s.component == "layer.0")
+            .unwrap();
+        let l1 = plan
+            .steps
+            .iter()
+            .find(|s| s.component == "layer.1")
+            .unwrap();
+        assert_eq!(l0.size, 128);
+        assert_eq!(l1.size, 128);
+    }
 }
