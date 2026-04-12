@@ -594,6 +594,71 @@ pub fn dequant_iq2xs_block(block: &[u8], grid: &[u64; 512], output: &mut [f32; 2
     }
 }
 
+/// CPU reference dequantizer for IQ2_XXS blocks (66 bytes → 256 f32 weights).
+///
+/// IQ2_XXS block layout (GGUF type 16):
+///   bytes 0-1:   d (f16 LE)
+///   bytes 2-65:  qs (8 × 8-byte chunks, one per 32-weight group)
+///
+/// For each ib32 ∈ \[0, 7\], the 8-byte chunk at offset 2 + 8*ib32 contains:
+///   aux0 = u32 LE bytes 0-3: four 8-bit grid indices (one per 8-weight sub-group)
+///   aux1 = u32 LE bytes 4-7: packed 4×7-bit sign indices + 4-bit sub-scale in bits 31:28
+///   db = d * (0.5 + sub_scale) * 0.25
+///   For l ∈ \[0, 3\]: grid_idx=(aux0>>(8*l))&0xFF, signs_7bit=(aux1>>(7*l))&127
+///
+/// Grid: 256-entry u64 (8 weight bytes each). Sign lookup: `KSIGNS_IQ2XS`.
+pub fn dequant_iq2xxs_block(block: &[u8], grid: &[u64; 256], output: &mut [f32; 256]) {
+    if block.len() < 66 {
+        output.fill(0.0);
+        return;
+    }
+    let d = f16_to_f32(u16::from_le_bytes([block[0], block[1]]));
+    for ib32 in 0..8usize {
+        let base = 2 + ib32 * 8;
+        let aux0 = u32::from_le_bytes([
+            block[base],
+            block[base + 1],
+            block[base + 2],
+            block[base + 3],
+        ]);
+        let aux1 = u32::from_le_bytes([
+            block[base + 4],
+            block[base + 5],
+            block[base + 6],
+            block[base + 7],
+        ]);
+        let sub_scale = (aux1 >> 28) as f32;
+        let db = d * (0.5 + sub_scale) * 0.25;
+        let out_base = ib32 * 32;
+        for l in 0..4usize {
+            let grid_idx = ((aux0 >> (8 * l)) & 0xFF) as usize;
+            let signs_7bit = ((aux1 >> (7 * l)) & 127) as usize;
+            let signs_8bit = KSIGNS_IQ2XS[signs_7bit];
+            let grid_val = grid[grid_idx];
+            let lo32 = (grid_val & 0xFFFFFFFF) as u32;
+            let hi32 = (grid_val >> 32) as u32;
+            for j in 0..4usize {
+                let gb = ((lo32 >> (j * 8)) & 0xFF) as f32;
+                let sign = if (signs_8bit >> j) & 1 != 0 {
+                    -1.0
+                } else {
+                    1.0
+                };
+                output[out_base + l * 8 + j] = db * gb * sign;
+            }
+            for j in 0..4usize {
+                let gb = ((hi32 >> (j * 8)) & 0xFF) as f32;
+                let sign = if (signs_8bit >> (j + 4)) & 1 != 0 {
+                    -1.0
+                } else {
+                    1.0
+                };
+                output[out_base + l * 8 + j + 4] = db * gb * sign;
+            }
+        }
+    }
+}
+
 /// CPU reference dequantizer for IQ3_XXS blocks (98 bytes → 256 f32 weights).
 ///
 /// IQ3_XXS block layout (GGUF type 18):
@@ -1328,6 +1393,274 @@ mod tests {
         let block = vec![0u8; 10]; // too short
         let mut output = [0.0f32; 256];
         dequant_iq3xxs_block(&block, &grid, &mut output);
+        assert!(output.iter().all(|&v| v == 0.0));
+    }
+
+    // ── IQ3_XXS extended tests ────────────────────────────────────────────────
+
+    fn iq3xxs_grid_full_fixture() -> Box<[u32; 256]> {
+        let mut g = vec![0u32; 256];
+        g[0] = 0x04040404u32; // all bytes = 4
+        g[1] = 0x08080808u32; // all bytes = 8
+        g[2] = 0x02020202u32; // all bytes = 2
+        g[3] = 0x01010101u32; // all bytes = 1
+        Box::new(g.try_into().unwrap())
+    }
+
+    #[test]
+    fn test_dequant_iq3xxs_all_l_values() {
+        // Use different grid entries for each l via qs bytes
+        let grid = iq3xxs_grid_full_fixture();
+        let mut block = make_iq3xxs_zero_block();
+        // ib32=0: qs bytes 2..9 = [0,1,2,3,0,0,0,0] → l=0→grid[0], l=1→grid[1], l=2→grid[2], l=3→grid[3]
+        block[2] = 0; // l=0 qs1
+        block[3] = 0; // l=0 qs2 (not used for diff grid)
+        block[4] = 1; // l=1 qs1
+        block[5] = 0;
+        block[6] = 2; // l=2 qs1
+        block[7] = 0;
+        block[8] = 3; // l=3 qs1
+        block[9] = 0;
+        let mut output = [0.0f32; 256];
+        dequant_iq3xxs_block(&block, &grid, &mut output);
+        // dl = 1*(0.5+0)*0.5 = 0.25; sign_7bit=0 → KSIGNS_IQ2XS[0]=0x00 (all +)
+        // l=0: grid[0] bytes=4 → 0.25*4=1.0; qs2=0 → also grid[0]
+        // l=1: grid[1] bytes=8 → 0.25*8=2.0; qs2=0 → grid[0] → 1.0 (second 4)
+        // l=2: grid[2] bytes=2 → 0.25*2=0.5; qs2=0 → grid[0] → 1.0
+        // l=3: grid[3] bytes=1 → 0.25*1=0.25; qs2=0 → grid[0] → 1.0
+        let expected_l = [1.0f32, 2.0, 0.5, 0.25];
+        for (l, &exp) in expected_l.iter().enumerate() {
+            for (j, &v) in output[l * 8..l * 8 + 4].iter().enumerate() {
+                assert!(
+                    (v - exp).abs() < 1e-5,
+                    "iq3xxs l={l} j={j}: got {v}, expected {exp}"
+                );
+            }
+            // second 4 weights from qs2=0 → grid[0] → 1.0
+            for (j, &v) in output[l * 8 + 4..l * 8 + 8].iter().enumerate() {
+                assert!(
+                    (v - 1.0).abs() < 1e-5,
+                    "iq3xxs l={l} qs2 j={j}: got {v}, expected 1.0"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_dequant_iq3xxs_sign_bit_pattern() {
+        // KSIGNS_IQ2XS[0x7F] = 0xFF → all 8 sign bits set → all weights negative
+        let grid = iq3xxs_grid_full_fixture();
+        let mut block = make_iq3xxs_zero_block();
+        // l=0 sign_7bit = 127 (0x7F): set aux32 bits 6:0 = 0x7F
+        // aux32 = 0x0000007F → bytes at 66..69 = [0x7F, 0x00, 0x00, 0x00]
+        block[66] = 0x7F;
+        let mut output = [0.0f32; 256];
+        dequant_iq3xxs_block(&block, &grid, &mut output);
+        // KSIGNS_IQ2XS[127] = 0xFF → all bits set → all 8 weights of l=0 are negative
+        // dl=0.25, grid[0]=4 → -0.25*4 = -1.0
+        for (j, &v) in output[..8].iter().enumerate() {
+            assert!(
+                (v - (-1.0)).abs() < 1e-5,
+                "iq3xxs all signs: j={j} got {v}, expected -1.0"
+            );
+        }
+        // l=1..3 signs_7bit=0 → positive → 1.0
+        for (j, &v) in output[8..32].iter().enumerate() {
+            assert!(
+                (v - 1.0).abs() < 1e-5,
+                "iq3xxs l>0: j={j} got {v}, expected 1.0"
+            );
+        }
+    }
+
+    #[test]
+    fn test_dequant_iq3xxs_last_ib32() {
+        // Last ib32 group: sub-scale at bits 31:28 of scales_and_signs[7]
+        let grid = iq3xxs_grid_full_fixture();
+        let mut block = make_iq3xxs_zero_block();
+        // scales_and_signs[7] at bytes 94-97 (66 + 7*4): sub_scale=8 → bits 31:28=0x8 → byte[97]=0x80
+        block[69 + 7 * 4] = 0x80; // high byte of aux32[7]
+        let mut output = [0.0f32; 256];
+        dequant_iq3xxs_block(&block, &grid, &mut output);
+        // dl = 1*(0.5+8)*0.5 = 4.25; grid[0]=4 → 4.25*4=17.0
+        let expected = (0.5f32 + 8.0) * 0.5 * 4.0;
+        for (i, &v) in output[224..].iter().enumerate() {
+            assert!(
+                (v - expected).abs() < 1e-4,
+                "iq3xxs last ib32: weight[{i}] = {v}, expected {expected}"
+            );
+        }
+        // First 224 weights use sub_scale=0 → dl=0.25 → 1.0
+        for (i, &v) in output[..224].iter().enumerate() {
+            assert!(
+                (v - 1.0).abs() < 1e-5,
+                "iq3xxs last ib32 rest: weight[{i}] = {v}, expected 1.0"
+            );
+        }
+    }
+
+    // ── IQ2_XXS tests ─────────────────────────────────────────────────────────
+
+    fn iq2xxs_grid_fixture() -> Box<[u64; 256]> {
+        let mut g = vec![0u64; 256];
+        // entry 0: all bytes = 8 → 0x0808080808080808
+        g[0] = 0x0808080808080808u64;
+        // entry 1: all bytes = 4
+        g[1] = 0x0404040404040404u64;
+        // entry 2: all bytes = 2
+        g[2] = 0x0202020202020202u64;
+        // entry 3: alternating 8/4 pattern
+        g[3] = 0x0408040804080408u64;
+        Box::new(g.try_into().unwrap())
+    }
+
+    fn make_iq2xxs_zero_block() -> Vec<u8> {
+        let mut block = vec![0u8; 66];
+        block[0] = 0x00;
+        block[1] = 0x3C; // d = 1.0 (f16)
+                         // aux0=0, aux1=0 for all groups → grid_idx=0, signs_7bit=0, sub_scale=0
+        block
+    }
+
+    #[test]
+    fn test_dequant_iq2xxs_zeroed() {
+        let grid = iq2xxs_grid_fixture();
+        let block = make_iq2xxs_zero_block();
+        let mut output = [0.0f32; 256];
+        dequant_iq2xxs_block(&block, &grid, &mut output);
+        // sub_scale=0 → db=1*(0.5+0)*0.25=0.125; grid[0]=8; signs all +1 → 0.125*8=1.0
+        for (i, &v) in output.iter().enumerate() {
+            assert!(
+                (v - 1.0).abs() < 1e-5,
+                "iq2xxs zero: weight[{i}] = {v}, expected 1.0"
+            );
+        }
+    }
+
+    #[test]
+    fn test_dequant_iq2xxs_max_subscale() {
+        let grid = iq2xxs_grid_fixture();
+        let mut block = make_iq2xxs_zero_block();
+        // sub_scale=15: aux1 bits 31:28=0xF → byte at offset 9 (base+7) = 0xF0
+        // block[2+7]=0xF0: ib32=0, aux1 high byte = 0xF0
+        block[9] = 0xF0;
+        let mut output = [0.0f32; 256];
+        dequant_iq2xxs_block(&block, &grid, &mut output);
+        // db = 1*(0.5+15)*0.25 = 3.875; grid[0]=8; weight = 3.875*8 = 31.0
+        let expected = (0.5f32 + 15.0) * 0.25 * 8.0;
+        for (i, &v) in output[..32].iter().enumerate() {
+            assert!(
+                (v - expected).abs() < 1e-4,
+                "iq2xxs max sub_scale: weight[{i}] = {v}, expected {expected}"
+            );
+        }
+        // Remaining groups sub_scale=0 → 1.0
+        for (i, &v) in output[32..].iter().enumerate() {
+            assert!(
+                (v - 1.0).abs() < 1e-5,
+                "iq2xxs max sub_scale rest: weight[{i}] = {v}, expected 1.0"
+            );
+        }
+    }
+
+    #[test]
+    fn test_dequant_iq2xxs_sign_inversion() {
+        let grid = iq2xxs_grid_fixture();
+        let mut block = make_iq2xxs_zero_block();
+        // signs_7bit=1 for l=0: set aux1 bits 6:0 = 1 → block[2+4]=0x01
+        // KSIGNS_IQ2XS[1] = 0x81 → bit0=1 (neg), bit7=1 (neg), rest +1
+        block[6] = 0x01; // aux1 low byte for ib32=0
+        let mut output = [0.0f32; 256];
+        dequant_iq2xxs_block(&block, &grid, &mut output);
+        // db=0.125; grid[0]=8 for all bytes
+        // l=0: j=0 (bit0=1) → -1.0; j=1..6 → +1.0; j=7 (bit7=1) → -1.0
+        assert!(
+            (output[0] - (-1.0)).abs() < 1e-5,
+            "iq2xxs sign j=0: got {}",
+            output[0]
+        );
+        assert!(
+            (output[1] - 1.0).abs() < 1e-5,
+            "iq2xxs sign j=1: got {}",
+            output[1]
+        );
+        assert!(
+            (output[7] - (-1.0)).abs() < 1e-5,
+            "iq2xxs sign j=7: got {}",
+            output[7]
+        );
+    }
+
+    #[test]
+    fn test_dequant_iq2xxs_all_l_values() {
+        // Test all 4 l-values via different grid indices in aux0
+        // aux0 = [0, 1, 2, 3] bytes → (0) | (1<<8) | (2<<16) | (3<<24) = 0x03020100
+        let grid = iq2xxs_grid_fixture();
+        let mut block = make_iq2xxs_zero_block();
+        // aux0 for ib32=0 at bytes 2..5
+        block[2] = 0x00; // l=0 grid_idx = 0
+        block[3] = 0x01; // l=1 grid_idx = 1
+        block[4] = 0x02; // l=2 grid_idx = 2
+        block[5] = 0x03; // l=3 grid_idx = 3
+        let mut output = [0.0f32; 256];
+        dequant_iq2xxs_block(&block, &grid, &mut output);
+        // db=0.125; signs all + (signs_7bit=0)
+        // l=0: grid[0]=8 → 0.125*8=1.0
+        // l=1: grid[1]=4 → 0.125*4=0.5
+        // l=2: grid[2]=2 → 0.125*2=0.25
+        // l=3: grid[3] alternating 8/4 bytes → 0.125*8=1.0 or 0.125*4=0.5
+        let expected_l = [1.0f32, 0.5, 0.25];
+        for (l, &exp) in expected_l.iter().enumerate() {
+            for (j, &v) in output[l * 8..(l + 1) * 8].iter().enumerate() {
+                assert!(
+                    (v - exp).abs() < 1e-5,
+                    "iq2xxs l={l} j={j}: got {v}, expected {exp}"
+                );
+            }
+        }
+        // l=3: grid[3] alternating 4/8 per byte (0x0408040804080408)
+        // lo32=0x04080408: bytes 0=0x08, 1=0x04, 2=0x08, 3=0x04
+        // hi32=0x04080408: same pattern
+        let exp_l3 = [1.0f32, 0.5, 1.0, 0.5, 1.0, 0.5, 1.0, 0.5];
+        for (j, (&v, &exp)) in output[24..32].iter().zip(exp_l3.iter()).enumerate() {
+            assert!(
+                (v - exp).abs() < 1e-5,
+                "iq2xxs l=3 j={j}: got {v}, expected {exp}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_dequant_iq2xxs_last_ib32() {
+        let grid = iq2xxs_grid_fixture();
+        let mut block = make_iq2xxs_zero_block();
+        // ib32=7 aux1 high byte at block[2+7*8+7] = block[65]: sub_scale=7 → 0x70
+        block[65] = 0x70;
+        let mut output = [0.0f32; 256];
+        dequant_iq2xxs_block(&block, &grid, &mut output);
+        // db = 1*(0.5+7)*0.25 = 1.875; grid[0]=8 → 1.875*8=15.0
+        let expected = (0.5f32 + 7.0) * 0.25 * 8.0;
+        for (i, &v) in output[224..].iter().enumerate() {
+            assert!(
+                (v - expected).abs() < 1e-4,
+                "iq2xxs last ib32: weight[{i}] = {v}, expected {expected}"
+            );
+        }
+        // First 224 weights sub_scale=0 → 1.0
+        for (i, &v) in output[..224].iter().enumerate() {
+            assert!(
+                (v - 1.0).abs() < 1e-5,
+                "iq2xxs last ib32 rest: weight[{i}] = {v}, expected 1.0"
+            );
+        }
+    }
+
+    #[test]
+    fn test_dequant_iq2xxs_short_block() {
+        let grid = iq2xxs_grid_fixture();
+        let block = vec![0u8; 10]; // too short
+        let mut output = [0.0f32; 256];
+        dequant_iq2xxs_block(&block, &grid, &mut output);
         assert!(output.iter().all(|&v| v == 0.0));
     }
 
