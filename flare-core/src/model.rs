@@ -2,6 +2,57 @@ use crate::config::{Architecture, ModelConfig};
 use crate::kv_cache::KvCache;
 use crate::tensor::Tensor;
 
+/// Identifies the quantization format for a raw weight tensor stored on the GPU path.
+///
+/// Only formats with a corresponding fused dequant+matvec GPU kernel are listed here.
+/// Other quantization formats must be dequantized to f32 at load time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WeightFormat {
+    Q2K,
+    Q4_0,
+    Q4_1,
+    Q4K,
+    Q5K,
+    Q6K,
+    Q8_1,
+}
+
+impl WeightFormat {
+    /// Number of weights per block for this format.
+    pub fn weights_per_block(self) -> usize {
+        match self {
+            WeightFormat::Q2K | WeightFormat::Q4K | WeightFormat::Q5K | WeightFormat::Q6K => 256,
+            WeightFormat::Q4_0 | WeightFormat::Q4_1 | WeightFormat::Q8_1 => 32,
+        }
+    }
+}
+
+/// Raw (undequantized) weight tensor for GPU fused dequant+matvec.
+///
+/// Stores the original GGUF bytes alongside the metadata needed to dispatch
+/// the correct GPU shader.  Memory footprint is ~4× smaller than the
+/// equivalent f32 `Tensor` for 4-bit quantized weights.
+pub struct RawWeight {
+    pub data: Vec<u8>,
+    pub format: WeightFormat,
+    /// Number of output rows (size of the output vector for a single matvec).
+    pub num_rows: usize,
+    /// Number of quantized blocks per row.
+    pub blocks_per_row: usize,
+}
+
+/// Per-layer raw quantized weights.  Mirrors `LayerWeights` but stores bytes
+/// instead of f32 tensors for the projection matrices.
+pub struct RawLayerWeights {
+    pub wq: RawWeight,
+    pub wk: RawWeight,
+    pub wv: RawWeight,
+    pub wo: RawWeight,
+    pub w_gate: RawWeight,
+    pub w_up: RawWeight,
+    pub w_down: RawWeight,
+}
+
 /// Trait for compute backends (WebGPU, SIMD, native wgpu).
 /// Each backend implements these fundamental operations.
 pub trait ComputeBackend: Send + Sync {
@@ -254,6 +305,35 @@ pub trait ComputeBackend: Send + Sync {
         }
         output
     }
+
+    /// Returns `true` if this backend can execute `batched_dequant_matmul`.
+    ///
+    /// The default CPU backend returns `false`; GPU backends override to `true`.
+    fn supports_dequant_matmul(&self) -> bool {
+        false
+    }
+
+    /// Fused dequantize + batched matrix-vector multiply for a raw weight tensor.
+    ///
+    /// For each batch item `b` in `0..batch`:
+    /// ```text
+    /// output[b * weight.num_rows .. (b+1) * weight.num_rows]
+    ///   = dequant_matvec(weight, input[b * in_cols .. (b+1) * in_cols])
+    /// ```
+    /// where `in_cols = weight.blocks_per_row × weight.format.weights_per_block()`.
+    ///
+    /// The default implementation panics — override in GPU backends.
+    fn batched_dequant_matmul(
+        &self,
+        _weight: &RawWeight,
+        _input: &[f32],
+        _batch: usize,
+    ) -> Vec<f32> {
+        panic!(
+            "batched_dequant_matmul is not implemented for this backend; \
+             call Model::set_backend with a GPU backend before using quantized weights"
+        )
+    }
 }
 
 /// Default CPU compute backend. Uses optimized scalar loops.
@@ -362,6 +442,13 @@ pub struct ModelWeights {
 pub struct Model {
     config: ModelConfig,
     weights: ModelWeights,
+    /// Optional raw (quantized) layer weights for GPU fused dequant+matvec.
+    ///
+    /// When set alongside a backend that supports `batched_dequant_matmul`,
+    /// `forward_prefill` uses the fused GPU kernels instead of the f32 weights,
+    /// reducing memory bandwidth.  The f32 weights are still kept to support
+    /// the single-token `forward` path and CPU fallback.
+    raw_weights: Option<Vec<RawLayerWeights>>,
     kv_cache: KvCache,
     backend: Box<dyn ComputeBackend>,
 }
@@ -377,9 +464,29 @@ impl Model {
         Self {
             config,
             weights,
+            raw_weights: None,
             kv_cache,
             backend: Box::new(CpuBackend),
         }
+    }
+
+    /// Attach raw quantized weights for GPU fused-kernel inference.
+    ///
+    /// When a GPU backend is set and `raw_weights` is `Some`, `forward_prefill`
+    /// will use the fused dequant+matvec shaders instead of the f32 projection
+    /// matrices, saving memory bandwidth.
+    pub fn set_raw_weights(&mut self, raw: Vec<RawLayerWeights>) {
+        self.raw_weights = Some(raw);
+    }
+
+    /// Remove raw weights, reverting to the f32 weight path.
+    pub fn clear_raw_weights(&mut self) {
+        self.raw_weights = None;
+    }
+
+    /// Returns `true` if raw quantized weights have been set.
+    pub fn has_raw_weights(&self) -> bool {
+        self.raw_weights.is_some()
     }
 
     /// Replace the compute backend (e.g. with a GPU backend).
@@ -668,11 +775,11 @@ impl Model {
             };
 
             // Q/K/V projections: single batched dispatch per matrix, then per-token bias+RoPE.
+            // When raw quantized weights are available and the backend supports fused
+            // dequant+matvec, use that path to reduce memory bandwidth.
+            let use_raw = self.backend.supports_dequant_matmul() && self.raw_weights.is_some();
             let mut q_batch = vec![0.0f32; seq_len * q_dim];
             {
-                let wq: Vec<f32> = self.weights.layers[layer_idx].wq.data().to_vec();
-                let wk: Vec<f32> = self.weights.layers[layer_idx].wk.data().to_vec();
-                let wv: Vec<f32> = self.weights.layers[layer_idx].wv.data().to_vec();
                 let q_bias: Option<Vec<f32>> = self.weights.layers[layer_idx]
                     .attn_q_bias
                     .as_ref()
@@ -687,15 +794,34 @@ impl Model {
                     .map(|t| t.data().to_vec());
 
                 // Three GPU dispatches instead of 3 × seq_len individual matvec calls.
-                let q_proj = self
-                    .backend
-                    .batched_matmul(&wq, &normed_batch, q_dim, dim, seq_len);
-                let k_proj = self
-                    .backend
-                    .batched_matmul(&wk, &normed_batch, kv_dim, dim, seq_len);
-                let v_proj = self
-                    .backend
-                    .batched_matmul(&wv, &normed_batch, kv_dim, dim, seq_len);
+                // Use fused dequant+matvec when raw quantized weights are available.
+                let q_proj = if use_raw {
+                    let rw = &self.raw_weights.as_ref().unwrap()[layer_idx];
+                    self.backend
+                        .batched_dequant_matmul(&rw.wq, &normed_batch, seq_len)
+                } else {
+                    let wq: Vec<f32> = self.weights.layers[layer_idx].wq.data().to_vec();
+                    self.backend
+                        .batched_matmul(&wq, &normed_batch, q_dim, dim, seq_len)
+                };
+                let k_proj = if use_raw {
+                    let rw = &self.raw_weights.as_ref().unwrap()[layer_idx];
+                    self.backend
+                        .batched_dequant_matmul(&rw.wk, &normed_batch, seq_len)
+                } else {
+                    let wk: Vec<f32> = self.weights.layers[layer_idx].wk.data().to_vec();
+                    self.backend
+                        .batched_matmul(&wk, &normed_batch, kv_dim, dim, seq_len)
+                };
+                let v_proj = if use_raw {
+                    let rw = &self.raw_weights.as_ref().unwrap()[layer_idx];
+                    self.backend
+                        .batched_dequant_matmul(&rw.wv, &normed_batch, seq_len)
+                } else {
+                    let wv: Vec<f32> = self.weights.layers[layer_idx].wv.data().to_vec();
+                    self.backend
+                        .batched_matmul(&wv, &normed_batch, kv_dim, dim, seq_len)
+                };
 
                 // Apply biases in-place (CPU broadcast, cheap; rare in most models).
                 let mut q_proj = q_proj;
@@ -767,16 +893,21 @@ impl Model {
 
             // Output projection + optional post-attention norm + residual
             {
-                let wo: Vec<f32> = self.weights.layers[layer_idx].wo.data().to_vec();
                 let post_attn_norm: Option<Vec<f32>> = self.weights.layers[layer_idx]
                     .post_attn_norm
                     .as_ref()
                     .map(|t| t.data().to_vec());
 
                 // Single batched dispatch replaces one matvec per token.
-                let proj_batch =
+                let proj_batch = if use_raw {
+                    let rw = &self.raw_weights.as_ref().unwrap()[layer_idx];
                     self.backend
-                        .batched_matmul(&wo, &attn_out_batch, dim, q_dim, seq_len);
+                        .batched_dequant_matmul(&rw.wo, &attn_out_batch, seq_len)
+                } else {
+                    let wo: Vec<f32> = self.weights.layers[layer_idx].wo.data().to_vec();
+                    self.backend
+                        .batched_matmul(&wo, &attn_out_batch, dim, q_dim, seq_len)
+                };
 
                 for t in 0..seq_len {
                     let proj = proj_batch[t * dim..(t + 1) * dim].to_vec();
@@ -798,9 +929,6 @@ impl Model {
             };
 
             {
-                let w_gate: Vec<f32> = self.weights.layers[layer_idx].w_gate.data().to_vec();
-                let w_up: Vec<f32> = self.weights.layers[layer_idx].w_up.data().to_vec();
-                let w_down: Vec<f32> = self.weights.layers[layer_idx].w_down.data().to_vec();
                 let inter = config.intermediate_dim;
                 let post_ffn_norm: Option<Vec<f32>> = self.weights.layers[layer_idx]
                     .post_ffn_norm
@@ -808,12 +936,24 @@ impl Model {
                     .map(|t| t.data().to_vec());
 
                 // Single batched dispatch for gate and up projections.
-                let gate_batch =
+                let gate_batch = if use_raw {
+                    let rw = &self.raw_weights.as_ref().unwrap()[layer_idx];
                     self.backend
-                        .batched_matmul(&w_gate, &normed_batch2, inter, dim, seq_len);
-                let up_batch =
+                        .batched_dequant_matmul(&rw.w_gate, &normed_batch2, seq_len)
+                } else {
+                    let w_gate: Vec<f32> = self.weights.layers[layer_idx].w_gate.data().to_vec();
                     self.backend
-                        .batched_matmul(&w_up, &normed_batch2, inter, dim, seq_len);
+                        .batched_matmul(&w_gate, &normed_batch2, inter, dim, seq_len)
+                };
+                let up_batch = if use_raw {
+                    let rw = &self.raw_weights.as_ref().unwrap()[layer_idx];
+                    self.backend
+                        .batched_dequant_matmul(&rw.w_up, &normed_batch2, seq_len)
+                } else {
+                    let w_up: Vec<f32> = self.weights.layers[layer_idx].w_up.data().to_vec();
+                    self.backend
+                        .batched_matmul(&w_up, &normed_batch2, inter, dim, seq_len)
+                };
 
                 // Per-token silu_mul / gelu_mul (CPU arithmetic, no GPU dispatch).
                 let ffn_hidden_batch: Vec<f32> = (0..seq_len)
@@ -829,9 +969,15 @@ impl Model {
                     .collect();
 
                 // Single batched dispatch for the down projection.
-                let down_batch =
+                let down_batch = if use_raw {
+                    let rw = &self.raw_weights.as_ref().unwrap()[layer_idx];
                     self.backend
-                        .batched_matmul(&w_down, &ffn_hidden_batch, dim, inter, seq_len);
+                        .batched_dequant_matmul(&rw.w_down, &ffn_hidden_batch, seq_len)
+                } else {
+                    let w_down: Vec<f32> = self.weights.layers[layer_idx].w_down.data().to_vec();
+                    self.backend
+                        .batched_matmul(&w_down, &ffn_hidden_batch, dim, inter, seq_len)
+                };
 
                 for t in 0..seq_len {
                     let down = down_batch[t * dim..(t + 1) * dim].to_vec();

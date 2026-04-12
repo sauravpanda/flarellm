@@ -1,6 +1,6 @@
 use std::sync::Mutex;
 
-use flare_core::model::ComputeBackend;
+use flare_core::model::{ComputeBackend, RawWeight, WeightFormat};
 use flare_core::tensor::Tensor;
 use thiserror::Error;
 
@@ -1853,6 +1853,71 @@ impl ComputeBackend for WebGpuBackend {
         theta: f32,
     ) -> Vec<f32> {
         WebGpuBackend::batched_rope(self, inp, num_heads, head_dim, seq_len, start_pos, theta)
+    }
+
+    fn supports_dequant_matmul(&self) -> bool {
+        true
+    }
+
+    fn batched_dequant_matmul(&self, weight: &RawWeight, input: &[f32], batch: usize) -> Vec<f32> {
+        let weights_per_block = weight.format.weights_per_block();
+        let in_cols = weight.blocks_per_row * weights_per_block;
+        let num_rows = weight.num_rows;
+        let mut out = Vec::with_capacity(batch * num_rows);
+
+        // Compute per-row block size in bytes to slice raw weight data per row.
+        let row_bytes = weight.data.len() / num_rows;
+
+        for b in 0..batch {
+            let vec_slice = &input[b * in_cols..(b + 1) * in_cols];
+            let row_result = match weight.format {
+                WeightFormat::Q4_1 => self.dequant_matvec_q4_1(
+                    &weight.data,
+                    vec_slice,
+                    num_rows,
+                    weight.blocks_per_row,
+                ),
+                WeightFormat::Q8_1 => self.dequant_matvec_q8_1(
+                    &weight.data,
+                    vec_slice,
+                    num_rows,
+                    weight.blocks_per_row,
+                ),
+                WeightFormat::Q4_0 => self.dequant_matvec_q4_0(
+                    &weight.data,
+                    vec_slice,
+                    num_rows,
+                    weight.blocks_per_row,
+                ),
+                WeightFormat::Q2K => self.dequant_matvec_q2k(
+                    &weight.data,
+                    vec_slice,
+                    num_rows,
+                    weight.blocks_per_row,
+                ),
+                WeightFormat::Q4K => self.dequant_matvec_q4k(
+                    &weight.data,
+                    vec_slice,
+                    num_rows,
+                    weight.blocks_per_row,
+                ),
+                WeightFormat::Q5K => self.dequant_matvec_q5k(
+                    &weight.data,
+                    vec_slice,
+                    num_rows,
+                    weight.blocks_per_row,
+                ),
+                WeightFormat::Q6K => self.dequant_matvec_q6k(
+                    &weight.data,
+                    vec_slice,
+                    num_rows,
+                    weight.blocks_per_row,
+                ),
+            };
+            let _ = row_bytes; // suppress unused warning
+            out.extend_from_slice(&row_result);
+        }
+        out
     }
 }
 
