@@ -185,6 +185,101 @@ mod tests {
     }
 
     #[test]
+    fn test_rmsnorm_multi_row() {
+        // Two identical rows — both should produce the same normalized output
+        let backend = SimdBackend::new();
+        let input = Tensor::from_vec(vec![3.0, 4.0, 3.0, 4.0], &[2, 2]).unwrap();
+        let weight = Tensor::from_vec(vec![1.0, 1.0], &[2]).unwrap();
+        let mut output = Tensor::zeros(&[2, 2]);
+        backend.rmsnorm(&input, &weight, 1e-5, &mut output);
+        let d = output.data();
+        // Both rows should be identical
+        assert!(
+            (d[0] - d[2]).abs() < 1e-5,
+            "row0[0]={} row1[0]={}",
+            d[0],
+            d[2]
+        );
+        assert!(
+            (d[1] - d[3]).abs() < 1e-5,
+            "row0[1]={} row1[1]={}",
+            d[1],
+            d[3]
+        );
+    }
+
+    #[test]
+    fn test_rmsnorm_zero_input() {
+        // All-zero input → all-zero output (0/rms = 0)
+        let backend = SimdBackend::new();
+        let input = Tensor::from_vec(vec![0.0, 0.0, 0.0, 0.0], &[4]).unwrap();
+        let weight = Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0], &[4]).unwrap();
+        let mut output = Tensor::zeros(&[4]);
+        backend.rmsnorm(&input, &weight, 1e-5, &mut output);
+        for (i, &v) in output.data().iter().enumerate() {
+            assert!(v.abs() < 1e-5, "rmsnorm zero: output[{i}] = {v}");
+        }
+    }
+
+    #[test]
+    fn test_softmax_single_element() {
+        let backend = SimdBackend::new();
+        let mut input = Tensor::from_vec(vec![42.0], &[1]).unwrap();
+        backend.softmax(&mut input);
+        assert!(
+            (input.data()[0] - 1.0).abs() < 1e-6,
+            "single-element softmax should be 1.0, got {}",
+            input.data()[0]
+        );
+    }
+
+    #[test]
+    fn test_softmax_uniform_input() {
+        // All same inputs → all outputs should equal 1/n
+        let backend = SimdBackend::new();
+        let n = 4;
+        let mut input = Tensor::from_vec(vec![5.0; n], &[n]).unwrap();
+        backend.softmax(&mut input);
+        let expected = 1.0 / n as f32;
+        for (i, &v) in input.data().iter().enumerate() {
+            assert!(
+                (v - expected).abs() < 1e-6,
+                "uniform softmax[{i}] = {v}, expected {expected}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_silu_mul_zero_up() {
+        // up=0 → output always 0 regardless of gate
+        let backend = SimdBackend::new();
+        let gate = Tensor::from_vec(vec![1.0, -1.0, 5.0, -5.0], &[4]).unwrap();
+        let up = Tensor::from_vec(vec![0.0, 0.0, 0.0, 0.0], &[4]).unwrap();
+        let mut output = Tensor::zeros(&[4]);
+        backend.silu_mul(&gate, &up, &mut output);
+        for (i, &v) in output.data().iter().enumerate() {
+            assert!(v.abs() < 1e-6, "silu_mul zero_up: output[{i}] = {v}");
+        }
+    }
+
+    #[test]
+    fn test_rope_pos_zero() {
+        // pos=0 → angle=0 → cos=1, sin=0 → q and k unchanged
+        let backend = SimdBackend::new();
+        let q_data = vec![1.0f32, 2.0, 3.0, 4.0];
+        let k_data = vec![5.0f32, 6.0, 7.0, 8.0];
+        let mut q = Tensor::from_vec(q_data.clone(), &[4]).unwrap();
+        let mut k = Tensor::from_vec(k_data.clone(), &[4]).unwrap();
+        backend.rope(&mut q, &mut k, 0, 4, 10000.0);
+        for (i, (&v, &orig)) in q.data().iter().zip(q_data.iter()).enumerate() {
+            assert!((v - orig).abs() < 1e-5, "rope pos=0 q[{i}]: {v} != {orig}");
+        }
+        for (i, (&v, &orig)) in k.data().iter().zip(k_data.iter()).enumerate() {
+            assert!((v - orig).abs() < 1e-5, "rope pos=0 k[{i}]: {v} != {orig}");
+        }
+    }
+
+    #[test]
     fn test_matmul_non_square() {
         let backend = SimdBackend::new();
         // [2x3] * [3x2] = [2x2]
