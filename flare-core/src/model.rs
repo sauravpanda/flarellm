@@ -127,6 +127,52 @@ pub trait ComputeBackend: Send + Sync {
     ) -> Vec<f32> {
         panic!("GPU KV cache is not initialized — call init_gpu_kv_cache first");
     }
+
+    /// Batched causal prefill attention for all token positions in a sequence.
+    ///
+    /// Computes causal self-attention for each position `t` in the sequence,
+    /// where position `t` attends only to keys/values at positions `0..=t`.
+    /// Backends that support GPU dispatch (e.g. `WebGpuBackend`) override this
+    /// to run a single parallel kernel instead of the O(seq_len²) CPU loop.
+    ///
+    /// - `q`: query vectors `[seq_len * num_heads * head_dim]`
+    /// - `k`: key vectors `[seq_len * num_kv_heads * head_dim]`
+    /// - `v`: value vectors `[seq_len * num_kv_heads * head_dim]`
+    /// - Returns `[seq_len * num_heads * head_dim]`
+    #[allow(clippy::too_many_arguments)]
+    fn prefill_attention_gpu(
+        &self,
+        q: &[f32],
+        k: &[f32],
+        v: &[f32],
+        seq_len: usize,
+        num_heads: usize,
+        num_kv_heads: usize,
+        head_dim: usize,
+        attn_softcap: f32,
+    ) -> Vec<f32> {
+        // CPU fallback: iterate over positions and call the per-position GQA.
+        let q_dim = num_heads * head_dim;
+        let kv_dim = num_kv_heads * head_dim;
+        let mut output = vec![0.0f32; seq_len * q_dim];
+        for t in 0..seq_len {
+            let q_t = &q[t * q_dim..(t + 1) * q_dim];
+            let k_t = &k[0..(t + 1) * kv_dim];
+            let v_t = &v[0..(t + 1) * kv_dim];
+            let attn_t = cpu_grouped_query_attention(
+                q_t,
+                k_t,
+                v_t,
+                num_heads,
+                num_kv_heads,
+                head_dim,
+                t + 1,
+                attn_softcap,
+            );
+            output[t * q_dim..(t + 1) * q_dim].copy_from_slice(&attn_t);
+        }
+        output
+    }
 }
 
 /// Default CPU compute backend. Uses optimized scalar loops.
@@ -590,24 +636,17 @@ impl Model {
                 }
             }
 
-            // Causal self-attention: position t attends to positions 0..=t
-            let mut attn_out_batch = vec![0.0f32; seq_len * q_dim];
-            for t in 0..seq_len {
-                let q_t = &q_batch[t * q_dim..(t + 1) * q_dim];
-                let k_t = &k_all[layer_idx][0..(t + 1) * kv_dim];
-                let v_t = &v_all[layer_idx][0..(t + 1) * kv_dim];
-                let attn_t = cpu_grouped_query_attention(
-                    q_t,
-                    k_t,
-                    v_t,
-                    num_heads,
-                    num_kv_heads,
-                    head_dim,
-                    t + 1,
-                    config.attn_logit_softcap,
-                );
-                attn_out_batch[t * q_dim..(t + 1) * q_dim].copy_from_slice(&attn_t);
-            }
+            // Causal self-attention: dispatch to GPU (if available) or CPU fallback.
+            let attn_out_batch = self.backend.prefill_attention_gpu(
+                &q_batch,
+                &k_all[layer_idx],
+                &v_all[layer_idx],
+                seq_len,
+                num_heads,
+                num_kv_heads,
+                head_dim,
+                config.attn_logit_softcap,
+            );
 
             // Output projection + optional post-attention norm + residual
             {
