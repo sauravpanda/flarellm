@@ -851,6 +851,67 @@ impl FlareEngine {
         count
     }
 
+    /// Streaming text-in / text-out with explicit sampling parameters.
+    ///
+    /// Like `generate_stream` but with the full set of sampling controls:
+    ///
+    /// - `temperature`: 0 = greedy, higher = more diverse
+    /// - `top_p`: nucleus sampling (1.0 = disabled)
+    /// - `top_k`: top-k sampling, applied when `top_p` is 1.0 (0 = disabled)
+    /// - `repeat_penalty`: repetition penalty (1.0 = disabled, 1.1–1.3 = typical)
+    ///
+    /// Encodes `prompt` with the embedded GGUF vocabulary, generates up to
+    /// `max_tokens` tokens, and calls `on_token(token_str)` with the decoded
+    /// text for each token.  Respects stop sequences registered via
+    /// `add_stop_sequence`.  Returns the number of tokens generated.
+    ///
+    /// Returns 0 if no GGUF vocab is available.
+    ///
+    /// # JS example
+    /// ```javascript
+    /// engine.add_stop_sequence("<|im_end|>");
+    /// engine.reset();
+    /// let out = '';
+    /// const count = engine.generate_stream_with_params(
+    ///   prompt, 200, 0.8, 0.95, 40, 1.1,
+    ///   (token) => { out += token; }
+    /// );
+    /// ```
+    #[allow(clippy::too_many_arguments)]
+    #[wasm_bindgen]
+    pub fn generate_stream_with_params(
+        &mut self,
+        prompt: &str,
+        max_tokens: u32,
+        temperature: f32,
+        top_p: f32,
+        top_k: u32,
+        repeat_penalty: f32,
+        on_token: &js_sys::Function,
+    ) -> u32 {
+        let raw_tokens = match &self.gguf_vocab {
+            Some(vocab) => vocab.encode(prompt),
+            None => return 0,
+        };
+        self.begin_stream_with_params(
+            &raw_tokens,
+            max_tokens,
+            temperature,
+            top_p,
+            top_k,
+            repeat_penalty,
+        );
+        let mut count = 0u32;
+        while let Some(token_id) = self.next_token() {
+            if let Some(vocab) = &self.gguf_vocab {
+                let token_str = vocab.decode(&[token_id]);
+                let _ = on_token.call1(&JsValue::NULL, &JsValue::from_str(&token_str));
+            }
+            count += 1;
+        }
+        count
+    }
+
     // -----------------------------------------------------------------------
     // Token-by-token streaming API
     // -----------------------------------------------------------------------
