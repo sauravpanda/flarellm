@@ -694,9 +694,13 @@ impl Model {
                     .as_ref()
                     .map(|t| t.data().to_vec());
 
+                // Single batched dispatch replaces one matvec per token.
+                let proj_batch =
+                    self.backend
+                        .batched_matmul(&wo, &attn_out_batch, dim, q_dim, seq_len);
+
                 for t in 0..seq_len {
-                    let attn_t = &attn_out_batch[t * q_dim..(t + 1) * q_dim];
-                    let proj = self.backend.matvec(&wo, attn_t, dim, q_dim);
+                    let proj = proj_batch[t * dim..(t + 1) * dim].to_vec();
                     let contrib = match &post_attn_norm {
                         Some(n) => rmsnorm(&proj, n, config.rms_norm_eps),
                         None => proj,
