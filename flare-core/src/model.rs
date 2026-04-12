@@ -2045,4 +2045,88 @@ mod tests {
             "2 layers should produce different output than 1 layer"
         );
     }
+
+    #[test]
+    fn test_rmsnorm_single_element() {
+        // RMSNorm on a 1-element vector: result = (x / sqrt(x^2 + eps)) * w
+        let x = vec![2.0f32];
+        let weight = vec![1.0f32];
+        let eps = 1e-5;
+        let result = rmsnorm(&x, &weight, eps);
+        assert_eq!(result.len(), 1);
+        let expected = 2.0 / (4.0f32 + eps).sqrt();
+        let diff = (result[0] - expected).abs();
+        assert!(
+            diff < 1e-5,
+            "single-element rmsnorm: got {}, expected {}",
+            result[0],
+            expected
+        );
+    }
+
+    #[test]
+    fn test_matvec_single_row() {
+        // 1-row matrix: result[0] = dot(mat_row, vec)
+        let mat = vec![1.0f32, 2.0];
+        let vec_ = vec![3.0f32, 4.0];
+        let result = matvec(&mat, &vec_, 1, 2);
+        assert_eq!(result.len(), 1);
+        assert!(
+            (result[0] - 11.0).abs() < 1e-5,
+            "1-row matvec = {}",
+            result[0]
+        );
+    }
+
+    #[test]
+    fn test_matvec_zero_weights() {
+        // All-zero weight matrix always produces zero output
+        let rows = 4;
+        let cols = 8;
+        let mat = vec![0.0f32; rows * cols];
+        let vec_: Vec<f32> = (0..cols).map(|i| i as f32).collect();
+        let result = matvec(&mat, &vec_, rows, cols);
+        assert_eq!(result.len(), rows);
+        for (i, &v) in result.iter().enumerate() {
+            assert_eq!(v, 0.0, "row {i} should be 0.0 with zero weights, got {v}");
+        }
+    }
+
+    #[test]
+    fn test_rope_zero_position() {
+        // At position 0 every angle is 0: cos=1, sin=0, so data must be unchanged.
+        let num_heads = 2;
+        let head_dim = 4;
+        let original: Vec<f32> = (0..(num_heads * head_dim))
+            .map(|i| (i + 1) as f32)
+            .collect();
+        let mut data = original.clone();
+        apply_rope(&mut data, num_heads, head_dim, 0, 10000.0);
+        for (i, (&before, &after)) in original.iter().zip(data.iter()).enumerate() {
+            assert!(
+                (before - after).abs() < 1e-6,
+                "rope at pos=0 changed element {i}: {} -> {}",
+                before,
+                after
+            );
+        }
+    }
+
+    #[test]
+    fn test_forward_single_token_stable() {
+        // Calling forward with the same token twice on freshly-reset models gives identical logits.
+        let mut model1 = tiny_test_model();
+        let logits1 = model1.forward(0, 0).data().to_vec();
+
+        let mut model2 = tiny_test_model();
+        let logits2 = model2.forward(0, 0).data().to_vec();
+
+        assert_eq!(logits1.len(), logits2.len());
+        for (i, (&a, &b)) in logits1.iter().zip(logits2.iter()).enumerate() {
+            assert!(
+                (a - b).abs() < 1e-5,
+                "logit[{i}] differs between identical forward passes: {a} vs {b}"
+            );
+        }
+    }
 }
