@@ -475,6 +475,40 @@ impl FlareEngine {
         self.model.backend().pipeline_cache_data()
     }
 
+    /// Run a single dummy forward pass to pre-compile WebGPU shader pipelines.
+    ///
+    /// WebGPU (and wgpu on native) compiles shader pipelines lazily on the
+    /// first dispatch.  This causes a noticeable latency spike — often 100ms
+    /// to several seconds — when the user makes their first inference request.
+    ///
+    /// Call `warmup()` once after `init_gpu()` completes to trigger all shader
+    /// compilations in the background so the first real request feels fast.
+    /// The KV cache is reset after the warmup so the engine is in a clean state.
+    ///
+    /// Returns `true` if the warmup forward pass ran without error, `false` if
+    /// the model has not been loaded.
+    ///
+    /// # JS example
+    /// ```javascript
+    /// const engine = FlareEngine.load(bytes);
+    /// await engine.init_gpu();
+    /// engine.warmup(); // trigger shader compilation
+    /// // First real inference is now fast
+    /// engine.begin_stream(promptIds, 128);
+    /// ```
+    #[wasm_bindgen]
+    pub fn warmup(&mut self) -> bool {
+        // A single forward pass at position 0 with token 0 is enough to
+        // compile all pipelines the model will use during inference.
+        let _logits = self.model.forward(0, 0);
+        // Restore clean KV state so the engine is ready for real inference.
+        self.model.reset();
+        self.kv_pos = 0;
+        self.stream_done = true;
+        self.stream_stop_reason.clear();
+        true
+    }
+
     /// Load raw quantized weights from GGUF bytes so the GPU fused
     /// dequant+matvec kernels can be used during inference.
     ///
