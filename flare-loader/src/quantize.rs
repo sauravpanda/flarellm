@@ -1666,6 +1666,93 @@ mod tests {
     }
 
     #[test]
+    fn test_dequant_q3k_hmask_set() {
+        // hmask bit 0 SET → sub=0 for weight 0, q = low2 - 0 = low2
+        // scales[0]=1 (b[0]=1, b[8]=0xA0), qs[32]=0x03 (low2=3), d=1.0
+        // output[0] = 1.0 * 1 * 3 = 3.0
+        let mut block = vec![0u8; 110];
+        block[0] = 0xFF; // hmask[0]: bit 0 set
+        block[32] = 0x03; // qs[0] low2=3 at shift 0
+        block[96] = 0x01; // b[0]=1
+        block[104] = 0xA0; // b[8]=0xA0 → scales[0] = (1|(2<<4))-32 = 1
+        block[108] = 0x00;
+        block[109] = 0x3C; // d = 1.0
+        let mut output = [0.0f32; 256];
+        dequant_q3k_block(&block, &mut output);
+        assert!(
+            (output[0] - 3.0).abs() < 1e-4,
+            "hmask set: expected 3.0, got {}",
+            output[0]
+        );
+    }
+
+    #[test]
+    fn test_dequant_q3k_hmask_clear() {
+        // hmask bit 0 CLEAR → sub=4 for weight 0, q = low2 - 4
+        // scales[0]=1, qs[32]=0x02 (low2=2), d=1.0
+        // output[0] = 1.0 * 1 * (2-4) = -2.0
+        let mut block = vec![0u8; 110];
+        block[0] = 0xFE; // hmask[0]: bit 0 CLEAR
+        block[32] = 0x02; // qs[0] low2=2
+        block[96] = 0x01; // b[0]=1
+        block[104] = 0xA0; // b[8]=0xA0 → scales[0]=1
+        block[108] = 0x00;
+        block[109] = 0x3C; // d = 1.0
+        let mut output = [0.0f32; 256];
+        dequant_q3k_block(&block, &mut output);
+        assert!(
+            (output[0] - (-2.0)).abs() < 1e-4,
+            "hmask clear: expected -2.0, got {}",
+            output[0]
+        );
+    }
+
+    #[test]
+    fn test_dequant_q3k_negative_scale() {
+        // scales[0]=-1: b[0]=0x0F (lo nibble=15), b[8]=0x10 ((>>4)&3=1 → 1<<4=16)
+        // (15|16)-32 = 31-32 = -1
+        // hmask[0] bit 0 set, qs[32]=0x01 (low2=1), d=1.0
+        // q=1, output[0] = 1.0 * (-1) * 1 = -1.0
+        let mut block = vec![0u8; 110];
+        block[0] = 0xFF; // hmask[0]: bit 0 set
+        block[32] = 0x01; // qs[0] low2=1
+        block[96] = 0x0F; // b[0]=0x0F (lo nibble=15)
+        block[104] = 0x10; // b[8]=0x10 → (>>4)&3=1
+        block[108] = 0x00;
+        block[109] = 0x3C; // d = 1.0
+        let mut output = [0.0f32; 256];
+        dequant_q3k_block(&block, &mut output);
+        assert!(
+            (output[0] - (-1.0)).abs() < 1e-4,
+            "negative scale: expected -1.0, got {}",
+            output[0]
+        );
+    }
+
+    #[test]
+    fn test_dequant_q3k_second_half() {
+        // oi=1, si=0: scale_idx=4, m=0x10 (bit 4 of hmask)
+        // scales[4] = (b[4]&0x0F | ((b[8]>>6)&3)<<4) - 32
+        // b[4]=2, b[8]=0x80 → (2 | (2<<4))-32 = 34-32 = 2
+        // hmask[0]=0xFF (bit 4 set → sub=0), block[64]=0x03 (oi=1 qs_group[0]=3)
+        // output[128] = 1.0 * 2 * 3 = 6.0
+        let mut block = vec![0u8; 110];
+        block[0] = 0xFF; // hmask[0]: all bits set (including bit 4 for oi=1,si=0)
+        block[64] = 0x03; // qs for oi=1, l=0: low2=3
+        block[100] = 0x02; // b[4]=2
+        block[104] = 0x80; // b[8]=0x80 → (>>6)&3=2 (for scales[4]) and (>>4)&3=8&3=0 (scales[0..3])
+        block[108] = 0x00;
+        block[109] = 0x3C; // d = 1.0
+        let mut output = [0.0f32; 256];
+        dequant_q3k_block(&block, &mut output);
+        assert!(
+            (output[128] - 6.0).abs() < 1e-4,
+            "second half: expected 6.0, got {}",
+            output[128]
+        );
+    }
+
+    #[test]
     fn test_dequant_q2k_zeroed() {
         // All-zero block: all weights should be 0.0
         let block = vec![0u8; 84];
