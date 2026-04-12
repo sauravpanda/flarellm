@@ -115,4 +115,66 @@ mod tests {
         assert!(matches!(flare_err, FlareError::Model(_)));
         assert!(flare_err.to_string().contains("wq"));
     }
+
+    #[test]
+    fn test_flare_error_is_send_sync() {
+        // Compile-time assertion: FlareError must be Send + Sync for async use
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<FlareError>();
+        assert_send_sync::<ModelError>();
+    }
+
+    #[test]
+    fn test_unsupported_architecture_exact_message() {
+        let err = ModelError::UnsupportedArchitecture("phi4".into());
+        assert_eq!(err.to_string(), "unsupported model architecture: phi4");
+    }
+
+    #[test]
+    fn test_oom_available_bytes_in_message() {
+        // Both 'needed' and 'available' must appear in the OOM error message
+        let err = ModelError::OutOfMemory {
+            needed: 3_000_000_000,
+            available: 500_000_000,
+        };
+        let msg = err.to_string();
+        assert!(
+            msg.contains("3000000000"),
+            "needed bytes missing from OOM message: {msg}"
+        );
+        assert!(
+            msg.contains("500000000"),
+            "available bytes missing from OOM message: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_model_error_debug_non_empty() {
+        // Debug output must be non-empty for every ModelError variant
+        let variants: Vec<ModelError> = vec![
+            ModelError::UnsupportedArchitecture("x".into()),
+            ModelError::MissingWeights("y".into()),
+            ModelError::InvalidConfig("z".into()),
+            ModelError::ContextLengthExceeded { current: 1, max: 2 },
+            ModelError::OutOfMemory {
+                needed: 1,
+                available: 2,
+            },
+        ];
+        for v in &variants {
+            let dbg = format!("{v:?}");
+            assert!(!dbg.is_empty(), "Debug output empty for {v}");
+        }
+    }
+
+    #[test]
+    fn test_flare_error_tokenizer_variant_matches() {
+        // From<TokenizerError> must produce FlareError::Tokenizer, not another variant
+        let tok_err = crate::tokenizer::TokenizerError::LoadError("x".into());
+        let flare_err: FlareError = tok_err.into();
+        assert!(
+            matches!(flare_err, FlareError::Tokenizer(_)),
+            "expected FlareError::Tokenizer, got {flare_err:?}"
+        );
+    }
 }
