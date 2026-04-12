@@ -41,6 +41,19 @@ pub enum ChatTemplate {
 impl ChatTemplate {
     /// Auto-detect template from model architecture name.
     /// Prefer `from_gguf_template()` when the Jinja template string is available.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use flare_core::chat::ChatTemplate;
+    ///
+    /// assert_eq!(ChatTemplate::from_architecture("llama"), ChatTemplate::Llama3);
+    /// assert_eq!(ChatTemplate::from_architecture("qwen2"), ChatTemplate::ChatML);
+    /// assert_eq!(ChatTemplate::from_architecture("phi3"),  ChatTemplate::Phi3);
+    /// assert_eq!(ChatTemplate::from_architecture("gemma2"), ChatTemplate::Gemma);
+    /// // Unknown architecture falls back to ChatML
+    /// assert_eq!(ChatTemplate::from_architecture("unknown"), ChatTemplate::ChatML);
+    /// ```
     pub fn from_architecture(arch: &str) -> Self {
         match arch.to_lowercase().as_str() {
             "llama" => ChatTemplate::Llama3,
