@@ -257,4 +257,59 @@ mod tests {
         assert_eq!(format_bytes(500 * 1024 * 1024), "500MB");
         assert_eq!(format_bytes(2 * 1024 * 1024 * 1024), "2.0GB");
     }
+
+    #[test]
+    fn test_can_run_false_on_mobile() {
+        // small_model at q8 ≈ 1.08GB > 1GB mobile budget
+        let config = small_model();
+        assert!(!can_run(&config, 8.0, &MemoryBudget::mobile()));
+    }
+
+    #[test]
+    fn test_format_bytes_zero() {
+        assert_eq!(format_bytes(0), "0B");
+    }
+
+    #[test]
+    fn test_format_bytes_boundaries() {
+        // Just below 1KB → still bytes
+        assert_eq!(format_bytes(1023), "1023B");
+        // Just above 1KB → KB
+        assert_eq!(format_bytes(1025), "1KB");
+        // Just below 1MB → KB
+        assert_eq!(format_bytes(1024 * 1024 - 1), "1024KB");
+    }
+
+    #[test]
+    fn test_memory_budget_browser_fields() {
+        let b = MemoryBudget::browser();
+        assert_eq!(b.total_bytes, 2 * 1024 * 1024 * 1024);
+        assert_eq!(b.gpu_bytes, 1536 * 1024 * 1024);
+        assert_eq!(b.label, "Browser (Chrome)");
+    }
+
+    #[test]
+    fn test_plan_activation_bytes_positive() {
+        let config = small_model();
+        let plan = plan_memory(&config, 4.0, 512, &MemoryBudget::native());
+        assert!(
+            plan.activation_bytes > 0,
+            "activation_bytes should be positive: {}",
+            plan.activation_bytes
+        );
+    }
+
+    #[test]
+    fn test_plan_recommend_lower_quant() {
+        // small_model at 16-bit (~2.2GB) exceeds the 1GB mobile budget;
+        // find_min_quant should find a lower bit width (2.0 bits → ~270MB fits)
+        let config = small_model();
+        let plan = plan_memory(&config, 16.0, 2048, &MemoryBudget::mobile());
+        assert!(!plan.fits, "small model at f16 should not fit in mobile");
+        assert!(
+            plan.recommended_quant_bits < 16.0,
+            "expected a lower quant recommendation, got {}",
+            plan.recommended_quant_bits
+        );
+    }
 }
