@@ -3736,6 +3736,99 @@ mod tests {
         }
     }
 
+    #[test]
+    fn test_dequant_iq2xs_negative_d() {
+        // d = -1.0 (0xBC00), scale=0 → dl = -1*(0.5+0)*0.25 = -0.125
+        // grid[0] all bytes=8 → output = -0.125 * 8 = -1.0 for all weights
+        let grid = iq2xs_grid_fixture();
+        let mut block = make_iq2xs_zero_block();
+        block[0] = 0x00;
+        block[1] = 0xBC; // f16 -1.0
+        let mut output = [0.0f32; 256];
+        dequant_iq2xs_block(&block, &grid, &mut output);
+        for (i, &v) in output.iter().enumerate() {
+            assert!(
+                (v - (-1.0)).abs() < 1e-5,
+                "iq2xs neg d: weight[{i}] = {v}, expected -1.0"
+            );
+        }
+    }
+
+    #[test]
+    fn test_dequant_iq2xs_dl2_hi_nibble() {
+        // Verify the j=1 path uses the high nibble of scale_byte for dl2.
+        // scale_byte = 0xF0 → lo=0, hi=15 → dl1=0.125, dl2=3.875
+        // ib32=0: j=0 (output[0..16]) uses dl1 → 0.125*8=1.0
+        //         j=1 (output[16..32]) uses dl2 → 3.875*8=31.0
+        let grid = iq2xs_grid_fixture();
+        let mut block = make_iq2xs_zero_block();
+        block[66] = 0xF0; // hi nibble=15, lo=0
+        let mut output = [0.0f32; 256];
+        dequant_iq2xs_block(&block, &grid, &mut output);
+        let dl1_expected = 0.125f32 * 8.0; // 1.0
+        let dl2_expected = (0.5f32 + 15.0) * 0.25 * 8.0; // 31.0
+        for (i, &v) in output[0..16].iter().enumerate() {
+            assert!(
+                (v - dl1_expected).abs() < 1e-4,
+                "iq2xs dl1: output[{i}] = {v}, expected {dl1_expected}"
+            );
+        }
+        for (i, &v) in output[16..32].iter().enumerate() {
+            assert!(
+                (v - dl2_expected).abs() < 1e-4,
+                "iq2xs dl2: output[{}] = {v}, expected {dl2_expected}",
+                i + 16
+            );
+        }
+    }
+
+    #[test]
+    fn test_dequant_iq2xxs_negative_d() {
+        // d = -1.0 (0xBC00), all sub_scale=0 → db = -0.125
+        // grid[0] all bytes=8 → output = -0.125 * 8 = -1.0 for all weights
+        let grid = iq2xxs_grid_fixture();
+        let mut block = make_iq2xxs_zero_block();
+        block[0] = 0x00;
+        block[1] = 0xBC; // f16 -1.0
+        let mut output = [0.0f32; 256];
+        dequant_iq2xxs_block(&block, &grid, &mut output);
+        for (i, &v) in output.iter().enumerate() {
+            assert!(
+                (v - (-1.0)).abs() < 1e-5,
+                "iq2xxs neg d: weight[{i}] = {v}, expected -1.0"
+            );
+        }
+    }
+
+    #[test]
+    fn test_dequant_iq2xxs_second_ib32() {
+        // ib32=1 with sub_scale=3 → db = 1*(0.5+3)*0.25 = 0.875
+        // grid[0] all bytes=8 → output[32..64] = 0.875*8 = 7.0
+        // ib32=0 sub_scale=0 → output[0..32] = 1.0
+        let grid = iq2xxs_grid_fixture();
+        let mut block = make_iq2xxs_zero_block();
+        // ib32=1 base = 2 + 1*8 = 10; aux1 at bytes 14..17; hi nibble of byte 17 = sub_scale
+        // aux1 byte 3 (offset 10+7=17): bits 31:28 = sub_scale = 3 → 0x30
+        block[17] = 0x30;
+        let mut output = [0.0f32; 256];
+        dequant_iq2xxs_block(&block, &grid, &mut output);
+        let expected_ib1 = (0.5f32 + 3.0) * 0.25 * 8.0; // 7.0
+        for (i, &v) in output[32..64].iter().enumerate() {
+            assert!(
+                (v - expected_ib1).abs() < 1e-4,
+                "iq2xxs 2nd ib32: output[{}] = {v}, expected {expected_ib1}",
+                i + 32
+            );
+        }
+        // First group sub_scale=0 → 1.0
+        for (i, &v) in output[0..32].iter().enumerate() {
+            assert!(
+                (v - 1.0).abs() < 1e-5,
+                "iq2xxs 2nd ib32 group0: output[{i}] = {v}, expected 1.0"
+            );
+        }
+    }
+
     // ── IQ3_S extended tests ──────────────────────────────────────────────────
 
     /// Extended IQ3_S grid fixture with entries 0–3 and 256.
