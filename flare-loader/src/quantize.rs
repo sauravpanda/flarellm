@@ -1896,4 +1896,185 @@ mod tests {
         dequant_iq1s_block(&block, &grid, &mut output);
         assert!(output.iter().all(|&v| v == 0.0));
     }
+
+    /// Extended IQ1_S grid with entries at high indices for 11-bit qh-path testing.
+    fn iq1s_grid_full_fixture() -> Box<[u64; 2048]> {
+        let mut g = vec![0u64; 2048];
+        // entry 0: all bytes = 0x01 (+1)
+        g[0] = 0x0101010101010101u64;
+        // entry 256 (high bits l=1 = 1, qs_lo = 0): all bytes = 0x00 (0)
+        g[256] = 0x0000000000000000u64;
+        // entry 512 (high bits l=2 = 2, qs_lo = 0): all bytes = 0xFF (-1)
+        g[512] = 0xFFFFFFFFFFFFFFFFu64;
+        // entry 768 (high bits l=3 = 3, qs_lo = 0): alternating 0x01/0xFF
+        g[768] = 0xFF01FF01FF01FF01u64;
+        // entry 1792 (high bits = 7, qs_lo = 0): all bytes = 0x01 (+1) — max high bits
+        g[1792] = 0x0101010101010101u64;
+        Box::new(g.try_into().unwrap())
+    }
+
+    #[test]
+    fn test_dequant_iq1s_high_grid_index_qh() {
+        // Verify 11-bit grid index: qs_lo | (((qh >> (3*l)) & 7) << 8)
+        // l=0: high bits = 7 → grid_idx = 0 | (7 << 8) = 1792 (all bytes = +1)
+        let grid = iq1s_grid_full_fixture();
+        let mut block = make_iq1s_zero_block();
+        // qh[0] bits 2:0 = 7 → l=0 uses grid_idx = 1792
+        // s=0 (bits 14:12 = 0), positive delta (bit15=0)
+        let qh_val: u16 = 0x0007; // bits 2:0 = 7
+        block[34] = (qh_val & 0xFF) as u8;
+        block[35] = (qh_val >> 8) as u8;
+        let mut output = [0.0f32; 256];
+        dequant_iq1s_block(&block, &grid, &mut output);
+        // dl = 1*(2*0+1)=1, delta=+0.125, grid[1792]=+1 → weight = 1*(1+0.125) = 1.125
+        let expected = 1.0f32 * (1.0 + IQ1S_DELTA);
+        for (i, &v) in output[..8].iter().enumerate() {
+            assert!(
+                (v - expected).abs() < 1e-5,
+                "iq1s high qh l=0: weight[{i}] = {v}, expected {expected}"
+            );
+        }
+        // l=1..3 use high bits 0 → grid_idx = 0 → same expected
+        for (i, &v) in output[8..32].iter().enumerate() {
+            assert!(
+                (v - expected).abs() < 1e-5,
+                "iq1s high qh l=1..3: weight[{i}] = {v}, expected {expected}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_dequant_iq1s_all_l_values() {
+        // All 4 l-values in one block: l0→entry 0, l1→entry 256, l2→entry 512, l3→entry 768
+        // qh bits: l0 high=0, l1 high=1, l2 high=2, l3 high=3
+        // qh_val = (0<<0) | (1<<3) | (2<<6) | (3<<9) = 0 + 8 + 128 + 1536 = 0x0688
+        let grid = iq1s_grid_full_fixture();
+        let mut block = make_iq1s_zero_block();
+        let qh_val: u16 = 0x0688;
+        block[34] = (qh_val & 0xFF) as u8;
+        block[35] = (qh_val >> 8) as u8;
+        let mut output = [0.0f32; 256];
+        dequant_iq1s_block(&block, &grid, &mut output);
+        // dl=1*(2*0+1)=1, delta=+0.125
+        // l=0: grid[0] = +1 → weight = 1*(1 + 0.125) = 1.125
+        let exp_l0 = 1.0f32 * (1.0 + IQ1S_DELTA);
+        // l=1: grid[256] = 0 → weight = 1*(0 + 0.125) = 0.125
+        let exp_l1 = 1.0f32 * (0.0 + IQ1S_DELTA);
+        // l=2: grid[512] = -1 → weight = 1*(-1 + 0.125) = -0.875
+        let exp_l2 = 1.0f32 * (-1.0 + IQ1S_DELTA);
+        // l=3: grid[768] alternating 0x01/0xFF → +1 or -1 depending on byte position
+        let expected = [exp_l0, exp_l1, exp_l2];
+        for (l, &exp) in expected.iter().enumerate() {
+            for (j, &v) in output[l * 8..(l + 1) * 8].iter().enumerate() {
+                assert!(
+                    (v - exp).abs() < 1e-5,
+                    "iq1s all l: l={l} j={j} got {v}, expected {exp}"
+                );
+            }
+        }
+        // l=3: alternating pattern — byte j of grid[768] = 0xFF01FF01... so:
+        // lo32 bytes 0,2 = 0x01 (+1), bytes 1,3 = 0xFF (-1)
+        // hi32 bytes 0,2 = 0x01 (+1), bytes 1,3 = 0xFF (-1) (same pattern)
+        let exp_l3_even = 1.0f32 * (1.0 + IQ1S_DELTA);
+        let exp_l3_odd = 1.0f32 * (-1.0 + IQ1S_DELTA);
+        for (j, &v) in output[24..32].iter().enumerate() {
+            let exp = if j % 2 == 0 { exp_l3_even } else { exp_l3_odd };
+            assert!(
+                (v - exp).abs() < 1e-5,
+                "iq1s all l: l=3 j={j} got {v}, expected {exp}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_dequant_iq1s_max_scale() {
+        // s=7 → dl = d*(2*7+1) = d*15 = 15.0
+        let grid = iq1s_grid_full_fixture();
+        let mut block = make_iq1s_zero_block();
+        // s=7: bits 14:12 = 0b111 → add 0x7000 to qh_val
+        let qh_val: u16 = 0x7000;
+        block[34] = (qh_val & 0xFF) as u8;
+        block[35] = (qh_val >> 8) as u8;
+        let mut output = [0.0f32; 256];
+        dequant_iq1s_block(&block, &grid, &mut output);
+        // dl = 1*(2*7+1) = 15, delta = +0.125, grid[0]=+1 → weight = 15*(1+0.125) = 16.875
+        let expected = 15.0f32 * (1.0 + IQ1S_DELTA);
+        for (i, &v) in output[..32].iter().enumerate() {
+            assert!(
+                (v - expected).abs() < 1e-4,
+                "iq1s max scale: weight[{i}] = {v}, expected {expected}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_dequant_iq1s_scale_and_negative_delta() {
+        // Combined: s=3, negative delta
+        let grid = iq1s_grid_full_fixture();
+        let mut block = make_iq1s_zero_block();
+        // s=3 (bits 14:12 = 0b011 → 0x3000) + delta sign bit 15 → 0xB000
+        let qh_val: u16 = 0xB000;
+        block[34] = (qh_val & 0xFF) as u8;
+        block[35] = (qh_val >> 8) as u8;
+        let mut output = [0.0f32; 256];
+        dequant_iq1s_block(&block, &grid, &mut output);
+        // dl = 1*(2*3+1) = 7, delta = -0.125, grid[0]=+1 → weight = 7*(1-0.125) = 6.125
+        let expected = 7.0f32 * (1.0 - IQ1S_DELTA);
+        for (i, &v) in output[..32].iter().enumerate() {
+            assert!(
+                (v - expected).abs() < 1e-4,
+                "iq1s scale+neg delta: weight[{i}] = {v}, expected {expected}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_dequant_iq1s_zero_grid_byte() {
+        // Grid entry with 0 bytes → weight = dl * (0 + delta)
+        let grid = iq1s_grid_full_fixture();
+        let mut block = make_iq1s_zero_block();
+        // l=0 → qs_lo[0]=0, high bits for l=0 = 1 → grid_idx = 256 → all bytes = 0
+        let qh_val: u16 = 0x0001; // bits 2:0 = 1
+        block[34] = (qh_val & 0xFF) as u8;
+        block[35] = (qh_val >> 8) as u8;
+        let mut output = [0.0f32; 256];
+        dequant_iq1s_block(&block, &grid, &mut output);
+        // dl=1, delta=+0.125, grid[256]=0 → weight = 1*(0 + 0.125) = 0.125
+        let expected = 1.0f32 * (0.0 + IQ1S_DELTA);
+        for (i, &v) in output[..8].iter().enumerate() {
+            assert!(
+                (v - expected).abs() < 1e-5,
+                "iq1s zero grid: weight[{i}] = {v}, expected {expected}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_dequant_iq1s_last_ib32() {
+        // Test ib32=7 (last group): qh[7] at bytes 48-49
+        let grid = iq1s_grid_full_fixture();
+        let mut block = make_iq1s_zero_block();
+        // qh[7]: s=5 → bits 14:12 = 0b101 → 0x5000; positive delta
+        let qh_val: u16 = 0x5000;
+        block[48] = (qh_val & 0xFF) as u8;
+        block[49] = (qh_val >> 8) as u8;
+        let mut output = [0.0f32; 256];
+        dequant_iq1s_block(&block, &grid, &mut output);
+        // Last 32 weights (ib32=7): dl = 1*(2*5+1) = 11, delta=+0.125, grid[0]=+1 → 11*1.125=12.375
+        let expected_last = 11.0f32 * (1.0 + IQ1S_DELTA);
+        for (i, &v) in output[224..].iter().enumerate() {
+            assert!(
+                (v - expected_last).abs() < 1e-4,
+                "iq1s last ib32: weight[{i}] = {v}, expected {expected_last}"
+            );
+        }
+        // First 224 weights use qh=0 → dl=1, same base expected
+        let expected_rest = 1.0f32 * (1.0 + IQ1S_DELTA);
+        for (i, &v) in output[..224].iter().enumerate() {
+            assert!(
+                (v - expected_rest).abs() < 1e-5,
+                "iq1s last ib32 rest: weight[{i}] = {v}, expected {expected_rest}"
+            );
+        }
+    }
 }
