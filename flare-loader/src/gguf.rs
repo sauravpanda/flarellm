@@ -426,6 +426,7 @@ fn quant_to_weight_format(q: QuantFormat) -> Option<WeightFormat> {
         QuantFormat::Q4K => Some(WeightFormat::Q4K),
         QuantFormat::Q5K => Some(WeightFormat::Q5K),
         QuantFormat::Q6K => Some(WeightFormat::Q6K),
+        QuantFormat::IQ4NL => Some(WeightFormat::IQ4NL),
         _ => None,
     }
 }
@@ -491,6 +492,19 @@ fn dequantize_tensor(raw: &[u8], dtype: QuantFormat, numel: usize) -> Result<Vec
                 let block = &raw[b * block_bytes..(b + 1) * block_bytes];
                 let mut out = [0.0f32; 32];
                 quantize::dequant_q4_0_block(block, &mut out);
+                data[b * block_size..(b + 1) * block_size].copy_from_slice(&out);
+            }
+            Ok(data)
+        }
+        QuantFormat::IQ4NL => {
+            let block_size = 32;
+            let block_bytes = 18; // 2 (scale) + 16 (nibbles), same layout as Q4_0
+            let num_blocks = numel.div_ceil(block_size);
+            let mut data = vec![0.0f32; numel];
+            for b in 0..num_blocks {
+                let block = &raw[b * block_bytes..(b + 1) * block_bytes];
+                let mut out = [0.0f32; 32];
+                quantize::dequant_iq4nl_block(block, &mut out);
                 data[b * block_size..(b + 1) * block_size].copy_from_slice(&out);
             }
             Ok(data)
