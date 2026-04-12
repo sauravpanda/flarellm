@@ -133,6 +133,10 @@ pub struct FlareEngine {
     /// `None` if the GGUF file did not include a chat template.
     raw_chat_template: Option<String>,
     // --- Token-by-token streaming state ---
+    /// Sampling parameters for the current stream (set by begin_stream_with_params).
+    stream_params: SamplingParams,
+    /// LCG RNG state for streaming sampling; reset on each begin_stream call.
+    stream_rng_state: u32,
     /// Last token fed to the model (updated by begin_stream / next_token).
     stream_last_token: u32,
     /// Current sequence position (prompt length + tokens generated so far).
@@ -201,6 +205,11 @@ impl FlareEngine {
             bos_token_id,
             add_bos_token,
             raw_chat_template,
+            stream_params: SamplingParams {
+                temperature: 0.0,
+                ..Default::default()
+            },
+            stream_rng_state: 0x12345678,
             stream_last_token: 0,
             stream_pos: 0,
             stream_remaining: 0,
@@ -613,6 +622,53 @@ impl FlareEngine {
     /// ```
     #[wasm_bindgen]
     pub fn begin_stream(&mut self, prompt_tokens: &[u32], max_tokens: u32) {
+        // Greedy (temperature=0) — reset params so any previous begin_stream_with_params
+        // settings don't bleed into this stream.
+        self.stream_params = SamplingParams {
+            temperature: 0.0,
+            ..Default::default()
+        };
+        self.stream_rng_state = 0x12345678;
+        self.begin_stream_impl(prompt_tokens, max_tokens);
+    }
+
+    /// Like `begin_stream` but with temperature / top-p sampling.
+    ///
+    /// `temperature`: 0.0 = greedy, 0.7–1.0 = typical creative range.
+    /// `top_p`: nucleus sampling threshold (0.0–1.0); 0.9 is a good default.
+    ///
+    /// # JS example
+    /// ```javascript
+    /// engine.reset();
+    /// engine.begin_stream_with_params(promptIds, 128, 0.8, 0.9);
+    /// function tick() {
+    ///   const id = engine.next_token();
+    ///   if (id === undefined) return;
+    ///   output.textContent += tokenizer.decode_one(id);
+    ///   requestAnimationFrame(tick);
+    /// }
+    /// requestAnimationFrame(tick);
+    /// ```
+    #[wasm_bindgen]
+    pub fn begin_stream_with_params(
+        &mut self,
+        prompt_tokens: &[u32],
+        max_tokens: u32,
+        temperature: f32,
+        top_p: f32,
+    ) {
+        self.stream_params = SamplingParams {
+            temperature,
+            top_p,
+            top_k: 40,
+            repeat_penalty: 1.1,
+        };
+        self.stream_rng_state = 0x12345678;
+        self.begin_stream_impl(prompt_tokens, max_tokens);
+    }
+
+    /// Internal prefill + state initialisation shared by both begin_stream variants.
+    fn begin_stream_impl(&mut self, prompt_tokens: &[u32], max_tokens: u32) {
         let effective = self.with_bos(prompt_tokens);
         let t0 = now_ms();
         let mut pos = 0usize;
@@ -634,7 +690,8 @@ impl FlareEngine {
     /// is complete (EOS reached, `max_tokens` exhausted, or `stop_stream()`
     /// was called).
     ///
-    /// Uses greedy (temperature=0) sampling.  Call this inside
+    /// Sampling parameters are those set by the most recent `begin_stream` or
+    /// `begin_stream_with_params` call.  Call this inside
     /// `requestAnimationFrame` so the browser can update the DOM between
     /// tokens and the page remains responsive.
     #[wasm_bindgen]
@@ -650,7 +707,19 @@ impl FlareEngine {
         }
 
         let logits_tensor = self.model.forward(self.stream_last_token, self.stream_pos);
-        let token_id = sampling::sample_greedy(logits_tensor.data());
+        let token_id = if self.stream_params.temperature == 0.0 {
+            sampling::sample_greedy(logits_tensor.data())
+        } else {
+            let mut logits = logits_tensor.data().to_vec();
+            sampling::apply_temperature(&mut logits, self.stream_params.temperature);
+            // Advance LCG RNG state for this token.
+            self.stream_rng_state = self
+                .stream_rng_state
+                .wrapping_mul(1664525)
+                .wrapping_add(1013904223);
+            let rng_val = (self.stream_rng_state as f32) / (u32::MAX as f32);
+            sampling::sample_top_p(&logits, self.stream_params.top_p, rng_val)
+        };
 
         self.stream_last_token = token_id;
         self.stream_pos += 1;
@@ -987,6 +1056,11 @@ impl FlareProgressiveLoader {
             bos_token_id,
             add_bos_token,
             raw_chat_template,
+            stream_params: SamplingParams {
+                temperature: 0.0,
+                ..Default::default()
+            },
+            stream_rng_state: 0x12345678,
             stream_last_token: 0,
             stream_pos: 0,
             stream_remaining: 0,
