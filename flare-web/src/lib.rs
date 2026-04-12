@@ -267,6 +267,9 @@ pub struct FlareEngine {
     stream_remaining: usize,
     /// Whether the current stream has finished (EOS reached, budget exhausted, or stopped).
     stream_done: bool,
+    /// Why the most-recent stream stopped. One of `"eos"`, `"length"`,
+    /// `"stop_sequence"`, `"user"`, or `""` (stream still running / not started).
+    stream_stop_reason: String,
     // --- Per-call performance metrics ---
     /// Milliseconds spent in the prefill phase of the most recent generation call.
     /// For batch generation (`generate_tokens`/`generate_text`) this covers the
@@ -374,6 +377,7 @@ impl FlareEngine {
             stream_pos: 0,
             stream_remaining: 0,
             stream_done: true,
+            stream_stop_reason: String::new(),
             last_prefill_ms: 0.0,
             last_decode_ms: 0.0,
             last_tokens_generated: 0,
@@ -542,6 +546,7 @@ impl FlareEngine {
         self.rng_seed = 0x12345678;
         self.last_logits.clear();
         self.top_logprobs_data.clear();
+        self.stream_stop_reason.clear();
     }
 
     /// Get the vocabulary size of the loaded model.
@@ -1201,6 +1206,7 @@ impl FlareEngine {
         self.stream_last_token = *effective.last().unwrap_or(&0);
         self.stream_remaining = max_tokens as usize;
         self.stream_done = false;
+        self.stream_stop_reason.clear();
         // Seed the repetition-penalty window with the tail of the prompt (up to 64 tokens).
         const REPEAT_WINDOW: usize = 64;
         let n = effective.len().min(REPEAT_WINDOW);
@@ -1239,6 +1245,7 @@ impl FlareEngine {
         self.stream_last_token = effective[last_idx];
         self.stream_remaining = max_tokens as usize;
         self.stream_done = false;
+        self.stream_stop_reason.clear();
         const REPEAT_WINDOW: usize = 64;
         let n = effective.len().min(REPEAT_WINDOW);
         self.stream_recent_tokens.clear();
@@ -1258,7 +1265,10 @@ impl FlareEngine {
     #[wasm_bindgen]
     pub fn next_token(&mut self) -> Option<u32> {
         if self.stream_done || self.stream_remaining == 0 {
-            self.stream_done = true;
+            if !self.stream_done {
+                self.stream_done = true;
+                self.stream_stop_reason = "length".to_string();
+            }
             return None;
         }
 
@@ -1319,6 +1329,7 @@ impl FlareEngine {
         if self.eos_token_id == Some(token_id) {
             self.last_decode_ms = now_ms() - self.stream_decode_start_ms;
             self.stream_done = true;
+            self.stream_stop_reason = "eos".to_string();
             return None;
         }
 
@@ -1333,10 +1344,16 @@ impl FlareEngine {
                     if self.stream_text_accum.ends_with(seq.as_str()) {
                         self.last_decode_ms = now_ms() - self.stream_decode_start_ms;
                         self.stream_done = true;
+                        self.stream_stop_reason = "stop_sequence".to_string();
                         return None;
                     }
                 }
             }
+        }
+
+        if self.stream_remaining == 0 {
+            self.stream_done = true;
+            self.stream_stop_reason = "length".to_string();
         }
 
         self.last_tokens_generated += 1;
@@ -1350,6 +1367,9 @@ impl FlareEngine {
     /// return `undefined` before updating the UI.
     #[wasm_bindgen]
     pub fn stop_stream(&mut self) {
+        if !self.stream_done {
+            self.stream_stop_reason = "user".to_string();
+        }
         self.stream_done = true;
     }
 
@@ -1357,6 +1377,25 @@ impl FlareEngine {
     #[wasm_bindgen(getter)]
     pub fn stream_done(&self) -> bool {
         self.stream_done
+    }
+
+    /// Why the most-recent stream stopped.
+    ///
+    /// Returns one of:
+    /// - `"eos"` — the model emitted the EOS token
+    /// - `"length"` — `max_tokens` budget was exhausted
+    /// - `"stop_sequence"` — a registered stop sequence was matched
+    /// - `"user"` — `stop_stream()` was called
+    /// - `""` (empty) — stream not yet started or still running
+    ///
+    /// # JS example
+    /// ```javascript
+    /// while (!engine.stream_done) engine.next_token();
+    /// console.log("Stopped because:", engine.stream_stop_reason);
+    /// ```
+    #[wasm_bindgen(getter)]
+    pub fn stream_stop_reason(&self) -> String {
+        self.stream_stop_reason.clone()
     }
 
     /// Register a stop sequence.
@@ -1905,6 +1944,7 @@ impl FlareProgressiveLoader {
             stream_pos: 0,
             stream_remaining: 0,
             stream_done: true,
+            stream_stop_reason: String::new(),
             last_prefill_ms: 0.0,
             last_decode_ms: 0.0,
             last_tokens_generated: 0,
