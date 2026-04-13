@@ -389,6 +389,7 @@ async fn non_stream_response(
         top_k: 40,
         repeat_penalty: req.repeat_penalty,
         min_p: 0.0,
+        ..Default::default()
     };
 
     model.reset();
@@ -455,6 +456,7 @@ async fn stream_response(
         top_k: 40,
         repeat_penalty: req.repeat_penalty,
         min_p: 0.0,
+        ..Default::default()
     };
 
     let max_tokens = req.max_tokens;

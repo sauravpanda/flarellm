@@ -1,10 +1,104 @@
+use std::collections::HashMap;
+
 use crate::model::Model;
 use crate::sampling::{self, SamplingParams};
+
+/// Maximum number of entries in the n-gram cache to prevent unbounded memory growth.
+const NGRAM_CACHE_MAX_ENTRIES: usize = 10_000;
+
+/// Maximum number of draft tokens to propose per speculation attempt.
+const MAX_DRAFT_TOKENS: usize = 5;
+
+/// N-gram sizes to record (2, 3, and 4-gram).
+const NGRAM_SIZES: &[usize] = &[2, 3, 4];
 
 /// Result of generating a single token.
 pub struct GenerationStep {
     pub token_id: u32,
     pub logits: Vec<f32>,
+}
+
+/// Statistics for speculative decoding.
+#[derive(Debug, Default, Clone)]
+pub struct SpeculativeStats {
+    /// Total number of speculation attempts.
+    pub attempts: usize,
+    /// Total number of draft tokens proposed across all attempts.
+    pub drafted: usize,
+    /// Total number of draft tokens accepted (verified correct).
+    pub accepted: usize,
+}
+
+/// Cache of n-gram patterns seen during generation.
+///
+/// Maps an n-gram context (last N tokens) to the list of tokens that followed
+/// that context during generation.  Used to propose draft tokens for
+/// speculative decoding.
+struct NgramCache {
+    /// Maps context n-gram → list of next tokens seen after that n-gram.
+    table: HashMap<Vec<u32>, Vec<u32>>,
+    /// Total number of entries across all keys, used for eviction.
+    total_entries: usize,
+}
+
+impl NgramCache {
+    fn new() -> Self {
+        Self {
+            table: HashMap::new(),
+            total_entries: 0,
+        }
+    }
+
+    /// Record n-grams of all configured sizes from the token sequence.
+    /// Call this after each new token is appended to the context.
+    fn record(&mut self, tokens: &[u32]) {
+        for &n in NGRAM_SIZES {
+            // Need at least n tokens for the context and 1 for the next token.
+            if tokens.len() < n + 1 {
+                continue;
+            }
+            let start = tokens.len() - n - 1;
+            let context = &tokens[start..start + n];
+            let next_token = tokens[tokens.len() - 1];
+
+            let entry = self.table.entry(context.to_vec()).or_default();
+            entry.push(next_token);
+            self.total_entries += 1;
+        }
+
+        // Evict if we exceed the maximum size.
+        if self.total_entries > NGRAM_CACHE_MAX_ENTRIES {
+            self.evict();
+        }
+    }
+
+    /// Look up draft tokens for the given context suffix.
+    /// Tries the longest n-gram first for better matches.
+    fn lookup_drafts(&self, tokens: &[u32]) -> Vec<u32> {
+        // Try longest n-gram first (4-gram, then 3-gram, then 2-gram).
+        for &n in NGRAM_SIZES.iter().rev() {
+            if tokens.len() < n {
+                continue;
+            }
+            let context = &tokens[tokens.len() - n..];
+            if let Some(continuations) = self.table.get(context) {
+                // Return up to MAX_DRAFT_TOKENS from the most recent continuations.
+                let start = continuations.len().saturating_sub(MAX_DRAFT_TOKENS);
+                return continuations[start..].to_vec();
+            }
+        }
+        Vec::new()
+    }
+
+    /// Evict entries to bring the cache below the maximum size.
+    /// Uses a simple strategy: clear the entire table and reset.
+    fn evict(&mut self) {
+        // Keep only the most recent half by clearing old entries.
+        // A simple but effective strategy: clear everything and rebuild
+        // from subsequent tokens.  This avoids complex LRU overhead.
+        self.table.clear();
+        self.total_entries = 0;
+    }
 }
 
 /// Autoregressive text generation loop.
@@ -13,6 +107,8 @@ pub struct Generator<'a> {
     params: SamplingParams,
     tokens: Vec<u32>,
     position: usize,
+    ngram_cache: NgramCache,
+    speculative_stats: SpeculativeStats,
 }
 
 impl<'a> Generator<'a> {
@@ -22,7 +118,14 @@ impl<'a> Generator<'a> {
             params,
             tokens: Vec::new(),
             position: 0,
+            ngram_cache: NgramCache::new(),
+            speculative_stats: SpeculativeStats::default(),
         }
+    }
+
+    /// Returns whether speculative decoding is active for the current params.
+    fn is_speculative(&self) -> bool {
+        self.params.speculative && self.params.temperature == 0.0
     }
 
     /// Prefill: process the prompt as a batch, returning logits for the last token.
@@ -37,7 +140,41 @@ impl<'a> Generator<'a> {
         let output = self.model.forward_prefill(prompt_tokens);
         self.tokens.extend_from_slice(prompt_tokens);
         self.position += prompt_tokens.len();
+
+        // Seed the n-gram cache from the prompt tokens.
+        if self.is_speculative() {
+            for i in 0..prompt_tokens.len() {
+                let end = i + 1;
+                if end <= self.tokens.len() {
+                    // We record incrementally: for each token position in the
+                    // prompt, treat the tokens up to that point as the context.
+                    // But we only need the final few tokens for each n-gram size.
+                }
+            }
+            // Record n-grams from the full prompt at once.
+            self.record_prompt_ngrams();
+        }
+
         output.data().to_vec()
+    }
+
+    /// Record n-grams from the entire current token sequence (used after prefill).
+    fn record_prompt_ngrams(&mut self) {
+        for &n in NGRAM_SIZES {
+            if self.tokens.len() < n + 1 {
+                continue;
+            }
+            for i in 0..=(self.tokens.len() - n - 1) {
+                let context = self.tokens[i..i + n].to_vec();
+                let next_token = self.tokens[i + n];
+                let entry = self.ngram_cache.table.entry(context).or_default();
+                entry.push(next_token);
+                self.ngram_cache.total_entries += 1;
+            }
+        }
+        if self.ngram_cache.total_entries > NGRAM_CACHE_MAX_ENTRIES {
+            self.ngram_cache.evict();
+        }
     }
 
     /// Generate a single next token, returning the token ID.
@@ -67,7 +204,67 @@ impl<'a> Generator<'a> {
         self.tokens.push(token_id);
         self.position += 1;
 
+        // Update n-gram cache after generating a token.
+        if self.is_speculative() {
+            self.ngram_cache.record(&self.tokens);
+        }
+
         GenerationStep { token_id, logits }
+    }
+
+    /// Attempt speculative decoding: look up draft tokens from the n-gram
+    /// cache, run forward passes to verify each one, and return all accepted
+    /// tokens.  Returns an empty vec if no drafts are available or none match.
+    fn speculative_step(&mut self) -> Vec<GenerationStep> {
+        let drafts = self.ngram_cache.lookup_drafts(&self.tokens);
+        if drafts.is_empty() {
+            return Vec::new();
+        }
+
+        self.speculative_stats.attempts += 1;
+        self.speculative_stats.drafted += drafts.len();
+
+        let mut accepted = Vec::new();
+
+        for &draft_token in &drafts {
+            // Run the model forward for the current last token.
+            let last_token = *self.tokens.last().unwrap_or(&0);
+            let logits_tensor = self.model.forward(last_token, self.position);
+            let mut logits = logits_tensor.data().to_vec();
+
+            sampling::apply_repeat_penalty(&mut logits, &self.tokens, self.params.repeat_penalty);
+            // temperature is 0.0 for speculative (greedy only)
+
+            let verified_token = sampling::sample_greedy(&logits);
+
+            if verified_token == draft_token {
+                // Draft matches — accept it.
+                self.tokens.push(verified_token);
+                self.position += 1;
+                self.ngram_cache.record(&self.tokens);
+                self.speculative_stats.accepted += 1;
+
+                accepted.push(GenerationStep {
+                    token_id: verified_token,
+                    logits,
+                });
+            } else {
+                // Mismatch — accept the verified token (which differs from
+                // the draft) and stop speculation.  The verified token is the
+                // correct greedy output for this position.
+                self.tokens.push(verified_token);
+                self.position += 1;
+                self.ngram_cache.record(&self.tokens);
+
+                accepted.push(GenerationStep {
+                    token_id: verified_token,
+                    logits,
+                });
+                break;
+            }
+        }
+
+        accepted
     }
 
     /// Generate up to `max_tokens` tokens, calling the callback for each.
@@ -88,8 +285,45 @@ impl<'a> Generator<'a> {
         self.prefill(prompt_tokens);
 
         let mut generated = Vec::new();
+        let mut step = 0;
+        let use_speculation = self.is_speculative();
 
-        for step in 0..max_tokens {
+        while step < max_tokens {
+            if use_speculation && step > 0 {
+                // Try speculative decoding first.
+                let spec_results = self.speculative_step();
+                if !spec_results.is_empty() {
+                    let mut should_break = false;
+                    for result in spec_results {
+                        generated.push(result.token_id);
+
+                        // Check EOS
+                        if let Some(eos) = eos_token {
+                            if result.token_id == eos {
+                                should_break = true;
+                                break;
+                            }
+                        }
+
+                        if !on_token(result.token_id, step) {
+                            should_break = true;
+                            break;
+                        }
+
+                        step += 1;
+                        if step >= max_tokens {
+                            should_break = true;
+                            break;
+                        }
+                    }
+                    if should_break {
+                        break;
+                    }
+                    continue;
+                }
+            }
+
+            // Normal (non-speculative) step.
             let result = self.step(rng());
             generated.push(result.token_id);
 
@@ -104,6 +338,8 @@ impl<'a> Generator<'a> {
             if !on_token(result.token_id, step) {
                 break;
             }
+
+            step += 1;
         }
 
         generated
@@ -115,6 +351,11 @@ impl<'a> Generator<'a> {
 
     pub fn position(&self) -> usize {
         self.position
+    }
+
+    /// Returns statistics about speculative decoding performance.
+    pub fn speculative_stats(&self) -> &SpeculativeStats {
+        &self.speculative_stats
     }
 }
 
@@ -442,5 +683,174 @@ mod tests {
                 "position should be {expected_pos} after step"
             );
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Speculative decoding tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_ngram_cache_record_and_lookup() {
+        let mut cache = NgramCache::new();
+
+        // Record tokens [1, 2, 3, 4, 5]
+        let tokens = vec![1u32, 2, 3, 4, 5];
+        for i in 1..=tokens.len() {
+            cache.record(&tokens[..i]);
+        }
+
+        // Look up the 2-gram [4, 5] — nothing follows yet.
+        // Look up the 2-gram [3, 4] — should find [5].
+        let drafts = cache.lookup_drafts(&[3, 4]);
+        assert!(
+            drafts.contains(&5),
+            "n-gram cache should find 5 after [3, 4], got {drafts:?}"
+        );
+    }
+
+    #[test]
+    fn test_ngram_cache_eviction() {
+        let mut cache = NgramCache::new();
+
+        // Fill cache past the limit.
+        let mut tokens = Vec::new();
+        for i in 0..=(NGRAM_CACHE_MAX_ENTRIES as u32 + 100) {
+            tokens.push(i);
+            cache.record(&tokens);
+        }
+
+        // After eviction, total_entries should be manageable.
+        assert!(
+            cache.total_entries <= NGRAM_CACHE_MAX_ENTRIES,
+            "cache should have been evicted: {} entries",
+            cache.total_entries
+        );
+    }
+
+    #[test]
+    fn test_speculative_disabled_with_temperature() {
+        // Speculative decoding should not activate with temperature > 0.
+        let mut model = tiny_model();
+        let params = SamplingParams {
+            temperature: 0.7,
+            speculative: true,
+            ..Default::default()
+        };
+        let gen = Generator::new(&mut model, params);
+        assert!(
+            !gen.is_speculative(),
+            "speculation should be disabled with temperature > 0"
+        );
+    }
+
+    #[test]
+    fn test_speculative_disabled_by_flag() {
+        let mut model = tiny_model();
+        let params = SamplingParams {
+            temperature: 0.0,
+            speculative: false,
+            ..Default::default()
+        };
+        let gen = Generator::new(&mut model, params);
+        assert!(
+            !gen.is_speculative(),
+            "speculation should be disabled when flag is false"
+        );
+    }
+
+    #[test]
+    fn test_speculative_enabled() {
+        let mut model = tiny_model();
+        let params = SamplingParams {
+            temperature: 0.0,
+            speculative: true,
+            ..Default::default()
+        };
+        let gen = Generator::new(&mut model, params);
+        assert!(
+            gen.is_speculative(),
+            "speculation should be enabled with greedy + flag"
+        );
+    }
+
+    #[test]
+    fn test_speculative_output_matches_greedy() {
+        // The most critical test: speculative decoding must produce the
+        // exact same output as non-speculative greedy decoding.
+        let prompt = vec![1u32, 2, 3];
+        let max = 8;
+
+        // Run without speculation.
+        let baseline = {
+            let mut model = tiny_model();
+            let params = SamplingParams {
+                temperature: 0.0,
+                speculative: false,
+                ..Default::default()
+            };
+            let mut gen = Generator::new(&mut model, params);
+            gen.generate(&prompt, max, None, || 0.5, |_, _| true)
+        };
+
+        // Run with speculation.
+        let speculative = {
+            let mut model = tiny_model();
+            let params = SamplingParams {
+                temperature: 0.0,
+                speculative: true,
+                ..Default::default()
+            };
+            let mut gen = Generator::new(&mut model, params);
+            gen.generate(&prompt, max, None, || 0.5, |_, _| true)
+        };
+
+        assert_eq!(
+            baseline, speculative,
+            "speculative output must match greedy baseline: baseline={baseline:?} vs speculative={speculative:?}"
+        );
+    }
+
+    #[test]
+    fn test_speculative_stats_populated() {
+        let mut model = tiny_model();
+        let params = SamplingParams {
+            temperature: 0.0,
+            speculative: true,
+            ..Default::default()
+        };
+        let mut gen = Generator::new(&mut model, params);
+        let prompt = vec![1u32, 2];
+        let _generated = gen.generate(&prompt, 10, None, || 0.5, |_, _| true);
+
+        // Stats should be accessible (may or may not have attempts depending
+        // on whether the tiny model produces repetitive output).
+        let stats = gen.speculative_stats();
+        assert!(
+            stats.accepted <= stats.drafted,
+            "accepted ({}) must not exceed drafted ({})",
+            stats.accepted,
+            stats.drafted
+        );
+    }
+
+    #[test]
+    fn test_ngram_cache_prefers_longer_match() {
+        let mut cache = NgramCache::new();
+
+        // Record a 2-gram match: [1, 2] → 99
+        cache.table.insert(vec![1, 2], vec![99]);
+        cache.total_entries += 1;
+
+        // Record a 4-gram match: [0, 0, 1, 2] → 42
+        cache.table.insert(vec![0, 0, 1, 2], vec![42]);
+        cache.total_entries += 1;
+
+        // Lookup with context [0, 0, 1, 2] should prefer the 4-gram.
+        let drafts = cache.lookup_drafts(&[0, 0, 1, 2]);
+        assert_eq!(
+            drafts,
+            vec![42],
+            "should prefer longer n-gram match, got {drafts:?}"
+        );
     }
 }

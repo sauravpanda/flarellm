@@ -89,6 +89,7 @@ fn test_generator_produces_max_tokens() {
         top_k: 0,
         repeat_penalty: 1.0,
         min_p: 0.0,
+        ..Default::default()
     };
     let mut gen = Generator::new(&mut model, params);
     let tokens = gen.generate(&[0u32], 5, None, greedy(), |_, _| true);
@@ -107,6 +108,7 @@ fn test_greedy_generation_is_deterministic() {
         top_k: 0,
         repeat_penalty: 1.0,
         min_p: 0.0,
+        ..Default::default()
     };
 
     let mut model_a = make_model();
@@ -138,6 +140,7 @@ fn test_eos_stops_generation_early() {
         top_k: 0,
         repeat_penalty: 1.0,
         min_p: 0.0,
+        ..Default::default()
     };
     let mut gen = Generator::new(&mut model, params);
 
@@ -155,6 +158,7 @@ fn test_eos_stops_generation_early() {
             top_k: 0,
             repeat_penalty: 1.0,
             min_p: 0.0,
+            ..Default::default()
         },
     );
     let stopped = gen2.generate(&[0u32], 10, Some(first_token), greedy(), |_, _| true);
@@ -174,6 +178,7 @@ fn test_reset_allows_second_generation() {
         top_k: 0,
         repeat_penalty: 1.0,
         min_p: 0.0,
+        ..Default::default()
     };
 
     let tokens_first =
