@@ -273,3 +273,42 @@ Baseline model: SmolLM2-135M-Instruct Q8_0 (138MB, 30 layers, dim=576).
 | Decode (256 tok) | 123.9 |
 | Sustained (512 tok) | **106.7** |
 
+### 2026-04-13 16:47 — `43a26bb Merge pull request #400 from sauravpanda/feat/kivi-2bit-k...`
+
+**Hardware:** Apple M5 Pro, ARM64 (NEON SIMD)  
+**Model:** Llama, ~162M params, 30 layers, dim=576  
+**Load time:** 0.13s
+
+| Metric | tok/s |
+|---|---|
+| Decode (16 tok) | 130.3 |
+| Decode (64 tok) | 133.0 |
+| Decode (256 tok) | 119.8 |
+| Sustained (512 tok) | **103.6** |
+
+### 2026-04-13 16:49 — `43a26bb Merge pull request #400 from sauravpanda/feat/kivi-2bit-k...`
+
+**Hardware:** Apple M5 Pro, ARM64 (NEON SIMD)  
+**Model:** Llama, ~162M params, 30 layers, dim=576  
+**Load time:** 0.10s
+
+| Metric | tok/s |
+|---|---|
+| Decode (16 tok) | 8.7 |
+| Decode (64 tok) | 8.8 |
+| Decode (256 tok) | 8.3 |
+| Sustained (512 tok) | **7.7** |
+
+### 2026-04-13 16:50 — `43a26bb Merge pull request #400 from sauravpanda/feat/kivi-2bit-k...`
+
+**Hardware:** Apple M5 Pro, ARM64 (NEON SIMD)  
+**Model:** Llama, ~1498M params, 16 layers, dim=2048  
+**Load time:** 0.94s
+
+| Metric | tok/s |
+|---|---|
+| Decode (16 tok) | 25.8 |
+| Decode (64 tok) | 25.7 |
+| Decode (256 tok) | 25.0 |
+| Sustained (512 tok) | **24.0** |
+

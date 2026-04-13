@@ -67,7 +67,7 @@ impl QuantizedKvCache {
     ) -> Self {
         let kv_size = num_kv_heads * head_dim;
         // Each token's kv_size values pack into kv_size/4 bytes (round up).
-        let packed_per_token = (kv_size + VALS_PER_BYTE - 1) / VALS_PER_BYTE;
+        let packed_per_token = kv_size.div_ceil(VALS_PER_BYTE);
         let packed_total = max_seq_len * packed_per_token;
 
         let residual_len = RESIDUAL_WINDOW.min(max_seq_len);
@@ -124,7 +124,7 @@ impl QuantizedKvCache {
         debug_assert_eq!(value.len(), kv_size);
 
         let pos = self.position;
-        let packed_per_token = (kv_size + VALS_PER_BYTE - 1) / VALS_PER_BYTE;
+        let packed_per_token = kv_size.div_ceil(VALS_PER_BYTE);
         let packed_off = pos * packed_per_token;
 
         // --- Quantize key (per-channel, but we only have one token at a time,
@@ -191,7 +191,7 @@ impl QuantizedKvCache {
         let n = self.length;
         let mut out = vec![0.0f32; self.max_seq_len * kv_size];
 
-        let packed_per_token = (kv_size + VALS_PER_BYTE - 1) / VALS_PER_BYTE;
+        let packed_per_token = kv_size.div_ceil(VALS_PER_BYTE);
 
         for t in 0..n {
             let ring_pos = self.ring_pos(t);
@@ -225,7 +225,7 @@ impl QuantizedKvCache {
         let n = self.length;
         let mut out = vec![0.0f32; self.max_seq_len * kv_size];
 
-        let packed_per_token = (kv_size + VALS_PER_BYTE - 1) / VALS_PER_BYTE;
+        let packed_per_token = kv_size.div_ceil(VALS_PER_BYTE);
 
         for t in 0..n {
             let ring_pos = self.ring_pos(t);

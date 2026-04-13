@@ -3694,19 +3694,8 @@ impl WebGpuBackend {
                         ffn_out_buf,
                     );
                 } else {
-                    self.dispatch_silu_mul(
-                        &mut pass,
-                        gate_buf,
-                        up_buf,
-                        silu_buf,
-                        intermediate_dim,
-                    );
-                    self.dispatch_dequant_matvec(
-                        &mut pass,
-                        &layer.w_down,
-                        silu_buf,
-                        ffn_out_buf,
-                    );
+                    self.dispatch_silu_mul(&mut pass, gate_buf, up_buf, silu_buf, intermediate_dim);
+                    self.dispatch_dequant_matvec(&mut pass, &layer.w_down, silu_buf, ffn_out_buf);
                 }
 
                 // 13-14. Optional post-FFN RMSNorm + residual

@@ -694,7 +694,7 @@ mod tests {
         let mut cache = NgramCache::new();
 
         // Record tokens [1, 2, 3, 4, 5]
-        let tokens = vec![1u32, 2, 3, 4, 5];
+        let tokens: &[u32] = &[1, 2, 3, 4, 5];
         for i in 1..=tokens.len() {
             cache.record(&tokens[..i]);
         }
