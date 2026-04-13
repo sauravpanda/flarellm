@@ -226,8 +226,8 @@ impl WebGpuBackend {
                     label: Some("flare-gpu"),
                     required_features: extra_features,
                     required_limits: wgpu::Limits {
-                        max_buffer_size: 1 << 30,                     // 1 GiB
-                        max_storage_buffer_binding_size: 1 << 30,     // 1 GiB
+                        max_buffer_size: 1 << 30,                 // 1 GiB
+                        max_storage_buffer_binding_size: 1 << 30, // 1 GiB
                         ..wgpu::Limits::default()
                     },
                     ..Default::default()
@@ -2337,11 +2337,13 @@ impl WebGpuBackend {
             std::borrow::Cow::Owned(padded)
         };
 
-        let buf = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("gpu_weight"),
-            contents: &data,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-        });
+        let buf = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("gpu_weight"),
+                contents: &data,
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            });
 
         GpuWeightBuffer {
             buf,
@@ -2353,11 +2355,12 @@ impl WebGpuBackend {
 
     /// Upload f32 data to a persistent GPU storage buffer.
     fn upload_f32_buffer(&self, data: &[f32]) -> wgpu::Buffer {
-        self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("gpu_f32"),
-            contents: bytemuck::cast_slice(data),
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-        })
+        self.device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("gpu_f32"),
+                contents: bytemuck::cast_slice(data),
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            })
     }
 
     /// Maximum bytes per GPU buffer.  wgpu's default `max_buffer_size` is 256 MiB.
@@ -2391,11 +2394,13 @@ impl WebGpuBackend {
             let shard_rows = (num_rows - row_offset).min(max_rows_per_shard);
             let start = row_offset * num_cols;
             let end = start + shard_rows * num_cols;
-            let buf = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("gpu_f32_shard"),
-                contents: bytemuck::cast_slice(&data[start..end]),
-                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-            });
+            let buf = self
+                .device
+                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("gpu_f32_shard"),
+                    contents: bytemuck::cast_slice(&data[start..end]),
+                    usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                });
             shards.push(GpuF32Shard {
                 buf,
                 num_rows: shard_rows,
@@ -2421,10 +2426,10 @@ impl WebGpuBackend {
         &self,
         raw_layers: &[flare_core::model::RawLayerWeights],
         layer_norms: &[(
-            &[f32],            // attn_norm
-            &[f32],            // ffn_norm
-            Option<&[f32]>,    // post_attn_norm
-            Option<&[f32]>,    // post_ffn_norm
+            &[f32],         // attn_norm
+            &[f32],         // ffn_norm
+            Option<&[f32]>, // post_attn_norm
+            Option<&[f32]>, // post_ffn_norm
         )],
         output_norm: &[f32],
         output_weight: &[f32],
@@ -2506,7 +2511,10 @@ impl WebGpuBackend {
             logits: self.create_intermediate_buffer(vocab_size),
         };
 
-        *self.gpu_forward_buffers.lock().expect("gpu_forward_buffers mutex poisoned") = Some(fwd_buffers);
+        *self
+            .gpu_forward_buffers
+            .lock()
+            .expect("gpu_forward_buffers mutex poisoned") = Some(fwd_buffers);
         *self.gpu_weights.lock().expect("gpu_weights mutex poisoned") = Some(weights);
         log::info!(
             "flare-gpu: uploaded {} layer weights to GPU ({} persistent buffers + 16 intermediate)",
@@ -2617,11 +2625,9 @@ impl WebGpuBackend {
         let batch = 1u32;
 
         let params: [u32; 3] = [num_rows as u32, blocks_per_row as u32, batch];
-        let params_buf = self.pool.get_uniform(
-            &self.device,
-            &self.queue,
-            bytemuck::cast_slice(&params),
-        );
+        let params_buf =
+            self.pool
+                .get_uniform(&self.device, &self.queue, bytemuck::cast_slice(&params));
 
         let layout_entries = Self::standard_layout();
         self.cache.with_pipeline(
@@ -2684,11 +2690,9 @@ impl WebGpuBackend {
         eps: f32,
     ) {
         let params: [u32; 3] = [dim as u32, batch as u32, eps.to_bits()];
-        let params_buf = self.pool.get_uniform(
-            &self.device,
-            &self.queue,
-            bytemuck::cast_slice(&params),
-        );
+        let params_buf =
+            self.pool
+                .get_uniform(&self.device, &self.queue, bytemuck::cast_slice(&params));
 
         let layout_entries = Self::standard_layout();
         self.cache.with_pipeline(
@@ -2753,11 +2757,9 @@ impl WebGpuBackend {
             pos as u32,
             theta.to_bits(),
         ];
-        let params_buf = self.pool.get_uniform(
-            &self.device,
-            &self.queue,
-            bytemuck::cast_slice(&params),
-        );
+        let params_buf =
+            self.pool
+                .get_uniform(&self.device, &self.queue, bytemuck::cast_slice(&params));
 
         let layout_entries = Self::single_input_layout();
         self.cache.with_pipeline(
@@ -2813,11 +2815,9 @@ impl WebGpuBackend {
         size: usize,
     ) {
         let params: [u32; 1] = [size as u32];
-        let params_buf = self.pool.get_uniform(
-            &self.device,
-            &self.queue,
-            bytemuck::cast_slice(&params),
-        );
+        let params_buf =
+            self.pool
+                .get_uniform(&self.device, &self.queue, bytemuck::cast_slice(&params));
 
         let layout_entries = Self::standard_layout();
         self.cache.with_pipeline(
@@ -2874,11 +2874,9 @@ impl WebGpuBackend {
         size: usize,
     ) {
         let params: [u32; 1] = [size as u32];
-        let params_buf = self.pool.get_uniform(
-            &self.device,
-            &self.queue,
-            bytemuck::cast_slice(&params),
-        );
+        let params_buf =
+            self.pool
+                .get_uniform(&self.device, &self.queue, bytemuck::cast_slice(&params));
 
         let layout_entries = Self::single_input_layout();
         self.cache.with_pipeline(
@@ -3034,11 +3032,9 @@ impl WebGpuBackend {
         let batch = 1u32;
 
         let params: [u32; 3] = [num_rows as u32, blocks_per_row as u32, batch];
-        let params_buf = self.pool.get_uniform(
-            &self.device,
-            &self.queue,
-            bytemuck::cast_slice(&params),
-        );
+        let params_buf =
+            self.pool
+                .get_uniform(&self.device, &self.queue, bytemuck::cast_slice(&params));
 
         let layout_entries = Self::standard_layout();
         self.cache.with_pipeline(
@@ -3092,11 +3088,9 @@ impl WebGpuBackend {
         eps: f32,
     ) {
         let params: [u32; 3] = [dim as u32, batch as u32, eps.to_bits()];
-        let params_buf = self.pool.get_uniform(
-            &self.device,
-            &self.queue,
-            bytemuck::cast_slice(&params),
-        );
+        let params_buf =
+            self.pool
+                .get_uniform(&self.device, &self.queue, bytemuck::cast_slice(&params));
 
         let layout_entries = Self::standard_layout();
         self.cache.with_pipeline(
@@ -3156,11 +3150,9 @@ impl WebGpuBackend {
             pos as u32,
             theta.to_bits(),
         ];
-        let params_buf = self.pool.get_uniform(
-            &self.device,
-            &self.queue,
-            bytemuck::cast_slice(&params),
-        );
+        let params_buf =
+            self.pool
+                .get_uniform(&self.device, &self.queue, bytemuck::cast_slice(&params));
 
         let layout_entries = Self::single_input_layout();
         self.cache.with_pipeline(
@@ -3295,11 +3287,9 @@ impl WebGpuBackend {
         size: usize,
     ) {
         let params: [u32; 1] = [size as u32];
-        let params_buf = self.pool.get_uniform(
-            &self.device,
-            &self.queue,
-            bytemuck::cast_slice(&params),
-        );
+        let params_buf =
+            self.pool
+                .get_uniform(&self.device, &self.queue, bytemuck::cast_slice(&params));
 
         let layout_entries = Self::standard_layout();
         self.cache.with_pipeline(
@@ -3351,11 +3341,9 @@ impl WebGpuBackend {
         size: usize,
     ) {
         let params: [u32; 1] = [size as u32];
-        let params_buf = self.pool.get_uniform(
-            &self.device,
-            &self.queue,
-            bytemuck::cast_slice(&params),
-        );
+        let params_buf =
+            self.pool
+                .get_uniform(&self.device, &self.queue, bytemuck::cast_slice(&params));
 
         let layout_entries = Self::single_input_layout();
         self.cache.with_pipeline(
@@ -3435,11 +3423,23 @@ impl WebGpuBackend {
         seq_len: usize,
     ) -> Vec<f32> {
         let guard = self.gpu_weights.lock().expect("gpu_weights mutex poisoned");
-        let weights = guard.as_ref().expect("forward_single_token_gpu called without GPU weights");
-        let kv_guard = self.gpu_kv_cache.lock().expect("gpu_kv_cache mutex poisoned");
-        let kv = kv_guard.as_ref().expect("forward_single_token_gpu called without GPU KV cache");
-        let fwd_guard = self.gpu_forward_buffers.lock().expect("gpu_forward_buffers mutex poisoned");
-        let fwd = fwd_guard.as_ref().expect("forward_single_token_gpu called without forward buffers");
+        let weights = guard
+            .as_ref()
+            .expect("forward_single_token_gpu called without GPU weights");
+        let kv_guard = self
+            .gpu_kv_cache
+            .lock()
+            .expect("gpu_kv_cache mutex poisoned");
+        let kv = kv_guard
+            .as_ref()
+            .expect("forward_single_token_gpu called without GPU KV cache");
+        let fwd_guard = self
+            .gpu_forward_buffers
+            .lock()
+            .expect("gpu_forward_buffers mutex poisoned");
+        let fwd = fwd_guard
+            .as_ref()
+            .expect("forward_single_token_gpu called without forward buffers");
 
         let kv_dim = num_kv_heads * head_dim;
         let heads_per_kv = num_heads / num_kv_heads;
@@ -3463,12 +3463,15 @@ impl WebGpuBackend {
         let logits_buf = &fwd.logits;
 
         // Upload token embedding to the x buffer
-        self.queue.write_buffer(x_buf, 0, bytemuck::cast_slice(token_embedding));
+        self.queue
+            .write_buffer(x_buf, 0, bytemuck::cast_slice(token_embedding));
 
         // Build a single command encoder for the entire forward pass.
-        let mut encoder = self.device.create_command_encoder(
-            &wgpu::CommandEncoderDescriptor { label: Some("forward_gpu") },
-        );
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("forward_gpu"),
+            });
 
         for layer_idx in 0..num_layers {
             let layer = &weights.layers[layer_idx];
@@ -3483,7 +3486,15 @@ impl WebGpuBackend {
                 });
 
                 // 1. RMSNorm(x) -> normed
-                self.dispatch_rmsnorm(&mut pass, x_buf, &layer.attn_norm, normed_buf, dim, 1, rms_norm_eps);
+                self.dispatch_rmsnorm(
+                    &mut pass,
+                    x_buf,
+                    &layer.attn_norm,
+                    normed_buf,
+                    dim,
+                    1,
+                    rms_norm_eps,
+                );
 
                 // 2. Q/K/V projections
                 self.dispatch_dequant_matvec(&mut pass, &layer.wq, normed_buf, q_buf);
@@ -3491,16 +3502,38 @@ impl WebGpuBackend {
                 self.dispatch_dequant_matvec(&mut pass, &layer.wv, normed_buf, v_buf);
 
                 // 3. RoPE
-                self.dispatch_rope(&mut pass, q_buf, q_rope_buf, num_heads, head_dim, pos, rope_theta);
-                self.dispatch_rope(&mut pass, k_buf, k_rope_buf, num_kv_heads, head_dim, pos, rope_theta);
+                self.dispatch_rope(
+                    &mut pass, q_buf, q_rope_buf, num_heads, head_dim, pos, rope_theta,
+                );
+                self.dispatch_rope(
+                    &mut pass,
+                    k_buf,
+                    k_rope_buf,
+                    num_kv_heads,
+                    head_dim,
+                    pos,
+                    rope_theta,
+                );
             }
 
             // 4. Write K/V to GPU KV cache (copy ops must be outside compute passes).
             let ring_pos = pos % kv.max_seq_len;
             let kv_byte_offset = (ring_pos * kv_dim * 4) as u64;
             let kv_copy_size = (kv_dim * 4) as u64;
-            encoder.copy_buffer_to_buffer(k_rope_buf, 0, kv.key_buf(layer_idx), kv_byte_offset, kv_copy_size);
-            encoder.copy_buffer_to_buffer(v_buf, 0, kv.val_buf(layer_idx), kv_byte_offset, kv_copy_size);
+            encoder.copy_buffer_to_buffer(
+                k_rope_buf,
+                0,
+                kv.key_buf(layer_idx),
+                kv_byte_offset,
+                kv_copy_size,
+            );
+            encoder.copy_buffer_to_buffer(
+                v_buf,
+                0,
+                kv.val_buf(layer_idx),
+                kv_byte_offset,
+                kv_copy_size,
+            );
 
             // 5-6. Attention heads + output projection (merged pass)
             {
@@ -3531,7 +3564,15 @@ impl WebGpuBackend {
 
                 // 7. Optional post-attention RMSNorm (Gemma 2) + residual
                 if let Some(ref post_norm_buf) = layer.post_attn_norm {
-                    self.dispatch_rmsnorm(&mut pass, attn_proj_buf, post_norm_buf, ffn_normed_buf, dim, 1, rms_norm_eps);
+                    self.dispatch_rmsnorm(
+                        &mut pass,
+                        attn_proj_buf,
+                        post_norm_buf,
+                        ffn_normed_buf,
+                        dim,
+                        1,
+                        rms_norm_eps,
+                    );
                     self.dispatch_add_residual(&mut pass, ffn_normed_buf, x_buf, dim);
                 } else {
                     self.dispatch_add_residual(&mut pass, attn_proj_buf, x_buf, dim);
@@ -3546,7 +3587,15 @@ impl WebGpuBackend {
                 });
 
                 // 9. RMSNorm(x) -> ffn_normed
-                self.dispatch_rmsnorm(&mut pass, x_buf, &layer.ffn_norm, ffn_normed_buf, dim, 1, rms_norm_eps);
+                self.dispatch_rmsnorm(
+                    &mut pass,
+                    x_buf,
+                    &layer.ffn_norm,
+                    ffn_normed_buf,
+                    dim,
+                    1,
+                    rms_norm_eps,
+                );
 
                 // 10. Gate and up projections
                 self.dispatch_dequant_matvec(&mut pass, &layer.w_gate, ffn_normed_buf, gate_buf);
@@ -3560,7 +3609,15 @@ impl WebGpuBackend {
 
                 // 13-14. Optional post-FFN RMSNorm + residual
                 if let Some(ref post_norm_buf) = layer.post_ffn_norm {
-                    self.dispatch_rmsnorm(&mut pass, ffn_out_buf, post_norm_buf, normed_buf, dim, 1, rms_norm_eps);
+                    self.dispatch_rmsnorm(
+                        &mut pass,
+                        ffn_out_buf,
+                        post_norm_buf,
+                        normed_buf,
+                        dim,
+                        1,
+                        rms_norm_eps,
+                    );
                     self.dispatch_add_residual(&mut pass, normed_buf, x_buf, dim);
                 } else {
                     self.dispatch_add_residual(&mut pass, ffn_out_buf, x_buf, dim);
@@ -3576,17 +3633,23 @@ impl WebGpuBackend {
             });
 
             // 15. Final RMSNorm
-            self.dispatch_rmsnorm(&mut pass, x_buf, &weights.output_norm, final_normed_buf, dim, 1, rms_norm_eps);
+            self.dispatch_rmsnorm(
+                &mut pass,
+                x_buf,
+                &weights.output_norm,
+                final_normed_buf,
+                dim,
+                1,
+                rms_norm_eps,
+            );
 
             // 16. Output logits (sharded batched_matvec)
             for shard in &weights.output_weight_shards {
                 let shard_rows = shard.num_rows;
                 let params: [u32; 3] = [shard_rows as u32, dim as u32, 1u32];
-                let params_buf = self.pool.get_uniform(
-                    &self.device,
-                    &self.queue,
-                    bytemuck::cast_slice(&params),
-                );
+                let params_buf =
+                    self.pool
+                        .get_uniform(&self.device, &self.queue, bytemuck::cast_slice(&params));
 
                 let logit_byte_offset = (shard.row_offset * 4) as u64;
                 let logit_byte_size = (shard_rows * 4) as u64;
@@ -3599,32 +3662,38 @@ impl WebGpuBackend {
                     "batched_matvec",
                     &layout_entries,
                     |cached| {
-                        let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                            label: None,
-                            layout: &cached.layout,
-                            entries: &[
-                                wgpu::BindGroupEntry {
-                                    binding: 0,
-                                    resource: shard.buf.as_entire_binding(),
-                                },
-                                wgpu::BindGroupEntry {
-                                    binding: 1,
-                                    resource: final_normed_buf.as_entire_binding(),
-                                },
-                                wgpu::BindGroupEntry {
-                                    binding: 2,
-                                    resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                                        buffer: logits_buf,
-                                        offset: logit_byte_offset,
-                                        size: Some(std::num::NonZeroU64::new(logit_byte_size).unwrap()),
-                                    }),
-                                },
-                                wgpu::BindGroupEntry {
-                                    binding: 3,
-                                    resource: params_buf.as_entire_binding(),
-                                },
-                            ],
-                        });
+                        let bind_group =
+                            self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                                label: None,
+                                layout: &cached.layout,
+                                entries: &[
+                                    wgpu::BindGroupEntry {
+                                        binding: 0,
+                                        resource: shard.buf.as_entire_binding(),
+                                    },
+                                    wgpu::BindGroupEntry {
+                                        binding: 1,
+                                        resource: final_normed_buf.as_entire_binding(),
+                                    },
+                                    wgpu::BindGroupEntry {
+                                        binding: 2,
+                                        resource: wgpu::BindingResource::Buffer(
+                                            wgpu::BufferBinding {
+                                                buffer: logits_buf,
+                                                offset: logit_byte_offset,
+                                                size: Some(
+                                                    std::num::NonZeroU64::new(logit_byte_size)
+                                                        .unwrap(),
+                                                ),
+                                            },
+                                        ),
+                                    },
+                                    wgpu::BindGroupEntry {
+                                        binding: 3,
+                                        resource: params_buf.as_entire_binding(),
+                                    },
+                                ],
+                            });
 
                         pass.set_pipeline(&cached.pipeline);
                         pass.set_bind_group(0, &bind_group, &[]);
@@ -4442,12 +4511,7 @@ impl ComputeBackend for WebGpuBackend {
     fn upload_weights_to_gpu(
         &self,
         raw_layers: &[flare_core::model::RawLayerWeights],
-        layer_norms: &[(
-            &[f32],
-            &[f32],
-            Option<&[f32]>,
-            Option<&[f32]>,
-        )],
+        layer_norms: &[(&[f32], &[f32], Option<&[f32]>, Option<&[f32]>)],
         output_norm: &[f32],
         output_weight: &[f32],
         token_embedding: &[f32],

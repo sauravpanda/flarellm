@@ -923,7 +923,7 @@ mod tests {
         // GGUF stores dimensions as [in_features, out_features].
         // So dims=[64, 4] means 4 output rows of 64 input columns each.
         const NUM_COLS: u64 = 64; // in_features (dimensions[0])
-        const NUM_ROWS: u64 = 4;  // out_features (dimensions[1])
+        const NUM_ROWS: u64 = 4; // out_features (dimensions[1])
         const BLOCKS_PER_ROW: usize = 2; // 64 / 32
         const BYTES_PER_BLOCK: usize = 20; // Q4_1
         const TENSOR_BYTES: usize = NUM_ROWS as usize * BLOCKS_PER_ROW * BYTES_PER_BLOCK; // 160

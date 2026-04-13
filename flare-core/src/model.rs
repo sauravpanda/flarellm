@@ -401,12 +401,7 @@ pub trait ComputeBackend: Send + Sync {
     fn upload_weights_to_gpu(
         &self,
         _raw_layers: &[RawLayerWeights],
-        _layer_norms: &[(
-            &[f32],
-            &[f32],
-            Option<&[f32]>,
-            Option<&[f32]>,
-        )],
+        _layer_norms: &[(&[f32], &[f32], Option<&[f32]>, Option<&[f32]>)],
         _output_norm: &[f32],
         _output_weight: &[f32],
         _token_embedding: &[f32],
@@ -604,12 +599,7 @@ impl Model {
             None => return,
         };
 
-        let layer_norms: Vec<(
-            &[f32],
-            &[f32],
-            Option<&[f32]>,
-            Option<&[f32]>,
-        )> = self
+        let layer_norms: Vec<(&[f32], &[f32], Option<&[f32]>, Option<&[f32]>)> = self
             .weights
             .layers
             .iter()

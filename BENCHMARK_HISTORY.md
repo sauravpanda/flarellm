@@ -234,3 +234,42 @@ Baseline model: SmolLM2-135M-Instruct Q8_0 (138MB, 30 layers, dim=576).
 | Decode (256 tok) | 2.7 |
 | Sustained (512 tok) | **2.5** |
 
+### 2026-04-13 15:56 — `c7f6ad1 Merge pull request #378 from sauravpanda/gpu-forward-pass...`
+
+**Hardware:** Apple M5 Pro, ARM64 (NEON SIMD)  
+**Model:** Llama, ~162M params, 30 layers, dim=576  
+**Load time:** 0.11s
+
+| Metric | tok/s |
+|---|---|
+| Decode (16 tok) | 8.8 |
+| Decode (64 tok) | 8.6 |
+| Decode (256 tok) | 8.1 |
+| Sustained (512 tok) | **7.5** |
+
+### 2026-04-13 16:03 — `c7f6ad1 Merge pull request #378 from sauravpanda/gpu-forward-pass...`
+
+**Hardware:** Apple M5 Pro, ARM64 (NEON SIMD)  
+**Model:** Llama, ~1498M params, 16 layers, dim=2048  
+**Load time:** 0.87s
+
+| Metric | tok/s |
+|---|---|
+| Decode (16 tok) | 2.9 |
+| Decode (64 tok) | 2.9 |
+| Decode (256 tok) | 2.8 |
+| Sustained (512 tok) | **2.7** |
+
+### 2026-04-13 16:03 — `c7f6ad1 Merge pull request #378 from sauravpanda/gpu-forward-pass...`
+
+**Hardware:** Apple M5 Pro, ARM64 (NEON SIMD)  
+**Model:** Llama, ~162M params, 30 layers, dim=576  
+**Load time:** 0.11s
+
+| Metric | tok/s |
+|---|---|
+| Decode (16 tok) | 144.6 |
+| Decode (64 tok) | 135.0 |
+| Decode (256 tok) | 123.9 |
+| Sustained (512 tok) | **106.7** |
+
