@@ -58,6 +58,8 @@ const BATCHED_MATVEC_SHADER: &str = include_str!("../shaders/batched_matvec.wgsl
 const BATCHED_RMSNORM_SHADER: &str = include_str!("../shaders/batched_rmsnorm.wgsl");
 const BATCHED_ROPE_SHADER: &str = include_str!("../shaders/batched_rope.wgsl");
 const ADD_RESIDUAL_SHADER: &str = include_str!("../shaders/add_residual.wgsl");
+const FUSED_SILU_MUL_DEQUANT_MATVEC_Q8_0_SHADER: &str =
+    include_str!("../shaders/fused_silu_mul_dequant_matvec_q8_0.wgsl");
 
 /// GPU-resident weight buffer for a single quantized weight matrix.
 ///
@@ -379,6 +381,18 @@ impl WebGpuBackend {
     /// 5-binding layout for the attention shader:
     /// q (read), k_cache (read), v_cache (read), output (read-write), params (uniform).
     fn attention_layout() -> [wgpu::BindGroupLayoutEntry; 5] {
+        [
+            storage_ro_entry(0),
+            storage_ro_entry(1),
+            storage_ro_entry(2),
+            storage_rw_entry(3),
+            uniform_entry(4),
+        ]
+    }
+
+    /// 5-binding layout for fused kernels with 3 read-only inputs, 1 read-write output, 1 uniform.
+    /// Used by fused_silu_mul_dequant_matvec_q8_0.
+    fn fused_3in_layout() -> [wgpu::BindGroupLayoutEntry; 5] {
         [
             storage_ro_entry(0),
             storage_ro_entry(1),
@@ -3334,6 +3348,72 @@ impl WebGpuBackend {
         self.pool.return_uniform(params_buf);
     }
 
+    /// Dispatch fused SiLU-Mul + Q8_0 dequant matvec on an existing compute pass.
+    ///
+    /// Combines `silu_mul` and `dequant_matvec_q8_0` into a single dispatch:
+    /// output[row] = Σ_j  dequant(w_down[row, j]) * SiLU(gate[j]) * up[j]
+    ///
+    /// Saves one dispatch per layer in the FFN block.
+    fn dispatch_fused_silu_mul_dequant_matvec_q8_0(
+        &self,
+        pass: &mut wgpu::ComputePass<'_>,
+        gate_buf: &wgpu::Buffer,
+        up_buf: &wgpu::Buffer,
+        weight: &GpuWeightBuffer,
+        output_buf: &wgpu::Buffer,
+    ) {
+        let num_rows = weight.num_rows;
+        let blocks_per_row = weight.blocks_per_row;
+
+        let params: [u32; 2] = [num_rows as u32, blocks_per_row as u32];
+        let params_buf =
+            self.pool
+                .get_uniform(&self.device, &self.queue, bytemuck::cast_slice(&params));
+
+        let layout_entries = Self::fused_3in_layout();
+        self.cache.with_pipeline(
+            &self.device,
+            "fused_silu_mul_dequant_matvec_q8_0",
+            FUSED_SILU_MUL_DEQUANT_MATVEC_Q8_0_SHADER,
+            "fused_silu_mul_dequant_matvec_q8_0",
+            &layout_entries,
+            |cached| {
+                let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: None,
+                    layout: &cached.layout,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: gate_buf.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: up_buf.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 2,
+                            resource: weight.buf.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 3,
+                            resource: output_buf.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 4,
+                            resource: params_buf.as_entire_binding(),
+                        },
+                    ],
+                });
+
+                pass.set_pipeline(&cached.pipeline);
+                pass.set_bind_group(0, &bind_group, &[]);
+                pass.dispatch_workgroups(num_rows as u32, 1, 1);
+            },
+        );
+
+        self.pool.return_uniform(params_buf);
+    }
+
     /// Dispatch add_residual on an existing compute pass.
     fn dispatch_add_residual(
         &self,
@@ -3603,11 +3683,31 @@ impl WebGpuBackend {
                 self.dispatch_dequant_matvec(&mut pass, &layer.w_gate, ffn_normed_buf, gate_buf);
                 self.dispatch_dequant_matvec(&mut pass, &layer.w_up, ffn_normed_buf, up_buf);
 
-                // 11. SiLU(gate) * up
-                self.dispatch_silu_mul(&mut pass, gate_buf, up_buf, silu_buf, intermediate_dim);
-
-                // 12. Down projection
-                self.dispatch_dequant_matvec(&mut pass, &layer.w_down, silu_buf, ffn_out_buf);
+                // 11-12. SiLU(gate) * up → down projection.
+                // Use fused kernel for Q8_0 weights (saves 1 dispatch per layer).
+                if layer.w_down.format == WeightFormat::Q8_0 {
+                    self.dispatch_fused_silu_mul_dequant_matvec_q8_0(
+                        &mut pass,
+                        gate_buf,
+                        up_buf,
+                        &layer.w_down,
+                        ffn_out_buf,
+                    );
+                } else {
+                    self.dispatch_silu_mul(
+                        &mut pass,
+                        gate_buf,
+                        up_buf,
+                        silu_buf,
+                        intermediate_dim,
+                    );
+                    self.dispatch_dequant_matvec(
+                        &mut pass,
+                        &layer.w_down,
+                        silu_buf,
+                        ffn_out_buf,
+                    );
+                }
 
                 // 13-14. Optional post-FFN RMSNorm + residual
                 if let Some(ref post_norm_buf) = layer.post_ffn_norm {
