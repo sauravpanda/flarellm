@@ -105,6 +105,11 @@ fn main() {
                 if raw_layers.len() == num_layers {
                     model.set_raw_weights(raw_layers);
                     eprintln!("Raw quantized weights loaded for GPU fused kernels");
+                    // Upload weights to persistent GPU buffers for single-encoder forward
+                    model.upload_weights_to_gpu();
+                    if model.backend().has_gpu_weights() {
+                        eprintln!("GPU-resident weights uploaded (single-encoder forward path enabled)");
+                    }
                 } else if !all_ok {
                     eprintln!("Warning: could not load raw weights, using f32 path on GPU");
                 }

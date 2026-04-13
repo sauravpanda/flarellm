@@ -556,6 +556,8 @@ impl FlareEngine {
 
         if raw_layers.len() == num_layers {
             self.model.set_raw_weights(raw_layers);
+            // Upload weights to persistent GPU buffers for single-encoder forward
+            self.model.upload_weights_to_gpu();
         }
 
         all_ok
