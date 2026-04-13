@@ -1295,6 +1295,7 @@ impl FlareEngine {
             top_k: top_k as usize,
             repeat_penalty,
             min_p,
+            ..Default::default()
         };
         self.stream_rng_state = self.rng_seed;
         self.begin_stream_impl(prompt_tokens, max_tokens);
@@ -1368,6 +1369,7 @@ impl FlareEngine {
             top_k: top_k as usize,
             repeat_penalty,
             min_p,
+            ..Default::default()
         };
         self.stream_rng_state = self.rng_seed;
         self.begin_stream_healed_impl(prompt_tokens, max_tokens);
@@ -1738,6 +1740,7 @@ impl FlareEngine {
             top_k: top_k as usize,
             repeat_penalty,
             min_p,
+            ..Default::default()
         };
         let stop_seqs = &self.stop_sequences;
         let vocab = &self.gguf_vocab;

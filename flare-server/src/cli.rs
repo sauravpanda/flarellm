@@ -119,6 +119,7 @@ fn main() {
         top_k: 40,
         repeat_penalty: 1.1,
         min_p: 0.0,
+        ..Default::default()
     };
 
     // Detect chat template from GGUF metadata or architecture
