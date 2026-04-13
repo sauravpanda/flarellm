@@ -39,3 +39,4 @@ clap = { workspace = true }
 [dev-dependencies]
 http-body-util = "0.1"
 tower = { version = "0.5", features = ["util"] }
+pollster = "0.4"
