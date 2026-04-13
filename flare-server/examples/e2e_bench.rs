@@ -9,7 +9,8 @@
 //! Output as JSON (machine-readable, one object per line):
 //!   cargo run -p flarellm-server --example e2e_bench --release -- --json
 //!
-//! Set MODEL_PATH env var to use a different model:
+//! Use a different model via --model flag or MODEL_PATH env var:
+//!   cargo run -p flarellm-server --example e2e_bench --release -- --model path/to/model.gguf
 //!   MODEL_PATH=path/to/model.gguf cargo run -p flarellm-server --example e2e_bench --release
 
 use std::fs::{File, OpenOptions};
@@ -33,8 +34,13 @@ fn main() {
     let log_mode = args.iter().any(|a| a == "--log");
     let json_mode = args.iter().any(|a| a == "--json");
 
-    let model_path = std::env::var("MODEL_PATH")
-        .unwrap_or_else(|_| format!("{DEFAULT_MODEL_DIR}/{DEFAULT_MODEL_NAME}"));
+    // Parse --model <path> flag, falling back to MODEL_PATH env var, then default.
+    let model_path = args
+        .iter()
+        .position(|a| a == "--model")
+        .and_then(|i| args.get(i + 1).cloned())
+        .or_else(|| std::env::var("MODEL_PATH").ok())
+        .unwrap_or_else(|| format!("{DEFAULT_MODEL_DIR}/{DEFAULT_MODEL_NAME}"));
 
     if !Path::new(&model_path).exists() {
         eprintln!("Model not found at: {model_path}");
