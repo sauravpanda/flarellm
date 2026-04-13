@@ -33,7 +33,6 @@ var<workgroup> sum_exp: f32;
 @compute @workgroup_size(256)
 fn attention_scores(
     @builtin(local_invocation_id) lid: vec3<u32>,
-    @builtin(workgroup_size) wg_size: vec3<u32>,
 ) {
     let tid = lid.x;
     let seq_len = params.seq_len;
@@ -43,7 +42,7 @@ fn attention_scores(
 
     // Phase 1: Compute Q @ K^T scores
     // Each thread handles one or more sequence positions
-    for (var t: u32 = tid; t < seq_len; t = t + wg_size.x) {
+    for (var t: u32 = tid; t < seq_len; t = t + 256u) {
         var dot: f32 = 0.0;
         let k_offset = t * kv_stride + kv_head_base;
         for (var d: u32 = 0u; d < head_dim; d = d + 1u) {
@@ -78,7 +77,7 @@ fn attention_scores(
     workgroupBarrier();
 
     // Phase 4: Normalize
-    for (var t: u32 = tid; t < seq_len; t = t + wg_size.x) {
+    for (var t: u32 = tid; t < seq_len; t = t + 256u) {
         scores[t] = scores[t] / sum_exp;
     }
 
@@ -86,7 +85,7 @@ fn attention_scores(
 
     // Phase 5: Weighted sum of values -> output
     // Each thread computes one or more output dimensions
-    for (var d: u32 = tid; d < head_dim; d = d + wg_size.x) {
+    for (var d: u32 = tid; d < head_dim; d = d + 256u) {
         var acc: f32 = 0.0;
         for (var t: u32 = 0u; t < seq_len; t = t + 1u) {
             acc = acc + scores[t] * v_cache[t * kv_stride + kv_head_base + d];

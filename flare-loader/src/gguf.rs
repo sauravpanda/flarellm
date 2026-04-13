@@ -365,11 +365,11 @@ impl GgufFile {
         let mut raw = vec![0u8; byte_size];
         reader.read_exact(&mut raw)?;
 
-        // Determine tensor shape: dimensions[0] is num_rows, product of
-        // remaining dimensions gives the flat column count.
-        let num_rows = info.dimensions.first().copied().unwrap_or(1) as usize;
+        // GGUF stores dimensions in row-major order: [col, row] for 2D tensors.
+        // The last dimension is the number of output rows (out_features).
+        let num_rows = info.dimensions.last().copied().unwrap_or(1) as usize;
         let weights_per_block = format.weights_per_block();
-        let col_elements = info.dimensions.iter().skip(1).product::<u64>().max(1) as usize;
+        let col_elements = info.dimensions.iter().rev().skip(1).product::<u64>().max(1) as usize;
         let blocks_per_row = col_elements.div_ceil(weights_per_block);
 
         Ok(Some(RawWeight {
@@ -920,8 +920,10 @@ mod tests {
     ///
     /// Returns the full buffer and the expected raw bytes for one tensor.
     fn build_q4_1_layer_gguf() -> (Vec<u8>, Vec<u8>) {
-        const NUM_ROWS: u64 = 4;
-        const NUM_COLS: u64 = 64;
+        // GGUF stores dimensions as [in_features, out_features].
+        // So dims=[64, 4] means 4 output rows of 64 input columns each.
+        const NUM_COLS: u64 = 64; // in_features (dimensions[0])
+        const NUM_ROWS: u64 = 4;  // out_features (dimensions[1])
         const BLOCKS_PER_ROW: usize = 2; // 64 / 32
         const BYTES_PER_BLOCK: usize = 20; // Q4_1
         const TENSOR_BYTES: usize = NUM_ROWS as usize * BLOCKS_PER_ROW * BYTES_PER_BLOCK; // 160
@@ -940,7 +942,7 @@ mod tests {
         let mut header = Vec::new();
         write_gguf_header(&mut header, num_tensors as u64, 0);
 
-        let dims = [NUM_ROWS, NUM_COLS];
+        let dims = [NUM_COLS, NUM_ROWS];
         for (i, name) in tensor_names.iter().enumerate() {
             write_tensor_info(
                 &mut header,
@@ -1069,7 +1071,7 @@ mod tests {
             write_tensor_info(
                 &mut header,
                 name,
-                &[NUM_ROWS, NUM_COLS],
+                &[NUM_COLS, NUM_ROWS],
                 3,
                 (i * TENSOR_BYTES) as u64,
             );

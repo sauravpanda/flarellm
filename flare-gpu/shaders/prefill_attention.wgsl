@@ -53,7 +53,6 @@ var<workgroup> sum_exp:   f32;
 fn prefill_attention(
     @builtin(local_invocation_id)  lid:     vec3<u32>,
     @builtin(workgroup_id)         wid:     vec3<u32>,
-    @builtin(workgroup_size)       wg_size: vec3<u32>,
 ) {
     let query_pos  = wid.x;
     let head_idx   = wid.y;
@@ -87,7 +86,7 @@ fn prefill_attention(
     // Phase 1: QK^T
     // Each thread computes the dot product for one or more key positions.
     // --------------------------------------------------------------------
-    for (var t = tid; t < attend_len; t = t + wg_size.x) {
+    for (var t = tid; t < attend_len; t = t + 256u) {
         var dot = 0.0;
         let k_base = t * kv_stride + kv_head * head_dim;
         for (var d = 0u; d < head_dim; d = d + 1u) {
@@ -123,7 +122,7 @@ fn prefill_attention(
 
     // Parallel normalisation.
     let inv_sum = 1.0 / sum_exp;
-    for (var t = tid; t < attend_len; t = t + wg_size.x) {
+    for (var t = tid; t < attend_len; t = t + 256u) {
         scores[t] = scores[t] * inv_sum;
     }
     workgroupBarrier();
@@ -133,7 +132,7 @@ fn prefill_attention(
     // Each thread computes one or more output dimensions.
     // --------------------------------------------------------------------
     let out_base = query_pos * q_stride + head_idx * head_dim;
-    for (var d = tid; d < head_dim; d = d + wg_size.x) {
+    for (var d = tid; d < head_dim; d = d + 256u) {
         var acc = 0.0;
         for (var t = 0u; t < attend_len; t = t + 1u) {
             let v_base = t * kv_stride + kv_head * head_dim;

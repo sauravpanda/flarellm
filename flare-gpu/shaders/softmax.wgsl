@@ -15,7 +15,6 @@ var<workgroup> shared_sum: f32;
 @compute @workgroup_size(256)
 fn softmax(
     @builtin(local_invocation_id) lid: vec3<u32>,
-    @builtin(workgroup_size) wg_size: vec3<u32>,
 ) {
     let tid = lid.x;
     let size = params.size;
@@ -45,7 +44,7 @@ fn softmax(
     workgroupBarrier();
 
     // Phase 3: Normalize
-    for (var i: u32 = tid; i < size; i = i + wg_size.x) {
+    for (var i: u32 = tid; i < size; i = i + 256u) {
         output[i] = output[i] / shared_sum;
     }
 }

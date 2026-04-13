@@ -156,3 +156,16 @@ Baseline model: SmolLM2-135M-Instruct Q8_0 (138MB, 30 layers, dim=576).
 | Decode (256 tok) | 134.5 |
 | Sustained (512 tok) | **116.7** |
 
+### 2026-04-13 15:00 — `3f04928 Merge pull request #374 from sauravpanda/feat-gpu-bench-366`
+
+**Hardware:** Apple M5 Pro, ARM64 (NEON SIMD)  
+**Model:** Llama, ~162M params, 30 layers, dim=576  
+**Load time:** 0.11s
+
+| Metric | tok/s |
+|---|---|
+| Decode (16 tok) | 1.0 |
+| Decode (64 tok) | 1.1 |
+| Decode (256 tok) | 1.1 |
+| Sustained (512 tok) | **1.2** |
+
