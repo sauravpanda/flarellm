@@ -3,6 +3,7 @@ use std::sync::Mutex;
 use flare_core::model::{ComputeBackend, RawWeight, WeightFormat};
 use flare_core::tensor::Tensor;
 use thiserror::Error;
+use wgpu::util::DeviceExt;
 
 use crate::buffers::{self, BufferPool};
 use crate::kv_cache::GpuKvCache;
@@ -54,6 +55,49 @@ const DEQUANT_Q3K_SHADER: &str = include_str!("../shaders/dequant_q3k.wgsl");
 const BATCHED_MATVEC_SHADER: &str = include_str!("../shaders/batched_matvec.wgsl");
 const BATCHED_RMSNORM_SHADER: &str = include_str!("../shaders/batched_rmsnorm.wgsl");
 const BATCHED_ROPE_SHADER: &str = include_str!("../shaders/batched_rope.wgsl");
+const ADD_RESIDUAL_SHADER: &str = include_str!("../shaders/add_residual.wgsl");
+
+/// GPU-resident weight buffer for a single quantized weight matrix.
+///
+/// Holds the raw bytes (packed GGUF data) in a persistent GPU storage buffer,
+/// uploaded once at model load time.  Used by `forward_single_token_gpu` to
+/// avoid re-uploading weight data on every token.
+struct GpuWeightBuffer {
+    buf: wgpu::Buffer,
+    format: WeightFormat,
+    num_rows: usize,
+    blocks_per_row: usize,
+}
+
+/// GPU-resident weights for a single transformer layer.
+struct GpuLayerWeights {
+    wq: GpuWeightBuffer,
+    wk: GpuWeightBuffer,
+    wv: GpuWeightBuffer,
+    wo: GpuWeightBuffer,
+    w_gate: GpuWeightBuffer,
+    w_up: GpuWeightBuffer,
+    w_down: GpuWeightBuffer,
+    /// RMSNorm weights for the attention sub-block.
+    attn_norm: wgpu::Buffer,
+    /// RMSNorm weights for the FFN sub-block.
+    ffn_norm: wgpu::Buffer,
+    /// Optional post-attention RMSNorm (Gemma 2).
+    post_attn_norm: Option<wgpu::Buffer>,
+    /// Optional post-FFN RMSNorm (Gemma 2).
+    post_ffn_norm: Option<wgpu::Buffer>,
+}
+
+/// All model weights uploaded to GPU once.
+#[allow(dead_code)]
+struct GpuResidentWeights {
+    layers: Vec<GpuLayerWeights>,
+    output_norm: wgpu::Buffer,
+    /// Output projection (lm_head): kept as f32 on GPU.
+    output_weight: wgpu::Buffer,
+    /// Token embedding table: kept as f32 on GPU for embedding lookup.
+    token_embedding: wgpu::Buffer,
+}
 
 /// WebGPU/wgpu compute backend.
 ///
@@ -77,6 +121,8 @@ pub struct WebGpuBackend {
     /// GPU-resident KV cache.  `None` until `init_gpu_kv_cache` is called.
     /// `Mutex` provides interior mutability so trait methods can take `&self`.
     gpu_kv_cache: Mutex<Option<GpuKvCache>>,
+    /// GPU-resident model weights.  `None` until `upload_weights_to_gpu` is called.
+    gpu_weights: Mutex<Option<GpuResidentWeights>>,
 }
 
 impl WebGpuBackend {
@@ -152,6 +198,7 @@ impl WebGpuBackend {
             cache: pipeline_cache,
             pool: BufferPool::new(),
             gpu_kv_cache: Mutex::new(None),
+            gpu_weights: Mutex::new(None),
         })
     }
 
@@ -2219,6 +2266,902 @@ impl WebGpuBackend {
 
         result
     }
+
+    // -----------------------------------------------------------------------
+    // GPU-resident weight upload
+    // -----------------------------------------------------------------------
+
+    /// Upload a single raw weight tensor to a persistent GPU storage buffer.
+    fn upload_raw_weight(&self, raw: &RawWeight) -> GpuWeightBuffer {
+        // Pad to 4-byte alignment as required by wgpu.
+        #[allow(clippy::manual_is_multiple_of)]
+        let data = if raw.data.len() % 4 == 0 {
+            std::borrow::Cow::Borrowed(&raw.data[..])
+        } else {
+            let mut padded = raw.data.clone();
+            padded.resize((padded.len() + 3) & !3, 0);
+            std::borrow::Cow::Owned(padded)
+        };
+
+        let buf = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("gpu_weight"),
+            contents: &data,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        });
+
+        GpuWeightBuffer {
+            buf,
+            format: raw.format,
+            num_rows: raw.num_rows,
+            blocks_per_row: raw.blocks_per_row,
+        }
+    }
+
+    /// Upload f32 data to a persistent GPU storage buffer.
+    fn upload_f32_buffer(&self, data: &[f32]) -> wgpu::Buffer {
+        self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("gpu_f32"),
+            contents: bytemuck::cast_slice(data),
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        })
+    }
+
+    /// Upload all model weights to persistent GPU buffers (once).
+    ///
+    /// After this call, `forward_single_token_gpu` avoids all per-token weight
+    /// uploads, eliminating ~90+ CPU-to-GPU transfers per token.
+    pub fn upload_weights_to_gpu(
+        &self,
+        raw_layers: &[flare_core::model::RawLayerWeights],
+        layer_norms: &[(
+            &[f32],            // attn_norm
+            &[f32],            // ffn_norm
+            Option<&[f32]>,    // post_attn_norm
+            Option<&[f32]>,    // post_ffn_norm
+        )],
+        output_norm: &[f32],
+        output_weight: &[f32],
+        token_embedding: &[f32],
+    ) {
+        let mut layers = Vec::with_capacity(raw_layers.len());
+        for (i, raw_layer) in raw_layers.iter().enumerate() {
+            let (attn_n, ffn_n, post_attn_n, post_ffn_n) = &layer_norms[i];
+            layers.push(GpuLayerWeights {
+                wq: self.upload_raw_weight(&raw_layer.wq),
+                wk: self.upload_raw_weight(&raw_layer.wk),
+                wv: self.upload_raw_weight(&raw_layer.wv),
+                wo: self.upload_raw_weight(&raw_layer.wo),
+                w_gate: self.upload_raw_weight(&raw_layer.w_gate),
+                w_up: self.upload_raw_weight(&raw_layer.w_up),
+                w_down: self.upload_raw_weight(&raw_layer.w_down),
+                attn_norm: self.upload_f32_buffer(attn_n),
+                ffn_norm: self.upload_f32_buffer(ffn_n),
+                post_attn_norm: post_attn_n.map(|d| self.upload_f32_buffer(d)),
+                post_ffn_norm: post_ffn_n.map(|d| self.upload_f32_buffer(d)),
+            });
+        }
+
+        let weights = GpuResidentWeights {
+            layers,
+            output_norm: self.upload_f32_buffer(output_norm),
+            output_weight: self.upload_f32_buffer(output_weight),
+            token_embedding: self.upload_f32_buffer(token_embedding),
+        };
+
+        *self.gpu_weights.lock().expect("gpu_weights mutex poisoned") = Some(weights);
+        log::info!(
+            "flare-gpu: uploaded {} layer weights to GPU ({} persistent buffers)",
+            raw_layers.len(),
+            raw_layers.len() * 11 + 3
+        );
+    }
+
+    /// Returns `true` if GPU-resident weights have been uploaded.
+    pub fn has_gpu_weights(&self) -> bool {
+        self.gpu_weights
+            .lock()
+            .expect("gpu_weights mutex poisoned")
+            .is_some()
+    }
+
+    // -----------------------------------------------------------------------
+    // GPU-resident forward pass — single command encoder, no intermediate readback
+    // -----------------------------------------------------------------------
+
+    /// Returns the shader name for a given weight format's dequant_matvec kernel.
+    fn dequant_shader_name(format: WeightFormat) -> &'static str {
+        match format {
+            WeightFormat::BF16 => "dequant_matvec_bf16",
+            WeightFormat::F16 => "dequant_matvec_f16",
+            WeightFormat::Q2K => "dequant_matvec_q2k",
+            WeightFormat::Q3K => "dequant_matvec_q3k",
+            WeightFormat::Q4_0 => "dequant_matvec_q4_0",
+            WeightFormat::Q4_1 => "dequant_matvec_q4_1",
+            WeightFormat::Q4K => "dequant_matvec_q4k",
+            WeightFormat::Q5_0 => "dequant_matvec_q5_0",
+            WeightFormat::Q5_1 => "dequant_matvec_q5_1",
+            WeightFormat::Q5K => "dequant_matvec_q5k",
+            WeightFormat::Q6K => "dequant_matvec_q6k",
+            WeightFormat::Q8_0 => "dequant_matvec_q8_0",
+            WeightFormat::Q8_1 => "dequant_matvec_q8_1",
+            WeightFormat::IQ4NL => "dequant_matvec_iq4nl",
+            WeightFormat::IQ4XS => "dequant_matvec_iq4xs",
+            WeightFormat::IQ3S => "dequant_matvec_iq3s",
+            WeightFormat::IQ2XXS => "dequant_matvec_iq2xxs",
+            WeightFormat::IQ2XS => "dequant_matvec_iq2xs",
+            WeightFormat::IQ3XXS => "dequant_matvec_iq3xxs",
+            WeightFormat::IQ2S => "dequant_matvec_iq2s",
+            WeightFormat::IQ1S => "dequant_matvec_iq1s",
+        }
+    }
+
+    /// Returns the shader source for a given weight format's dequant_matvec kernel.
+    fn dequant_shader_source(format: WeightFormat) -> &'static str {
+        match format {
+            WeightFormat::BF16 => DEQUANT_MATVEC_BF16_SHADER,
+            WeightFormat::F16 => DEQUANT_MATVEC_F16_SHADER,
+            WeightFormat::Q2K => DEQUANT_MATVEC_Q2K_SHADER,
+            WeightFormat::Q3K => DEQUANT_MATVEC_Q3K_SHADER,
+            WeightFormat::Q4_0 => DEQUANT_MATVEC_Q4_0_SHADER,
+            WeightFormat::Q4_1 => DEQUANT_MATVEC_Q4_1_SHADER,
+            WeightFormat::Q4K => DEQUANT_MATVEC_Q4K_SHADER,
+            WeightFormat::Q5_0 => DEQUANT_MATVEC_Q5_0_SHADER,
+            WeightFormat::Q5_1 => DEQUANT_MATVEC_Q5_1_SHADER,
+            WeightFormat::Q5K => DEQUANT_MATVEC_Q5K_SHADER,
+            WeightFormat::Q6K => DEQUANT_MATVEC_Q6K_SHADER,
+            WeightFormat::Q8_0 => DEQUANT_MATVEC_Q8_0_SHADER,
+            WeightFormat::Q8_1 => DEQUANT_MATVEC_Q8_1_SHADER,
+            WeightFormat::IQ4NL => DEQUANT_MATVEC_IQ4NL_SHADER,
+            WeightFormat::IQ4XS => DEQUANT_MATVEC_IQ4XS_SHADER,
+            WeightFormat::IQ3S => DEQUANT_MATVEC_IQ3S_SHADER,
+            WeightFormat::IQ2XXS => DEQUANT_MATVEC_IQ2XXS_SHADER,
+            WeightFormat::IQ2XS => DEQUANT_MATVEC_IQ2XS_SHADER,
+            WeightFormat::IQ3XXS => DEQUANT_MATVEC_IQ3XXS_SHADER,
+            WeightFormat::IQ2S => DEQUANT_MATVEC_IQ2S_SHADER,
+            WeightFormat::IQ1S => DEQUANT_MATVEC_IQ1S_SHADER,
+        }
+    }
+
+    /// Create a GPU storage buffer suitable for intermediate results.
+    ///
+    /// The buffer supports STORAGE | COPY_SRC | COPY_DST so it can be:
+    /// - bound as read-only input to subsequent passes
+    /// - bound as read-write output from compute passes
+    /// - copied to a staging buffer for final readback
+    fn create_intermediate_buffer(&self, num_f32: usize) -> wgpu::Buffer {
+        self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("gpu_intermediate"),
+            size: (num_f32 * 4) as u64,
+            usage: wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::COPY_SRC
+                | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        })
+    }
+
+    /// Enqueue a dequant_matvec compute pass into an existing command encoder.
+    ///
+    /// Reads from `weight_buf` (persistent) and `input_buf` (intermediate),
+    /// writes to `output_buf` (intermediate). No readback.
+    fn enqueue_dequant_matvec(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        weight: &GpuWeightBuffer,
+        input_buf: &wgpu::Buffer,
+        output_buf: &wgpu::Buffer,
+    ) {
+        let shader_name = Self::dequant_shader_name(weight.format);
+        let shader_source = Self::dequant_shader_source(weight.format);
+        let num_rows = weight.num_rows;
+        let blocks_per_row = weight.blocks_per_row;
+        let batch = 1u32;
+
+        let params: [u32; 3] = [num_rows as u32, blocks_per_row as u32, batch];
+        let params_buf = self.pool.get_uniform(
+            &self.device,
+            &self.queue,
+            bytemuck::cast_slice(&params),
+        );
+
+        let layout_entries = Self::standard_layout();
+        self.cache.with_pipeline(
+            &self.device,
+            shader_name,
+            shader_source,
+            shader_name,
+            &layout_entries,
+            |cached| {
+                let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: None,
+                    layout: &cached.layout,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: weight.buf.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: input_buf.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 2,
+                            resource: output_buf.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 3,
+                            resource: params_buf.as_entire_binding(),
+                        },
+                    ],
+                });
+
+                let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some(shader_name),
+                    timestamp_writes: None,
+                });
+                pass.set_pipeline(&cached.pipeline);
+                pass.set_bind_group(0, &bind_group, &[]);
+                pass.dispatch_workgroups(num_rows as u32, batch, 1);
+            },
+        );
+
+        // Uniform buffer is tiny and can be returned to the pool immediately
+        // (its contents are consumed by the dispatch, not read back).
+        self.pool.return_uniform(params_buf);
+    }
+
+    /// Enqueue a batched_rmsnorm compute pass into an existing command encoder.
+    ///
+    /// Reads from `input_buf` and `weight_buf`, writes to `output_buf`.
+    fn enqueue_rmsnorm(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        input_buf: &wgpu::Buffer,
+        weight_buf: &wgpu::Buffer,
+        output_buf: &wgpu::Buffer,
+        dim: usize,
+        batch: usize,
+        eps: f32,
+    ) {
+        let params: [u32; 3] = [dim as u32, batch as u32, eps.to_bits()];
+        let params_buf = self.pool.get_uniform(
+            &self.device,
+            &self.queue,
+            bytemuck::cast_slice(&params),
+        );
+
+        let layout_entries = Self::standard_layout();
+        self.cache.with_pipeline(
+            &self.device,
+            "batched_rmsnorm",
+            BATCHED_RMSNORM_SHADER,
+            "batched_rmsnorm",
+            &layout_entries,
+            |cached| {
+                let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: None,
+                    layout: &cached.layout,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: input_buf.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: weight_buf.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 2,
+                            resource: output_buf.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 3,
+                            resource: params_buf.as_entire_binding(),
+                        },
+                    ],
+                });
+
+                let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some("rmsnorm"),
+                    timestamp_writes: None,
+                });
+                pass.set_pipeline(&cached.pipeline);
+                pass.set_bind_group(0, &bind_group, &[]);
+                pass.dispatch_workgroups(batch as u32, 1, 1);
+            },
+        );
+
+        self.pool.return_uniform(params_buf);
+    }
+
+    /// Enqueue a batched_rope compute pass into an existing command encoder.
+    fn enqueue_rope(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        input_buf: &wgpu::Buffer,
+        output_buf: &wgpu::Buffer,
+        num_heads: usize,
+        head_dim: usize,
+        pos: usize,
+        theta: f32,
+    ) {
+        let params: [u32; 5] = [
+            num_heads as u32,
+            head_dim as u32,
+            1u32, // seq_len = 1 for single-token
+            pos as u32,
+            theta.to_bits(),
+        ];
+        let params_buf = self.pool.get_uniform(
+            &self.device,
+            &self.queue,
+            bytemuck::cast_slice(&params),
+        );
+
+        let layout_entries = Self::single_input_layout();
+        self.cache.with_pipeline(
+            &self.device,
+            "batched_rope",
+            BATCHED_ROPE_SHADER,
+            "batched_rope",
+            &layout_entries,
+            |cached| {
+                let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: None,
+                    layout: &cached.layout,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: input_buf.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: output_buf.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 2,
+                            resource: params_buf.as_entire_binding(),
+                        },
+                    ],
+                });
+
+                let half = (head_dim / 2) as u32;
+                let dispatch_x = (num_heads as u32 * half).div_ceil(64);
+
+                let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some("rope"),
+                    timestamp_writes: None,
+                });
+                pass.set_pipeline(&cached.pipeline);
+                pass.set_bind_group(0, &bind_group, &[]);
+                pass.dispatch_workgroups(dispatch_x, 1, 1);
+            },
+        );
+
+        self.pool.return_uniform(params_buf);
+    }
+
+    /// Enqueue a silu_mul compute pass into an existing command encoder.
+    fn enqueue_silu_mul(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        gate_buf: &wgpu::Buffer,
+        up_buf: &wgpu::Buffer,
+        output_buf: &wgpu::Buffer,
+        size: usize,
+    ) {
+        let params: [u32; 1] = [size as u32];
+        let params_buf = self.pool.get_uniform(
+            &self.device,
+            &self.queue,
+            bytemuck::cast_slice(&params),
+        );
+
+        let layout_entries = Self::standard_layout();
+        self.cache.with_pipeline(
+            &self.device,
+            "silu_mul",
+            SILU_MUL_SHADER,
+            "silu_mul",
+            &layout_entries,
+            |cached| {
+                let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: None,
+                    layout: &cached.layout,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: gate_buf.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: up_buf.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 2,
+                            resource: output_buf.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 3,
+                            resource: params_buf.as_entire_binding(),
+                        },
+                    ],
+                });
+
+                let dispatch_x = (size as u32).div_ceil(256);
+                let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some("silu_mul"),
+                    timestamp_writes: None,
+                });
+                pass.set_pipeline(&cached.pipeline);
+                pass.set_bind_group(0, &bind_group, &[]);
+                pass.dispatch_workgroups(dispatch_x, 1, 1);
+            },
+        );
+
+        self.pool.return_uniform(params_buf);
+    }
+
+    /// Enqueue an add_residual compute pass: x[i] += residual[i].
+    fn enqueue_add_residual(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        residual_buf: &wgpu::Buffer,
+        x_buf: &wgpu::Buffer,
+        size: usize,
+    ) {
+        let params: [u32; 1] = [size as u32];
+        let params_buf = self.pool.get_uniform(
+            &self.device,
+            &self.queue,
+            bytemuck::cast_slice(&params),
+        );
+
+        let layout_entries = Self::single_input_layout();
+        self.cache.with_pipeline(
+            &self.device,
+            "add_residual",
+            ADD_RESIDUAL_SHADER,
+            "add_residual",
+            &layout_entries,
+            |cached| {
+                let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: None,
+                    layout: &cached.layout,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: residual_buf.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: x_buf.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 2,
+                            resource: params_buf.as_entire_binding(),
+                        },
+                    ],
+                });
+
+                let dispatch_x = (size as u32).div_ceil(256);
+                let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some("add_residual"),
+                    timestamp_writes: None,
+                });
+                pass.set_pipeline(&cached.pipeline);
+                pass.set_bind_group(0, &bind_group, &[]);
+                pass.dispatch_workgroups(dispatch_x, 1, 1);
+            },
+        );
+
+        self.pool.return_uniform(params_buf);
+    }
+
+    /// Enqueue attention using GPU-resident KV cache for a single query head.
+    fn enqueue_attention_head(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        q_buf: &wgpu::Buffer,
+        q_offset_bytes: u64,
+        k_cache_buf: &wgpu::Buffer,
+        v_cache_buf: &wgpu::Buffer,
+        output_buf: &wgpu::Buffer,
+        out_offset_bytes: u64,
+        head_dim: usize,
+        seq_len: usize,
+        num_kv_heads: usize,
+        kv_head_idx: usize,
+    ) {
+        let scale = 1.0_f32 / (head_dim as f32).sqrt();
+        let params_data: [u32; 5] = [
+            seq_len as u32,
+            head_dim as u32,
+            scale.to_bits(),
+            num_kv_heads as u32,
+            kv_head_idx as u32,
+        ];
+        let params_buf = self.pool.get_uniform(
+            &self.device,
+            &self.queue,
+            bytemuck::cast_slice(&params_data),
+        );
+
+        // We need per-head slices. Use buffer binding with offset and size.
+        let q_head_size = (head_dim * 4) as u64;
+        let out_head_size = (head_dim * 4) as u64;
+
+        let layout_entries = Self::attention_layout();
+        self.cache.with_pipeline(
+            &self.device,
+            "attention_scores",
+            ATTENTION_SHADER,
+            "attention_scores",
+            &layout_entries,
+            |cached| {
+                let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: None,
+                    layout: &cached.layout,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                                buffer: q_buf,
+                                offset: q_offset_bytes,
+                                size: std::num::NonZeroU64::new(q_head_size),
+                            }),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: k_cache_buf.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 2,
+                            resource: v_cache_buf.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 3,
+                            resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                                buffer: output_buf,
+                                offset: out_offset_bytes,
+                                size: std::num::NonZeroU64::new(out_head_size),
+                            }),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 4,
+                            resource: params_buf.as_entire_binding(),
+                        },
+                    ],
+                });
+
+                let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some("attention"),
+                    timestamp_writes: None,
+                });
+                pass.set_pipeline(&cached.pipeline);
+                pass.set_bind_group(0, &bind_group, &[]);
+                pass.dispatch_workgroups(1, 1, 1);
+            },
+        );
+
+        self.pool.return_uniform(params_buf);
+    }
+
+    /// GPU-resident single-token forward pass.
+    ///
+    /// Builds ONE command encoder with all compute passes for the entire
+    /// transformer forward pass. Intermediate results stay in GPU storage
+    /// buffers. Only the final logits vector is read back to CPU.
+    ///
+    /// Returns `None` if GPU weights or KV cache are not initialized.
+    ///
+    /// # Arguments
+    /// * `token_id` — input token
+    /// * `pos` — sequence position for RoPE
+    /// * `dim` — hidden dimension
+    /// * `num_heads` — number of query heads
+    /// * `num_kv_heads` — number of key/value heads
+    /// * `head_dim` — dimension per head
+    /// * `intermediate_dim` — FFN intermediate size
+    /// * `vocab_size` — vocabulary size for logits output
+    /// * `rms_norm_eps` — epsilon for RMSNorm
+    /// * `rope_theta` — RoPE base frequency
+    /// * `num_layers` — number of transformer layers
+    /// * `seq_len` — current sequence length (including this token)
+    /// * `token_embedding` — token embedding slice `[dim]`
+    /// * `k_data_per_layer` — mutable slices for writing K back to CPU KV cache
+    /// * `v_data_per_layer` — mutable slices for writing V back to CPU KV cache
+    #[allow(clippy::too_many_arguments)]
+    pub fn forward_single_token_gpu(
+        &self,
+        token_embedding: &[f32],
+        pos: usize,
+        dim: usize,
+        num_heads: usize,
+        num_kv_heads: usize,
+        head_dim: usize,
+        intermediate_dim: usize,
+        vocab_size: usize,
+        rms_norm_eps: f32,
+        rope_theta: f32,
+        num_layers: usize,
+        seq_len: usize,
+    ) -> Vec<f32> {
+        let guard = self.gpu_weights.lock().expect("gpu_weights mutex poisoned");
+        let weights = guard.as_ref().expect("forward_single_token_gpu called without GPU weights");
+        let kv_guard = self.gpu_kv_cache.lock().expect("gpu_kv_cache mutex poisoned");
+        let kv = kv_guard.as_ref().expect("forward_single_token_gpu called without GPU KV cache");
+
+        let kv_dim = num_kv_heads * head_dim;
+        let q_dim = num_heads * head_dim;
+        let heads_per_kv = num_heads / num_kv_heads;
+
+        // Allocate persistent intermediate buffers for the forward pass.
+        // These stay on GPU between compute passes.
+        let x_buf = self.create_intermediate_buffer(dim);
+        let normed_buf = self.create_intermediate_buffer(dim);
+        let q_buf = self.create_intermediate_buffer(q_dim);
+        let k_buf = self.create_intermediate_buffer(kv_dim);
+        let v_buf = self.create_intermediate_buffer(kv_dim);
+        let q_rope_buf = self.create_intermediate_buffer(q_dim);
+        let k_rope_buf = self.create_intermediate_buffer(kv_dim);
+        let attn_out_buf = self.create_intermediate_buffer(q_dim);
+        let attn_proj_buf = self.create_intermediate_buffer(dim);
+        let ffn_normed_buf = self.create_intermediate_buffer(dim);
+        let gate_buf = self.create_intermediate_buffer(intermediate_dim);
+        let up_buf = self.create_intermediate_buffer(intermediate_dim);
+        let silu_buf = self.create_intermediate_buffer(intermediate_dim);
+        let ffn_out_buf = self.create_intermediate_buffer(dim);
+        let final_normed_buf = self.create_intermediate_buffer(dim);
+        let logits_buf = self.create_intermediate_buffer(vocab_size);
+
+        // Upload token embedding to the x buffer
+        self.queue.write_buffer(&x_buf, 0, bytemuck::cast_slice(token_embedding));
+
+        // Build a single command encoder for the entire forward pass.
+        let mut encoder = self.device.create_command_encoder(
+            &wgpu::CommandEncoderDescriptor { label: Some("forward_gpu") },
+        );
+
+        for layer_idx in 0..num_layers {
+            let layer = &weights.layers[layer_idx];
+
+            // --- Attention block ---
+
+            // 1. RMSNorm(x) -> normed
+            self.enqueue_rmsnorm(
+                &mut encoder,
+                &x_buf,
+                &layer.attn_norm,
+                &normed_buf,
+                dim,
+                1,
+                rms_norm_eps,
+            );
+
+            // 2. Q/K/V projections: dequant_matvec(weight, normed) -> q/k/v
+            self.enqueue_dequant_matvec(&mut encoder, &layer.wq, &normed_buf, &q_buf);
+            self.enqueue_dequant_matvec(&mut encoder, &layer.wk, &normed_buf, &k_buf);
+            self.enqueue_dequant_matvec(&mut encoder, &layer.wv, &normed_buf, &v_buf);
+
+            // 3. RoPE: apply to Q and K separately
+            self.enqueue_rope(
+                &mut encoder,
+                &q_buf,
+                &q_rope_buf,
+                num_heads,
+                head_dim,
+                pos,
+                rope_theta,
+            );
+            self.enqueue_rope(
+                &mut encoder,
+                &k_buf,
+                &k_rope_buf,
+                num_kv_heads,
+                head_dim,
+                pos,
+                rope_theta,
+            );
+
+            // 4. Write K/V to GPU KV cache.
+            //    We need to submit what we have so far to get K/V data, then copy
+            //    from k_rope_buf/v_buf to the KV cache buffers via encoder.
+            //    Actually we can use copy_buffer_to_buffer for the KV cache write.
+            let ring_pos = pos % kv.max_seq_len;
+            let kv_byte_offset = (ring_pos * kv_dim * 4) as u64;
+            let kv_copy_size = (kv_dim * 4) as u64;
+            encoder.copy_buffer_to_buffer(
+                &k_rope_buf,
+                0,
+                kv.key_buf(layer_idx),
+                kv_byte_offset,
+                kv_copy_size,
+            );
+            encoder.copy_buffer_to_buffer(
+                &v_buf,
+                0,
+                kv.val_buf(layer_idx),
+                kv_byte_offset,
+                kv_copy_size,
+            );
+
+            // 5. Grouped-query attention using GPU KV cache.
+            //    For each query head, dispatch the attention shader.
+            for h in 0..num_heads {
+                let kv_head = h / heads_per_kv;
+                self.enqueue_attention_head(
+                    &mut encoder,
+                    &q_rope_buf,
+                    (h * head_dim * 4) as u64,
+                    kv.key_buf(layer_idx),
+                    kv.val_buf(layer_idx),
+                    &attn_out_buf,
+                    (h * head_dim * 4) as u64,
+                    head_dim,
+                    seq_len,
+                    num_kv_heads,
+                    kv_head,
+                );
+            }
+
+            // 6. Output projection: wo @ attn_out -> attn_proj
+            self.enqueue_dequant_matvec(&mut encoder, &layer.wo, &attn_out_buf, &attn_proj_buf);
+
+            // 7. Optional post-attention RMSNorm (Gemma 2)
+            if let Some(ref post_norm_buf) = layer.post_attn_norm {
+                // Reuse ffn_normed_buf as temp for post-norm result
+                self.enqueue_rmsnorm(
+                    &mut encoder,
+                    &attn_proj_buf,
+                    post_norm_buf,
+                    &ffn_normed_buf,
+                    dim,
+                    1,
+                    rms_norm_eps,
+                );
+                // Add the post-normed result to x instead
+                self.enqueue_add_residual(&mut encoder, &ffn_normed_buf, &x_buf, dim);
+            } else {
+                // 8. Residual: x += attn_proj
+                self.enqueue_add_residual(&mut encoder, &attn_proj_buf, &x_buf, dim);
+            }
+
+            // --- FFN block ---
+
+            // 9. RMSNorm(x) -> ffn_normed
+            self.enqueue_rmsnorm(
+                &mut encoder,
+                &x_buf,
+                &layer.ffn_norm,
+                &ffn_normed_buf,
+                dim,
+                1,
+                rms_norm_eps,
+            );
+
+            // 10. Gate and up projections
+            self.enqueue_dequant_matvec(&mut encoder, &layer.w_gate, &ffn_normed_buf, &gate_buf);
+            self.enqueue_dequant_matvec(&mut encoder, &layer.w_up, &ffn_normed_buf, &up_buf);
+
+            // 11. SiLU(gate) * up -> silu_buf
+            self.enqueue_silu_mul(&mut encoder, &gate_buf, &up_buf, &silu_buf, intermediate_dim);
+
+            // 12. Down projection
+            self.enqueue_dequant_matvec(&mut encoder, &layer.w_down, &silu_buf, &ffn_out_buf);
+
+            // 13. Optional post-FFN RMSNorm (Gemma 2)
+            if let Some(ref post_norm_buf) = layer.post_ffn_norm {
+                self.enqueue_rmsnorm(
+                    &mut encoder,
+                    &ffn_out_buf,
+                    post_norm_buf,
+                    &normed_buf, // reuse normed_buf as temp
+                    dim,
+                    1,
+                    rms_norm_eps,
+                );
+                self.enqueue_add_residual(&mut encoder, &normed_buf, &x_buf, dim);
+            } else {
+                // 14. Residual: x += ffn_out
+                self.enqueue_add_residual(&mut encoder, &ffn_out_buf, &x_buf, dim);
+            }
+        }
+
+        // --- Final output ---
+
+        // 15. Final RMSNorm
+        self.enqueue_rmsnorm(
+            &mut encoder,
+            &x_buf,
+            &weights.output_norm,
+            &final_normed_buf,
+            dim,
+            1,
+            rms_norm_eps,
+        );
+
+        // 16. Output logits: output_weight @ final_normed -> logits
+        //     output_weight is f32, so use the batched_matvec shader.
+        {
+            let params: [u32; 3] = [vocab_size as u32, dim as u32, 1u32];
+            let params_buf = self.pool.get_uniform(
+                &self.device,
+                &self.queue,
+                bytemuck::cast_slice(&params),
+            );
+
+            let layout_entries = Self::standard_layout();
+            self.cache.with_pipeline(
+                &self.device,
+                "batched_matvec",
+                BATCHED_MATVEC_SHADER,
+                "batched_matvec",
+                &layout_entries,
+                |cached| {
+                    let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                        label: None,
+                        layout: &cached.layout,
+                        entries: &[
+                            wgpu::BindGroupEntry {
+                                binding: 0,
+                                resource: weights.output_weight.as_entire_binding(),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 1,
+                                resource: final_normed_buf.as_entire_binding(),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 2,
+                                resource: logits_buf.as_entire_binding(),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 3,
+                                resource: params_buf.as_entire_binding(),
+                            },
+                        ],
+                    });
+
+                    let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                        label: Some("logits_matvec"),
+                        timestamp_writes: None,
+                    });
+                    pass.set_pipeline(&cached.pipeline);
+                    pass.set_bind_group(0, &bind_group, &[]);
+                    pass.dispatch_workgroups(vocab_size as u32, 1, 1);
+                },
+            );
+
+            self.pool.return_uniform(params_buf);
+        }
+
+        // 17. Readback only the logits
+        let logits_size = (vocab_size * 4) as u64;
+        let staging = self.pool.get_staging(&self.device, logits_size);
+        encoder.copy_buffer_to_buffer(&logits_buf, 0, &staging, 0, logits_size);
+
+        // Submit the ENTIRE forward pass as ONE command buffer.
+        self.queue.submit(Some(encoder.finish()));
+
+        // Map and read back logits
+        let slice = staging.slice(..);
+        let (sender, receiver) = std::sync::mpsc::channel();
+        slice.map_async(wgpu::MapMode::Read, move |result| {
+            sender.send(result).ok();
+        });
+        self.device.poll(wgpu::Maintain::Wait);
+        receiver
+            .recv()
+            .expect("GPU readback channel closed")
+            .expect("GPU readback failed");
+
+        let data = slice.get_mapped_range();
+        let logits: Vec<f32> = bytemuck::cast_slice(&data).to_vec();
+        drop(data);
+        staging.unmap();
+        self.pool.return_staging(staging);
+
+        logits
+    }
 }
 
 impl ComputeBackend for WebGpuBackend {
@@ -2987,6 +3930,74 @@ impl ComputeBackend for WebGpuBackend {
 
     fn pipeline_cache_data(&self) -> Vec<u8> {
         self.get_pipeline_cache_bytes()
+    }
+
+    fn supports_gpu_forward(&self) -> bool {
+        true
+    }
+
+    #[allow(clippy::type_complexity)]
+    fn upload_weights_to_gpu(
+        &self,
+        raw_layers: &[flare_core::model::RawLayerWeights],
+        layer_norms: &[(
+            &[f32],
+            &[f32],
+            Option<&[f32]>,
+            Option<&[f32]>,
+        )],
+        output_norm: &[f32],
+        output_weight: &[f32],
+        token_embedding: &[f32],
+    ) {
+        WebGpuBackend::upload_weights_to_gpu(
+            self,
+            raw_layers,
+            layer_norms,
+            output_norm,
+            output_weight,
+            token_embedding,
+        );
+    }
+
+    fn has_gpu_weights(&self) -> bool {
+        WebGpuBackend::has_gpu_weights(self)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn forward_single_token_gpu(
+        &self,
+        token_embedding: &[f32],
+        pos: usize,
+        dim: usize,
+        num_heads: usize,
+        num_kv_heads: usize,
+        head_dim: usize,
+        intermediate_dim: usize,
+        vocab_size: usize,
+        rms_norm_eps: f32,
+        rope_theta: f32,
+        num_layers: usize,
+        seq_len: usize,
+    ) -> Option<Vec<f32>> {
+        if !WebGpuBackend::has_gpu_weights(self) || !self.has_gpu_kv_cache() {
+            return None;
+        }
+        Some(WebGpuBackend::forward_single_token_gpu(
+            self,
+            token_embedding,
+            pos,
+            dim,
+            num_heads,
+            num_kv_heads,
+            head_dim,
+            intermediate_dim,
+            vocab_size,
+            rms_norm_eps,
+            rope_theta,
+            num_layers,
+            seq_len,
+        ))
     }
 }
 

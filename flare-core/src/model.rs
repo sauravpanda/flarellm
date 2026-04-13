@@ -377,6 +377,73 @@ pub trait ComputeBackend: Send + Sync {
     fn pipeline_cache_data(&self) -> Vec<u8> {
         Vec::new()
     }
+
+    /// Returns `true` if this backend supports GPU-resident forward pass.
+    ///
+    /// When true, `forward_single_token_gpu` can be called to run the entire
+    /// transformer forward pass in a single GPU command encoder submission.
+    fn supports_gpu_forward(&self) -> bool {
+        false
+    }
+
+    /// Upload all model weights to persistent GPU buffers.
+    ///
+    /// After this call, GPU-resident forward passes avoid per-token weight
+    /// uploads. Only called on backends where `supports_dequant_matmul` is true.
+    ///
+    /// # Arguments
+    /// * `raw_layers` — per-layer raw quantized weight matrices
+    /// * `layer_norms` — per-layer norm weight slices (attn_norm, ffn_norm, post_attn_norm, post_ffn_norm)
+    /// * `output_norm` — final RMSNorm weights
+    /// * `output_weight` — output projection (lm_head) f32 weights
+    /// * `token_embedding` — token embedding table f32 data
+    #[allow(clippy::type_complexity)]
+    fn upload_weights_to_gpu(
+        &self,
+        _raw_layers: &[RawLayerWeights],
+        _layer_norms: &[(
+            &[f32],
+            &[f32],
+            Option<&[f32]>,
+            Option<&[f32]>,
+        )],
+        _output_norm: &[f32],
+        _output_weight: &[f32],
+        _token_embedding: &[f32],
+    ) {
+    }
+
+    /// Returns `true` if GPU-resident weights have been uploaded.
+    fn has_gpu_weights(&self) -> bool {
+        false
+    }
+
+    /// GPU-resident single-token forward pass.
+    ///
+    /// Builds ONE command encoder with all compute passes for the entire
+    /// transformer. Intermediate results stay in GPU storage buffers with no
+    /// CPU readback until the final logits vector.
+    ///
+    /// Returns `None` if GPU weights/KV cache are not initialized, or the
+    /// backend does not support GPU-resident forward.
+    #[allow(clippy::too_many_arguments)]
+    fn forward_single_token_gpu(
+        &self,
+        _token_embedding: &[f32],
+        _pos: usize,
+        _dim: usize,
+        _num_heads: usize,
+        _num_kv_heads: usize,
+        _head_dim: usize,
+        _intermediate_dim: usize,
+        _vocab_size: usize,
+        _rms_norm_eps: f32,
+        _rope_theta: f32,
+        _num_layers: usize,
+        _seq_len: usize,
+    ) -> Option<Vec<f32>> {
+        None
+    }
 }
 
 /// Default CPU compute backend. Uses optimized scalar loops.
@@ -522,6 +589,49 @@ impl Model {
         self.raw_weights = Some(raw);
     }
 
+    /// Upload all model weights to persistent GPU buffers.
+    ///
+    /// This must be called after `set_backend` and `set_raw_weights`.
+    /// After this call, `forward()` will automatically use the GPU-resident
+    /// path: a single command encoder submission with no intermediate CPU
+    /// readback, reading logits only at the end.
+    pub fn upload_weights_to_gpu(&self) {
+        if !self.backend.supports_gpu_forward() {
+            return;
+        }
+        let raw = match &self.raw_weights {
+            Some(r) => r,
+            None => return,
+        };
+
+        let layer_norms: Vec<(
+            &[f32],
+            &[f32],
+            Option<&[f32]>,
+            Option<&[f32]>,
+        )> = self
+            .weights
+            .layers
+            .iter()
+            .map(|l| {
+                (
+                    l.attn_norm.data(),
+                    l.ffn_norm.data(),
+                    l.post_attn_norm.as_ref().map(|t| t.data()),
+                    l.post_ffn_norm.as_ref().map(|t| t.data()),
+                )
+            })
+            .collect();
+
+        self.backend.upload_weights_to_gpu(
+            raw,
+            &layer_norms,
+            self.weights.output_norm.data(),
+            self.weights.output_weight.data(),
+            self.weights.token_embedding.data(),
+        );
+    }
+
     /// Remove raw weights, reverting to the f32 weight path.
     pub fn clear_raw_weights(&mut self) {
         self.raw_weights = None;
@@ -587,6 +697,47 @@ impl Model {
         let num_heads = config.num_heads;
         let num_kv_heads = config.num_kv_heads;
         let kv_dim = num_kv_heads * head_dim;
+
+        // --- GPU-resident fast path ---
+        // When GPU weights are uploaded, run the entire forward pass with a single
+        // command encoder submission. Only the final logits are read back to CPU.
+        // This avoids ~90+ CPU↔GPU round-trips per token.
+        if self.backend.has_gpu_weights() && self.backend.has_gpu_kv_cache() {
+            let embed_data = self.weights.token_embedding.data();
+            let embed_offset = token_id as usize * dim;
+            let token_embed = &embed_data[embed_offset..embed_offset + dim];
+            let seq_len = self.kv_cache.len() + 1;
+
+            if let Some(mut logits) = self.backend.forward_single_token_gpu(
+                token_embed,
+                pos,
+                dim,
+                num_heads,
+                num_kv_heads,
+                head_dim,
+                config.intermediate_dim,
+                config.vocab_size,
+                config.rms_norm_eps,
+                config.rope_theta,
+                config.num_layers,
+                seq_len,
+            ) {
+                // Advance KV cache position counter
+                self.kv_cache.advance();
+
+                // Gemma 2: apply final logit soft-cap
+                if config.final_logit_softcap > 0.0 {
+                    let cap = config.final_logit_softcap;
+                    for l in &mut logits {
+                        *l = (*l / cap).tanh() * cap;
+                    }
+                }
+
+                return Tensor::from_vec(logits, &[config.vocab_size]).unwrap();
+            }
+        }
+
+        // --- Fallback: per-operation GPU dispatch or CPU path ---
 
         // Token embedding lookup
         let embed_data = self.weights.token_embedding.data();
