@@ -26,6 +26,7 @@ fn make_model() -> Model {
         rms_norm_eps: 1e-5,
         attn_logit_softcap: 0.0,
         final_logit_softcap: 0.0,
+        kv_cache_bits: 32,
     };
 
     let w = |n: usize| -> Vec<f32> { (0..n).map(|i| ((i % 7) as f32 - 3.0) * 0.1).collect() };
