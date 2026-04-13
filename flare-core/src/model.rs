@@ -655,9 +655,17 @@ impl Model {
     /// Returns the previous backend.
     pub fn set_backend(&mut self, backend: Box<dyn ComputeBackend>) -> Box<dyn ComputeBackend> {
         let old = std::mem::replace(&mut self.backend, backend);
+        // Cap GPU KV cache to fit within wgpu max_storage_buffer_binding_size
+        // (128 MB). Each KV buffer is max_seq_len × num_kv_heads × head_dim × 4 bytes.
+        let bytes_per_pos = self.config.num_kv_heads * self.config.head_dim * 4;
+        let max_gpu_seq = if bytes_per_pos > 0 {
+            (128 * 1024 * 1024 / bytes_per_pos).min(self.config.max_seq_len)
+        } else {
+            self.config.max_seq_len
+        };
         self.backend.init_gpu_kv_cache(
             self.config.num_layers,
-            self.config.max_seq_len,
+            max_gpu_seq,
             self.config.num_kv_heads,
             self.config.head_dim,
         );
@@ -1254,7 +1262,10 @@ impl Model {
             self.backend
                 .rmsnorm_vec(last_x, self.weights.output_norm.data(), config.rms_norm_eps);
 
-        let mut logits = self.backend.matvec(
+        // Use the CPU SIMD matvec directly for the output projection.
+        // The output weight matrix can exceed GPU buffer limits for large vocabs
+        // (e.g. 128K vocab × 2048 dim × 4 bytes > 1GB), so bypass the backend.
+        let mut logits = matvec(
             self.weights.output_weight.data(),
             &normed_final,
             config.vocab_size,

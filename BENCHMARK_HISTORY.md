@@ -169,3 +169,68 @@ Baseline model: SmolLM2-135M-Instruct Q8_0 (138MB, 30 layers, dim=576).
 | Decode (256 tok) | 1.1 |
 | Sustained (512 tok) | **1.2** |
 
+### 2026-04-13 15:12 — `86f6afe Fix WGSL shader builtin errors and GGUF raw weight dimens...`
+
+**Hardware:** Apple M5 Pro, ARM64 (NEON SIMD)  
+**Model:** Llama, ~162M params, 30 layers, dim=576  
+**Load time:** 0.09s
+
+| Metric | tok/s |
+|---|---|
+| Decode (16 tok) | 1.4 |
+| Decode (64 tok) | 1.4 |
+| Decode (256 tok) | 1.2 |
+| Sustained (512 tok) | **1.2** |
+
+### 2026-04-13 15:21 — `af233e4 Merge pull request #375 from sauravpanda/gpu-resident-for...`
+
+**Hardware:** Apple M5 Pro, ARM64 (NEON SIMD)  
+**Model:** Llama, ~162M params, 30 layers, dim=576  
+**Load time:** 0.10s
+
+| Metric | tok/s |
+|---|---|
+| Decode (16 tok) | 7.8 |
+| Decode (64 tok) | 8.1 |
+| Decode (256 tok) | 7.6 |
+| Sustained (512 tok) | **6.8** |
+
+### 2026-04-13 15:22 — `af233e4 Merge pull request #375 from sauravpanda/gpu-resident-for...`
+
+**Hardware:** Apple M5 Pro, ARM64 (NEON SIMD)  
+**Model:** Llama, ~162M params, 30 layers, dim=576  
+**Load time:** 0.09s
+
+| Metric | tok/s |
+|---|---|
+| Decode (16 tok) | 139.5 |
+| Decode (64 tok) | 137.3 |
+| Decode (256 tok) | 122.1 |
+| Sustained (512 tok) | **105.0** |
+
+### 2026-04-13 15:23 — `af233e4 Merge pull request #375 from sauravpanda/gpu-resident-for...`
+
+**Hardware:** Apple M5 Pro, ARM64 (NEON SIMD)  
+**Model:** Llama, ~1498M params, 16 layers, dim=2048  
+**Load time:** 0.92s
+
+| Metric | tok/s |
+|---|---|
+| Decode (16 tok) | 25.8 |
+| Decode (64 tok) | 25.8 |
+| Decode (256 tok) | 25.0 |
+| Sustained (512 tok) | **24.2** |
+
+### 2026-04-13 15:41 — `ccad363 Merge pull request #377 from sauravpanda/fix-buffer-shard...`
+
+**Hardware:** Apple M5 Pro, ARM64 (NEON SIMD)  
+**Model:** Llama, ~1498M params, 16 layers, dim=2048  
+**Load time:** 0.90s
+
+| Metric | tok/s |
+|---|---|
+| Decode (16 tok) | 2.9 |
+| Decode (64 tok) | 2.8 |
+| Decode (256 tok) | 2.7 |
+| Sustained (512 tok) | **2.5** |
+

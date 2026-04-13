@@ -192,7 +192,11 @@ impl WebGpuBackend {
                 &wgpu::DeviceDescriptor {
                     label: Some("flare-gpu"),
                     required_features: extra_features,
-                    required_limits: wgpu::Limits::default(),
+                    required_limits: wgpu::Limits {
+                        max_buffer_size: 1 << 30,                     // 1 GiB
+                        max_storage_buffer_binding_size: 1 << 30,     // 1 GiB
+                        ..wgpu::Limits::default()
+                    },
                     ..Default::default()
                 },
                 None,
@@ -2339,9 +2343,13 @@ impl WebGpuBackend {
 
         let row_bytes = num_cols * std::mem::size_of::<f32>();
         let max_rows_per_shard = Self::MAX_BUFFER_BYTES / row_bytes;
-        // Ensure at least one row per shard (a single row should always fit
+        // Round down to multiple of 64 rows so that shard byte offsets
+        // (row_offset * 4) satisfy the 256-byte alignment required by
+        // min_storage_buffer_offset_alignment.
+        let max_rows_per_shard = (max_rows_per_shard / 64) * 64;
+        // Ensure at least 64 rows per shard (a single row should always fit
         // for any realistic model dimension).
-        let max_rows_per_shard = max_rows_per_shard.max(1);
+        let max_rows_per_shard = max_rows_per_shard.max(64);
 
         let mut shards = Vec::new();
         let mut row_offset = 0usize;
