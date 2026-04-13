@@ -117,3 +117,42 @@ Baseline model: SmolLM2-135M-Instruct Q8_0 (138MB, 30 layers, dim=576).
 | Decode (256 tok) | 23.1 |
 | Sustained (512 tok) | **20.2** |
 
+### 2026-04-13 12:34 — `46b0840 Add doc-tests for flare-core public API (closes #362) (#365)`
+
+**Hardware:** Apple M5 Pro, ARM64 (NEON SIMD)  
+**Model:** Llama, ~162M params, 30 layers, dim=576  
+**Load time:** 0.10s
+
+| Metric | tok/s |
+|---|---|
+| Decode (16 tok) | 148.4 |
+| Decode (64 tok) | 143.6 |
+| Decode (256 tok) | 117.5 |
+| Sustained (512 tok) | **111.2** |
+
+### 2026-04-13 12:34 — `46b0840 Add doc-tests for flare-core public API (closes #362) (#365)`
+
+**Hardware:** Apple M5 Pro, ARM64 (NEON SIMD)  
+**Model:** Llama, ~162M params, 30 layers, dim=576  
+**Load time:** 0.10s
+
+| Metric | tok/s |
+|---|---|
+| Decode (16 tok) | 148.3 |
+| Decode (64 tok) | 144.6 |
+| Decode (256 tok) | 129.8 |
+| Sustained (512 tok) | **105.9** |
+
+### 2026-04-13 13:06 — `b22e91f Merge remote-tracking branch 'origin/worktree-feat-top-k-...`
+
+**Hardware:** Apple M5 Pro, ARM64 (NEON SIMD)  
+**Model:** Llama, ~162M params, 30 layers, dim=576  
+**Load time:** 0.12s
+
+| Metric | tok/s |
+|---|---|
+| Decode (16 tok) | 155.0 |
+| Decode (64 tok) | 151.7 |
+| Decode (256 tok) | 134.5 |
+| Sustained (512 tok) | **116.7** |
+

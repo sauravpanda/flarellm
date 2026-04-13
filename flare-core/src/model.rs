@@ -703,14 +703,6 @@ impl Model {
                 attn_proj
             };
 
-            // Gemma 2: apply post-attention RMSNorm before the residual add
-            let attn_contrib = if let Some(ref post_norm) = layer.post_attn_norm {
-                self.backend
-                    .rmsnorm_vec(&attn_proj, post_norm.data(), config.rms_norm_eps)
-            } else {
-                attn_proj
-            };
-
             // Residual connection
             let x_data = x.data_mut();
             for i in 0..dim {
@@ -757,14 +749,6 @@ impl Model {
                     dim,
                     config.intermediate_dim,
                 )
-            };
-
-            // Gemma 2: apply post-FFN RMSNorm before the residual add
-            let ffn_contrib = if let Some(ref post_norm) = layer.post_ffn_norm {
-                self.backend
-                    .rmsnorm_vec(&ffn_out, post_norm.data(), config.rms_norm_eps)
-            } else {
-                ffn_out
             };
 
             // Gemma 2: apply post-FFN RMSNorm before the residual add
