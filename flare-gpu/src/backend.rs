@@ -88,15 +88,31 @@ struct GpuLayerWeights {
     post_ffn_norm: Option<wgpu::Buffer>,
 }
 
+/// A single shard of a large f32 matrix, stored row-major on the GPU.
+///
+/// Used to split buffers that would exceed wgpu's 256 MB per-buffer limit
+/// (e.g. output_weight for models with large vocabularies).
+struct GpuF32Shard {
+    buf: wgpu::Buffer,
+    /// Number of complete rows in this shard.
+    num_rows: usize,
+    /// Row offset within the full (unsplit) matrix.
+    row_offset: usize,
+}
+
 /// All model weights uploaded to GPU once.
 #[allow(dead_code)]
 struct GpuResidentWeights {
     layers: Vec<GpuLayerWeights>,
     output_norm: wgpu::Buffer,
     /// Output projection (lm_head): kept as f32 on GPU.
-    output_weight: wgpu::Buffer,
+    /// Sharded into multiple buffers to stay under the 256 MB device limit.
+    output_weight_shards: Vec<GpuF32Shard>,
+    /// Number of columns (== dim) in the output weight matrix.
+    output_weight_cols: usize,
     /// Token embedding table: kept as f32 on GPU for embedding lookup.
-    token_embedding: wgpu::Buffer,
+    /// Sharded for the same reason.
+    token_embedding_shards: Vec<GpuF32Shard>,
 }
 
 /// WebGPU/wgpu compute backend.
@@ -2306,6 +2322,55 @@ impl WebGpuBackend {
         })
     }
 
+    /// Maximum bytes per GPU buffer.  wgpu's default `max_buffer_size` is 256 MiB.
+    /// We leave a small margin so row-alignment never pushes us over.
+    const MAX_BUFFER_BYTES: usize = 256 * 1024 * 1024 - 4096; // ~256 MB minus 4 KiB headroom
+
+    /// Upload a row-major f32 matrix, splitting it into multiple GPU buffers
+    /// ("shards") as needed so that no single buffer exceeds the wgpu 256 MB
+    /// device limit.  Each shard contains a whole number of rows.
+    fn upload_f32_matrix_sharded(
+        &self,
+        data: &[f32],
+        num_rows: usize,
+        num_cols: usize,
+    ) -> Vec<GpuF32Shard> {
+        assert_eq!(data.len(), num_rows * num_cols, "data length mismatch");
+
+        let row_bytes = num_cols * std::mem::size_of::<f32>();
+        let max_rows_per_shard = Self::MAX_BUFFER_BYTES / row_bytes;
+        // Ensure at least one row per shard (a single row should always fit
+        // for any realistic model dimension).
+        let max_rows_per_shard = max_rows_per_shard.max(1);
+
+        let mut shards = Vec::new();
+        let mut row_offset = 0usize;
+        while row_offset < num_rows {
+            let shard_rows = (num_rows - row_offset).min(max_rows_per_shard);
+            let start = row_offset * num_cols;
+            let end = start + shard_rows * num_cols;
+            let buf = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("gpu_f32_shard"),
+                contents: bytemuck::cast_slice(&data[start..end]),
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            });
+            shards.push(GpuF32Shard {
+                buf,
+                num_rows: shard_rows,
+                row_offset,
+            });
+            row_offset += shard_rows;
+        }
+
+        log::debug!(
+            "flare-gpu: sharded {}×{} f32 matrix into {} buffer(s)",
+            num_rows,
+            num_cols,
+            shards.len(),
+        );
+        shards
+    }
+
     /// Upload all model weights to persistent GPU buffers (once).
     ///
     /// After this call, `forward_single_token_gpu` avoids all per-token weight
@@ -2341,11 +2406,28 @@ impl WebGpuBackend {
             });
         }
 
+        // output_weight is a (vocab_size × dim) matrix stored row-major.
+        // For large vocabs this exceeds the 256 MB wgpu buffer limit, so we
+        // shard it into multiple GPU buffers.
+        let dim = if raw_layers.is_empty() {
+            // Fallback: infer dim from the norm vector length.
+            output_norm.len()
+        } else {
+            output_norm.len()
+        };
+        let vocab_size = output_weight.len() / dim;
+        let output_weight_shards = self.upload_f32_matrix_sharded(output_weight, vocab_size, dim);
+
+        // token_embedding is also (vocab_size × dim) and can be equally large.
+        let emb_rows = token_embedding.len() / dim;
+        let token_embedding_shards = self.upload_f32_matrix_sharded(token_embedding, emb_rows, dim);
+
         let weights = GpuResidentWeights {
             layers,
             output_norm: self.upload_f32_buffer(output_norm),
-            output_weight: self.upload_f32_buffer(output_weight),
-            token_embedding: self.upload_f32_buffer(token_embedding),
+            output_weight_shards,
+            output_weight_cols: dim,
+            token_embedding_shards,
         };
 
         *self.gpu_weights.lock().expect("gpu_weights mutex poisoned") = Some(weights);
@@ -3081,14 +3163,21 @@ impl WebGpuBackend {
         );
 
         // 16. Output logits: output_weight @ final_normed -> logits
-        //     output_weight is f32, so use the batched_matvec shader.
-        {
-            let params: [u32; 3] = [vocab_size as u32, dim as u32, 1u32];
+        //     output_weight is f32, sharded across multiple GPU buffers.
+        //     We dispatch one batched_matvec per shard, each writing to the
+        //     correct offset within logits_buf.
+        for shard in &weights.output_weight_shards {
+            let shard_rows = shard.num_rows;
+            let params: [u32; 3] = [shard_rows as u32, dim as u32, 1u32];
             let params_buf = self.pool.get_uniform(
                 &self.device,
                 &self.queue,
                 bytemuck::cast_slice(&params),
             );
+
+            // Create a view into logits_buf at the correct row offset.
+            let logit_byte_offset = (shard.row_offset * 4) as u64;
+            let logit_byte_size = (shard_rows * 4) as u64;
 
             let layout_entries = Self::standard_layout();
             self.cache.with_pipeline(
@@ -3104,7 +3193,7 @@ impl WebGpuBackend {
                         entries: &[
                             wgpu::BindGroupEntry {
                                 binding: 0,
-                                resource: weights.output_weight.as_entire_binding(),
+                                resource: shard.buf.as_entire_binding(),
                             },
                             wgpu::BindGroupEntry {
                                 binding: 1,
@@ -3112,7 +3201,11 @@ impl WebGpuBackend {
                             },
                             wgpu::BindGroupEntry {
                                 binding: 2,
-                                resource: logits_buf.as_entire_binding(),
+                                resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                                    buffer: &logits_buf,
+                                    offset: logit_byte_offset,
+                                    size: Some(std::num::NonZeroU64::new(logit_byte_size).unwrap()),
+                                }),
                             },
                             wgpu::BindGroupEntry {
                                 binding: 3,
@@ -3127,7 +3220,7 @@ impl WebGpuBackend {
                     });
                     pass.set_pipeline(&cached.pipeline);
                     pass.set_bind_group(0, &bind_group, &[]);
-                    pass.dispatch_workgroups(vocab_size as u32, 1, 1);
+                    pass.dispatch_workgroups(shard_rows as u32, 1, 1);
                 },
             );
 
