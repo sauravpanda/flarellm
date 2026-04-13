@@ -297,6 +297,7 @@ pub fn infer_model_config_from_safetensors(
         rms_norm_eps: 1e-5,
         attn_logit_softcap: 0.0,
         final_logit_softcap: 0.0,
+        kv_cache_bits: 32,
     })
 }
 

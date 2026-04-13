@@ -302,6 +302,7 @@ impl GgufFile {
             rms_norm_eps,
             attn_logit_softcap,
             final_logit_softcap,
+            kv_cache_bits: 32,
         })
     }
 

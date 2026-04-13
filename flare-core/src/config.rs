@@ -34,6 +34,14 @@ pub struct ModelConfig {
     /// Zero means no capping.
     #[serde(default)]
     pub final_logit_softcap: f32,
+    /// KV cache quantization bits.  Default is 32 (full f32 precision).
+    /// Set to 2 to enable KIVI-style 2-bit quantization for ~8x memory savings.
+    #[serde(default = "default_kv_cache_bits")]
+    pub kv_cache_bits: u8,
+}
+
+fn default_kv_cache_bits() -> u8 {
+    32
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -94,6 +102,7 @@ impl Default for ModelConfig {
             rms_norm_eps: 1e-5,
             attn_logit_softcap: 0.0,
             final_logit_softcap: 0.0,
+            kv_cache_bits: 32,
         }
     }
 }
@@ -119,6 +128,7 @@ mod tests {
             rms_norm_eps: 1e-5,
             attn_logit_softcap: 0.0,
             final_logit_softcap: 0.0,
+            kv_cache_bits: 32,
         }
     }
 

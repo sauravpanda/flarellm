@@ -1,5 +1,5 @@
 use crate::config::{Architecture, ModelConfig};
-use crate::kv_cache::KvCache;
+use crate::kv_cache::{KvCache, QuantizedKvCache};
 use crate::tensor::Tensor;
 
 /// Identifies the quantization format for a raw weight tensor stored on the GPU path.
@@ -555,6 +555,11 @@ pub struct Model {
     /// the single-token `forward` path and CPU fallback.
     raw_weights: Option<Vec<RawLayerWeights>>,
     kv_cache: KvCache,
+    /// Optional 2-bit quantized KV cache (KIVI).  When `Some`, writes go to
+    /// both the full-precision cache (for GPU path compatibility) and the
+    /// quantized cache; reads from the CPU attention path use the quantized
+    /// version for ~8x memory savings on long contexts.
+    quantized_kv_cache: Option<QuantizedKvCache>,
     backend: Box<dyn ComputeBackend>,
 }
 
@@ -566,11 +571,22 @@ impl Model {
             config.num_kv_heads,
             config.head_dim,
         );
+        let quantized_kv_cache = if config.kv_cache_bits == 2 {
+            Some(QuantizedKvCache::new(
+                config.num_layers,
+                config.max_seq_len,
+                config.num_kv_heads,
+                config.head_dim,
+            ))
+        } else {
+            None
+        };
         Self {
             config,
             weights,
             raw_weights: None,
             kv_cache,
+            quantized_kv_cache,
             backend: Box::new(CpuBackend),
         }
     }
@@ -681,6 +697,9 @@ impl Model {
 
     pub fn reset(&mut self) {
         self.kv_cache.clear();
+        if let Some(ref mut qkv) = self.quantized_kv_cache {
+            qkv.clear();
+        }
     }
 
     /// Run a single forward pass for one token position.
@@ -807,6 +826,9 @@ impl Model {
             // Write K, V to CPU cache (always) and GPU cache (if initialized).
             // The GPU write is a host→device queue.write_buffer — no readback.
             self.kv_cache.write(layer_idx, &k_data, &v_data);
+            if let Some(ref mut qkv) = self.quantized_kv_cache {
+                qkv.write(layer_idx, &k_data, &v_data);
+            }
             self.backend
                 .gpu_kv_write(layer_idx, pos, num_kv_heads, head_dim, &k_data, &v_data);
 
@@ -817,6 +839,20 @@ impl Model {
                 self.backend.grouped_query_attention_from_gpu_cache(
                     &q_data,
                     layer_idx,
+                    num_heads,
+                    num_kv_heads,
+                    head_dim,
+                    seq_len,
+                    config.attn_logit_softcap,
+                )
+            } else if let Some(ref qkv) = self.quantized_kv_cache {
+                // Use dequantized KV cache for ~8x memory savings.
+                let dequant_keys = qkv.dequant_keys(layer_idx);
+                let dequant_values = qkv.dequant_values(layer_idx);
+                self.backend.grouped_query_attention(
+                    &q_data,
+                    &dequant_keys,
+                    &dequant_values,
                     num_heads,
                     num_kv_heads,
                     head_dim,
@@ -918,6 +954,9 @@ impl Model {
 
         // Advance KV cache after processing all layers
         self.kv_cache.advance();
+        if let Some(ref mut qkv) = self.quantized_kv_cache {
+            qkv.advance();
+        }
 
         // Final RMSNorm
         let normed = self.backend.rmsnorm_vec(
@@ -1234,6 +1273,9 @@ impl Model {
                 let k_slice = &k_all[layer_idx][t * kv_dim..(t + 1) * kv_dim];
                 let v_slice = &v_all[layer_idx][t * kv_dim..(t + 1) * kv_dim];
                 self.kv_cache.write(layer_idx, k_slice, v_slice);
+                if let Some(ref mut qkv) = self.quantized_kv_cache {
+                    qkv.write(layer_idx, k_slice, v_slice);
+                }
                 self.backend.gpu_kv_write(
                     layer_idx,
                     cache_pos + t,
@@ -1244,6 +1286,9 @@ impl Model {
                 );
             }
             self.kv_cache.advance();
+            if let Some(ref mut qkv) = self.quantized_kv_cache {
+                qkv.advance();
+            }
         }
 
         // Final RMSNorm + output projection on the last token only
@@ -1904,6 +1949,7 @@ mod tests {
             rms_norm_eps: 1e-5,
             attn_logit_softcap: 0.0,
             final_logit_softcap: 0.0,
+            kv_cache_bits: 32,
         };
 
         // Deterministic weight init: w[i] = (i % 7 - 3) * 0.1
@@ -2022,6 +2068,7 @@ mod tests {
             rms_norm_eps: 1e-5,
             attn_logit_softcap: 0.0,
             final_logit_softcap: 0.0,
+            kv_cache_bits: 32,
         };
 
         let dim = 4;
@@ -2100,6 +2147,7 @@ mod tests {
             rms_norm_eps: 1e-5,
             attn_logit_softcap: 0.0,
             final_logit_softcap: 0.0,
+            kv_cache_bits: 32,
         };
 
         let make_w =
