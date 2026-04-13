@@ -9,6 +9,9 @@
 //! Output as JSON (machine-readable, one object per line):
 //!   cargo run -p flarellm-server --example e2e_bench --release -- --json
 //!
+//! Run with GPU (Metal/Vulkan/DX12) acceleration:
+//!   cargo run -p flarellm-server --example e2e_bench --release -- --gpu
+//!
 //! Use a different model via --model flag or MODEL_PATH env var:
 //!   cargo run -p flarellm-server --example e2e_bench --release -- --model path/to/model.gguf
 //!   MODEL_PATH=path/to/model.gguf cargo run -p flarellm-server --example e2e_bench --release
@@ -22,6 +25,7 @@ use std::time::Instant;
 use flare_core::generate::Generator;
 use flare_core::model::Model;
 use flare_core::sampling::SamplingParams;
+use flare_gpu::WebGpuBackend;
 use flare_loader::gguf::GgufFile;
 use flare_loader::weights::load_model_weights;
 
@@ -33,6 +37,7 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
     let log_mode = args.iter().any(|a| a == "--log");
     let json_mode = args.iter().any(|a| a == "--json");
+    let gpu_mode = args.iter().any(|a| a == "--gpu");
 
     // Parse --model <path> flag, falling back to MODEL_PATH env var, then default.
     let model_path = args
@@ -68,6 +73,52 @@ fn main() {
     let mut model = Model::new(config.clone(), weights);
 
     let load_time = load_start.elapsed();
+
+    // --- GPU backend ---
+    let backend_label;
+    if gpu_mode {
+        eprintln!("Initializing GPU backend...");
+        match pollster::block_on(WebGpuBackend::new()) {
+            Ok(gpu) => {
+                backend_label = "GPU (WebGPU/wgpu)".to_string();
+                model.set_backend(Box::new(gpu));
+                eprintln!("GPU backend initialized");
+
+                // Load raw quantized weights for fused dequant+matvec kernels
+                let file2 = File::open(&model_path).expect("Failed to reopen model file");
+                let mut reader2 = BufReader::new(file2);
+                let gguf2 = GgufFile::parse_header(&mut reader2).expect("Failed to reparse GGUF");
+                let num_layers = config.num_layers;
+                let mut raw_layers = Vec::with_capacity(num_layers);
+                let mut all_ok = true;
+
+                for layer_idx in 0..num_layers {
+                    match gguf2.load_raw_layer_weights(&mut reader2, layer_idx) {
+                        Ok(Some(rw)) => raw_layers.push(rw),
+                        _ => {
+                            all_ok = false;
+                            break;
+                        }
+                    }
+                }
+
+                if raw_layers.len() == num_layers {
+                    model.set_raw_weights(raw_layers);
+                    eprintln!("Raw quantized weights loaded for GPU fused kernels");
+                } else if !all_ok {
+                    eprintln!("Warning: could not load raw weights, using f32 path on GPU");
+                }
+            }
+            Err(e) => {
+                eprintln!("Failed to initialize GPU backend: {e}");
+                eprintln!("Falling back to CPU backend");
+                backend_label = "CPU".to_string();
+            }
+        }
+    } else {
+        backend_label = "CPU".to_string();
+    }
+
     let model_info = format!(
         "{:?}, ~{}M params, {} layers, dim={}",
         config.architecture,
@@ -76,6 +127,7 @@ fn main() {
         config.hidden_dim,
     );
     eprintln!("Loaded in {:.2}s ({model_info})", load_time.as_secs_f64());
+    eprintln!("Backend: {backend_label}");
 
     // --- Run benchmarks ---
     let prompt_tokens: Vec<u32> = vec![1, 100, 200, 300, 400, 500];
@@ -133,6 +185,7 @@ fn main() {
         print!("\"date\":\"{date}\",");
         print!("\"commit\":\"{}\",", json_escape(&git_info));
         print!("\"hardware\":\"{}\",", json_escape(&hw));
+        print!("\"backend\":\"{}\",", json_escape(&backend_label));
         print!("\"model\":\"{}\",", json_escape(&model_info));
         print!("\"load_secs\":{:.3},", load_time.as_secs_f64());
         print!("\"prompt_len\":{prompt_len},");
@@ -155,6 +208,7 @@ fn main() {
         println!("Date:     {date}");
         println!("Commit:   {git_info}");
         println!("Hardware: {hw}");
+        println!("Backend:  {backend_label}");
         println!("Model:    {model_info}");
         println!("Load:     {:.2}s", load_time.as_secs_f64());
         println!();
