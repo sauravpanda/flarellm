@@ -1,3 +1,5 @@
+#![allow(clippy::too_many_arguments, clippy::type_complexity)]
+
 use std::sync::Mutex;
 
 use flare_core::model::{ComputeBackend, RawWeight, WeightFormat};

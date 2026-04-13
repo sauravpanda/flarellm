@@ -599,6 +599,7 @@ impl Model {
             None => return,
         };
 
+        #[allow(clippy::type_complexity)]
         let layer_norms: Vec<(&[f32], &[f32], Option<&[f32]>, Option<&[f32]>)> = self
             .weights
             .layers
