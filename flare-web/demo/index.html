@@ -419,7 +419,8 @@
         const bytes = new Uint8Array(buffer);
         await onModelLoaded(FlareEngine.load(bytes), performance.now() - t0, bytes);
       } catch (err) {
-        $modelInfo.textContent = 'Error: ' + err; $modelInfo.classList.add('error');
+        $modelInfo.textContent = 'Error: ' + err;
+        $modelInfo.classList.add('error');
         hideProgress();
       }
     });
@@ -488,7 +489,8 @@
         const eng = FlareEngine.load(bytes);
         await onModelLoaded(eng, performance.now() - t0, bytes);
       } catch (err) {
-        $modelInfo.textContent = 'Error: ' + err; $modelInfo.classList.add('error');
+        $modelInfo.textContent = 'Error: ' + err;
+        $modelInfo.classList.add('error');
         hideProgress();
       } finally { $urlLoad.disabled = false; }
     });
