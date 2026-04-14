@@ -694,7 +694,7 @@
   <script type="module">
     import init, {
       FlareEngine, FlareProgressiveLoader, FlareTokenizer,
-      webgpu_available, supports_webnn, init_thread_pool,
+      webgpu_available, supports_webnn, supports_webtransport, init_thread_pool,
       supports_speech_recognition, supports_speech_synthesis,
       is_model_cached, cache_model, load_cached_model,
       delete_cached_model, list_cached_models, storage_estimate
@@ -1337,7 +1337,8 @@
 
         $status.textContent = 'WASM module loaded. Load a model to begin.';
         const webnnAvailable = supports_webnn();
-        $env.textContent = `WebGPU: ${webgpu_available() ? 'available' : 'not available'} | WebNN: ${webnnAvailable ? 'available' : 'not available'}${threadsInfo} | OPFS: ${opfsAvailable ? 'yes' : 'no'}`;
+        const webtransportAvailable = supports_webtransport();
+        $env.textContent = `WebGPU: ${webgpu_available() ? 'available' : 'not available'} | WebNN: ${webnnAvailable ? 'available' : 'not available'} | WebTransport: ${webtransportAvailable ? 'available' : 'not available'}${threadsInfo} | OPFS: ${opfsAvailable ? 'yes' : 'no'}`;
         [$fileInput, $urlInput, $urlLoad, $tokFileIn, $tokUrlIn, $tokUrlLoad]
           .forEach(el => { el.disabled = false; });
 
