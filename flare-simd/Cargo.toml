@@ -16,6 +16,11 @@ name = "flare_simd"
 name = "matmul_bench"
 harness = false
 
+[features]
+default = []
+# Forward relaxed SIMD feature to flare-core for WASM relaxed SIMD matvec.
+relaxed_simd = ["flare-core/relaxed_simd"]
+
 [dependencies]
 flare-core = { package = "flarellm-core", path = "../flare-core", version = "0.1.0" }
 thiserror = { workspace = true }

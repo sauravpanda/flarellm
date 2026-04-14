@@ -24,6 +24,11 @@ default = []
 # Enable multi-threaded WASM inference via SharedArrayBuffer + wasm-bindgen-rayon.
 # Requires COOP/COEP headers on the serving page. Not all deployments support this.
 wasm_threads = ["rayon"]
+# Enable WASM relaxed SIMD operations (f32x4_relaxed_madd, i32x4_relaxed_dot_i8x16_i7x16_add_s).
+# Maps to hardware FMA on ARM NEON and x86 SSE/AVX, providing ~15-30% speedup for matvec.
+# Requires a browser/runtime that supports the relaxed-simd WASM proposal.
+# Build: cargo build --target wasm32-unknown-unknown --features relaxed_simd
+relaxed_simd = []
 
 # Native multi-threading via rayon. Disabled on wasm32 (no threads) unless wasm_threads is enabled.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
