@@ -780,3 +780,29 @@ Baseline model: SmolLM2-135M-Instruct Q8_0 (138MB, 30 layers, dim=576).
 | Decode (256 tok) | 195.0 |
 | Sustained (512 tok) | **173.0** |
 
+### 2026-04-14 12:31 — `ac4031a Fix clippy div_ceil and rustfmt for shader-f16, subgroups...`
+
+**Hardware:** Apple M5 Pro, ARM64 (NEON SIMD)  
+**Model:** Llama, ~162M params, 30 layers, dim=576  
+**Load time:** 0.14s
+
+| Metric | tok/s |
+|---|---|
+| Decode (16 tok) | 188.8 |
+| Decode (64 tok) | 216.0 |
+| Decode (256 tok) | 195.3 |
+| Sustained (512 tok) | **172.2** |
+
+### 2026-04-14 12:32 — `ac4031a Fix clippy div_ceil and rustfmt for shader-f16, subgroups...`
+
+**Hardware:** Apple M5 Pro, ARM64 (NEON SIMD)  
+**Model:** Llama, ~1498M params, 16 layers, dim=2048  
+**Load time:** 1.19s
+
+| Metric | tok/s |
+|---|---|
+| Decode (16 tok) | 31.1 |
+| Decode (64 tok) | 38.3 |
+| Decode (256 tok) | 35.6 |
+| Sustained (512 tok) | **33.7** |
+

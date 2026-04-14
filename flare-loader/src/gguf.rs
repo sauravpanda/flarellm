@@ -31,6 +31,8 @@ pub enum GgufError {
     MissingMetadata(String),
     #[error("unsupported quantization format: {0:?}")]
     UnsupportedQuant(QuantFormat),
+    #[error("invalid GGUF format: {0}")]
+    InvalidFormat(String),
 }
 
 /// Represents a parsed GGUF file header and metadata.
@@ -138,6 +140,21 @@ impl GgufFile {
         let tensor_count = reader.read_u64::<LittleEndian>()?;
         let metadata_count = reader.read_u64::<LittleEndian>()?;
 
+        // Sanity limits to prevent malicious files from causing OOM.
+        // Real models have <100K tensors and <10K metadata entries.
+        const MAX_TENSORS: u64 = 1_000_000;
+        const MAX_METADATA: u64 = 100_000;
+        if tensor_count > MAX_TENSORS {
+            return Err(GgufError::InvalidFormat(format!(
+                "tensor count {tensor_count} exceeds maximum {MAX_TENSORS}"
+            )));
+        }
+        if metadata_count > MAX_METADATA {
+            return Err(GgufError::InvalidFormat(format!(
+                "metadata count {metadata_count} exceeds maximum {MAX_METADATA}"
+            )));
+        }
+
         // Parse metadata
         let mut metadata = HashMap::new();
         for _ in 0..metadata_count {
@@ -146,7 +163,7 @@ impl GgufFile {
             metadata.insert(key, value);
         }
 
-        // Parse tensor infos
+        // Parse tensor infos (capacity is now safe due to MAX_TENSORS check)
         let mut tensors = Vec::with_capacity(tensor_count as usize);
         for _ in 0..tensor_count {
             let name = read_gguf_string(reader)?;
@@ -469,6 +486,21 @@ pub(crate) fn dequantize_tensor(
     dtype: QuantFormat,
     numel: usize,
 ) -> Result<Vec<f32>, GgufError> {
+    // Reject unknown formats early
+    if matches!(dtype, QuantFormat::Unknown(_)) {
+        return Err(GgufError::UnsupportedQuant(dtype));
+    }
+    // Validate that we have enough bytes for the requested element count.
+    // This prevents panics on truncated/malformed tensor data.
+    let required_bytes = dtype.bytes_for_elements(numel as u64) as usize;
+    if raw.len() < required_bytes {
+        return Err(GgufError::InvalidFormat(format!(
+            "dequantize {dtype:?}: have {} bytes, need {} for {} elements",
+            raw.len(),
+            required_bytes,
+            numel
+        )));
+    }
     match dtype {
         QuantFormat::F32 => {
             let mut data = vec![0.0f32; numel];
@@ -502,7 +534,9 @@ pub(crate) fn dequantize_tensor(
                 let block = &raw[b * block_bytes..(b + 1) * block_bytes];
                 let mut out = [0.0f32; 32];
                 quantize::dequant_q8_0_block(block, &mut out);
-                data[b * block_size..(b + 1) * block_size].copy_from_slice(&out);
+                let dst_start = b * block_size;
+                let dst_end = (dst_start + block_size).min(numel);
+                data[dst_start..dst_end].copy_from_slice(&out[..dst_end - dst_start]);
             }
             Ok(data)
         }
@@ -515,7 +549,9 @@ pub(crate) fn dequantize_tensor(
                 let block = &raw[b * block_bytes..(b + 1) * block_bytes];
                 let mut out = [0.0f32; 32];
                 quantize::dequant_q8_1_block(block, &mut out);
-                data[b * block_size..(b + 1) * block_size].copy_from_slice(&out);
+                let dst_start = b * block_size;
+                let dst_end = (dst_start + block_size).min(numel);
+                data[dst_start..dst_end].copy_from_slice(&out[..dst_end - dst_start]);
             }
             Ok(data)
         }
@@ -528,7 +564,10 @@ pub(crate) fn dequantize_tensor(
                 let block = &raw[b * block_bytes..(b + 1) * block_bytes];
                 let mut out = [0.0f32; 32];
                 quantize::dequant_q4_0_block(block, &mut out);
-                data[b * block_size..(b + 1) * block_size].copy_from_slice(&out);
+                let dst_start = b * block_size;
+                let dst_end = (dst_start + block_size).min(numel);
+                let copy_len = dst_end - dst_start;
+                data[dst_start..dst_end].copy_from_slice(&out[..copy_len]);
             }
             Ok(data)
         }
@@ -541,7 +580,9 @@ pub(crate) fn dequantize_tensor(
                 let block = &raw[b * block_bytes..(b + 1) * block_bytes];
                 let mut out = [0.0f32; 32];
                 quantize::dequant_iq4nl_block(block, &mut out);
-                data[b * block_size..(b + 1) * block_size].copy_from_slice(&out);
+                let dst_start = b * block_size;
+                let dst_end = (dst_start + block_size).min(numel);
+                data[dst_start..dst_end].copy_from_slice(&out[..dst_end - dst_start]);
             }
             Ok(data)
         }
@@ -554,7 +595,9 @@ pub(crate) fn dequantize_tensor(
                 let block = &raw[b * block_bytes..(b + 1) * block_bytes];
                 let mut out = [0.0f32; 32];
                 quantize::dequant_q4_1_block(block, &mut out);
-                data[b * block_size..(b + 1) * block_size].copy_from_slice(&out);
+                let dst_start = b * block_size;
+                let dst_end = (dst_start + block_size).min(numel);
+                data[dst_start..dst_end].copy_from_slice(&out[..dst_end - dst_start]);
             }
             Ok(data)
         }
@@ -567,7 +610,9 @@ pub(crate) fn dequantize_tensor(
                 let block = &raw[b * block_bytes..(b + 1) * block_bytes];
                 let mut out = [0.0f32; 32];
                 quantize::dequant_q5_0_block(block, &mut out);
-                data[b * block_size..(b + 1) * block_size].copy_from_slice(&out);
+                let dst_start = b * block_size;
+                let dst_end = (dst_start + block_size).min(numel);
+                data[dst_start..dst_end].copy_from_slice(&out[..dst_end - dst_start]);
             }
             Ok(data)
         }
@@ -621,8 +666,15 @@ fn dequant_k_blocks(
 }
 
 fn read_gguf_string<R: Read>(reader: &mut R) -> Result<String, GgufError> {
-    let len = reader.read_u64::<LittleEndian>()? as usize;
-    let mut buf = vec![0u8; len];
+    // Cap string length to prevent OOM from malicious files
+    const MAX_STRING_LEN: u64 = 1024 * 1024; // 1 MB
+    let len = reader.read_u64::<LittleEndian>()?;
+    if len > MAX_STRING_LEN {
+        return Err(GgufError::InvalidFormat(format!(
+            "string length {len} exceeds maximum {MAX_STRING_LEN}"
+        )));
+    }
+    let mut buf = vec![0u8; len as usize];
     reader.read_exact(&mut buf)?;
     Ok(String::from_utf8_lossy(&buf).into_owned())
 }
@@ -1291,5 +1343,166 @@ mod tests {
         let file = GgufFile::parse_header(&mut cursor).unwrap();
         let val = file.metadata.get("some.key").unwrap();
         assert_eq!(val.as_str(), Some(""));
+    }
+}
+
+#[cfg(test)]
+mod prop_tests {
+    use super::*;
+    use proptest::prelude::*;
+    use std::io::Cursor;
+
+    proptest! {
+        // Random byte streams should never panic the parser
+        #[test]
+        fn parse_header_random_bytes_never_panics(
+            data in proptest::collection::vec(any::<u8>(), 0..4096)
+        ) {
+            let mut cursor = Cursor::new(data);
+            let _ = GgufFile::parse_header(&mut cursor);
+        }
+
+        // Streams with valid magic should also never panic
+        #[test]
+        fn parse_header_valid_magic_never_panics(
+            tail in proptest::collection::vec(any::<u8>(), 0..2048)
+        ) {
+            let mut data = Vec::new();
+            data.extend_from_slice(b"GGUF");
+            data.extend_from_slice(&3u32.to_le_bytes());
+            data.extend(tail);
+            let mut cursor = Cursor::new(data);
+            let _ = GgufFile::parse_header(&mut cursor);
+        }
+
+        // Random tensor count + metadata count should not OOM or panic
+        #[test]
+        fn parse_header_random_counts_never_panics(
+            tensor_count in any::<u64>(),
+            meta_count in any::<u64>(),
+            tail in proptest::collection::vec(any::<u8>(), 0..512)
+        ) {
+            let mut data = Vec::new();
+            data.extend_from_slice(b"GGUF");
+            data.extend_from_slice(&3u32.to_le_bytes());
+            data.extend_from_slice(&tensor_count.to_le_bytes());
+            data.extend_from_slice(&meta_count.to_le_bytes());
+            data.extend(tail);
+            let mut cursor = Cursor::new(data);
+            let _ = GgufFile::parse_header(&mut cursor);
+        }
+
+        // read_raw_weight with arbitrary names should never panic
+        #[test]
+        fn read_raw_weight_random_name_never_panics(
+            data in proptest::collection::vec(any::<u8>(), 100..2000),
+            name in "[a-z._0-9]{1,50}"
+        ) {
+            let mut cursor = Cursor::new(data);
+            if let Ok(file) = GgufFile::parse_header(&mut cursor) {
+                let _ = file.read_raw_weight(&mut cursor, &name);
+            }
+        }
+
+        // Dequantize should never panic on random byte inputs
+        #[test]
+        fn dequantize_q8_0_random_never_panics(
+            raw in proptest::collection::vec(any::<u8>(), 0..1024),
+            numel in 0usize..256
+        ) {
+            let _ = dequantize_tensor(&raw, QuantFormat::Q8_0, numel);
+        }
+
+        #[test]
+        fn dequantize_q4_0_random_never_panics(
+            raw in proptest::collection::vec(any::<u8>(), 0..1024),
+            numel in 0usize..256
+        ) {
+            let _ = dequantize_tensor(&raw, QuantFormat::Q4_0, numel);
+        }
+
+        #[test]
+        fn dequantize_q4_1_random_never_panics(
+            raw in proptest::collection::vec(any::<u8>(), 0..1024),
+            numel in 0usize..256
+        ) {
+            let _ = dequantize_tensor(&raw, QuantFormat::Q4_1, numel);
+        }
+
+        #[test]
+        fn dequantize_q5_0_random_never_panics(
+            raw in proptest::collection::vec(any::<u8>(), 0..1024),
+            numel in 0usize..256
+        ) {
+            let _ = dequantize_tensor(&raw, QuantFormat::Q5_0, numel);
+        }
+    }
+
+    // Specific edge case tests
+    #[test]
+    fn empty_file_returns_error() {
+        let mut cursor = Cursor::new(Vec::<u8>::new());
+        assert!(GgufFile::parse_header(&mut cursor).is_err());
+    }
+
+    #[test]
+    fn just_magic_bytes_returns_error() {
+        let mut cursor = Cursor::new(b"GGUF".to_vec());
+        assert!(GgufFile::parse_header(&mut cursor).is_err());
+    }
+
+    #[test]
+    fn wrong_magic_returns_error() {
+        let mut data = b"XXXX".to_vec();
+        data.extend_from_slice(&3u32.to_le_bytes());
+        data.extend_from_slice(&0u64.to_le_bytes());
+        data.extend_from_slice(&0u64.to_le_bytes());
+        let mut cursor = Cursor::new(data);
+        assert!(GgufFile::parse_header(&mut cursor).is_err());
+    }
+
+    #[test]
+    fn truncated_after_magic_returns_error() {
+        let mut data = b"GGUF".to_vec();
+        data.extend_from_slice(&[0u8, 0, 0]); // only 3 bytes of version
+        let mut cursor = Cursor::new(data);
+        assert!(GgufFile::parse_header(&mut cursor).is_err());
+    }
+
+    #[test]
+    fn massive_tensor_count_does_not_oom() {
+        let mut data = b"GGUF".to_vec();
+        data.extend_from_slice(&3u32.to_le_bytes());
+        data.extend_from_slice(&u64::MAX.to_le_bytes()); // huge tensor count
+        data.extend_from_slice(&0u64.to_le_bytes());
+        let mut cursor = Cursor::new(data);
+        // Should error gracefully, not allocate u64::MAX entries
+        let _ = GgufFile::parse_header(&mut cursor);
+    }
+
+    #[test]
+    fn massive_metadata_count_does_not_oom() {
+        let mut data = b"GGUF".to_vec();
+        data.extend_from_slice(&3u32.to_le_bytes());
+        data.extend_from_slice(&0u64.to_le_bytes());
+        data.extend_from_slice(&u64::MAX.to_le_bytes()); // huge meta count
+        let mut cursor = Cursor::new(data);
+        let _ = GgufFile::parse_header(&mut cursor);
+    }
+
+    #[test]
+    fn dequant_zero_elements() {
+        let result = dequantize_tensor(&[], QuantFormat::Q8_0, 0);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().len(), 0);
+    }
+
+    #[test]
+    fn dequant_truncated_data_errors_gracefully() {
+        // Q8_0 needs 34 bytes per 32 elements, so 32 elements need 34 bytes
+        // Provide only 10 bytes
+        let result = dequantize_tensor(&[0u8; 10], QuantFormat::Q8_0, 32);
+        // Should error or return zeros, not panic
+        let _ = result;
     }
 }
