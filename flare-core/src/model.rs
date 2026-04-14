@@ -1736,16 +1736,68 @@ unsafe fn rmsnorm_neon(x: &[f32], weight: &[f32], eps: f32) -> Vec<f32> {
     output
 }
 
+// FFI binding to Apple Accelerate's cblas_sgemv.
+// Accelerate internally uses Apple's AMX (matrix coprocessor) on Apple Silicon,
+// delivering significantly higher throughput than hand-written NEON SIMD.
+//
+// Safety: the caller must ensure all pointer/dimension arguments are valid and consistent.
+#[cfg(target_os = "macos")]
+extern "C" {
+    fn cblas_sgemv(
+        order: i32,   // CblasRowMajor = 101
+        trans: i32,    // CblasNoTrans = 111
+        m: i32,        // rows
+        n: i32,        // cols
+        alpha: f32,    // scalar multiplier for A*x
+        a: *const f32, // matrix pointer
+        lda: i32,      // leading dimension (= cols for row-major)
+        x: *const f32, // input vector
+        incx: i32,     // stride for x
+        beta: f32,     // scalar multiplier for y
+        y: *mut f32,   // output vector
+        incy: i32,     // stride for y
+    );
+}
+
 /// Matrix-vector multiply: `output[rows]` = `mat[rows, cols]` * `vec[cols]` (CPU implementation).
 ///
-/// Dispatches to platform-specific SIMD implementations:
-/// - ARM NEON (aarch64): 4-wide f32 SIMD, 4 accumulators (16 elements/iter), compile-time
+/// Dispatches to platform-specific implementations:
+/// - macOS: Apple Accelerate cblas_sgemv (uses AMX coprocessor on Apple Silicon)
+/// - ARM NEON (non-macOS aarch64): 4-wide f32 SIMD, 4 accumulators (16 elements/iter)
 /// - x86 AVX2+FMA (x86_64): 8-wide f32 SIMD, 4 accumulators (32 elements/iter), runtime check
 /// - Fallback: 4-wide scalar unrolling for auto-vectorization
 ///
 /// All SIMD paths parallelize via rayon for large matrices on native targets.
 pub fn matvec(mat: &[f32], vec: &[f32], rows: usize, cols: usize) -> Vec<f32> {
-    #[cfg(target_arch = "aarch64")]
+    // On macOS, use Accelerate's cblas_sgemv which leverages the AMX coprocessor
+    // on Apple Silicon for dramatically faster matrix-vector multiply.
+    #[cfg(target_os = "macos")]
+    {
+        debug_assert_eq!(mat.len(), rows * cols, "matvec: mat size mismatch");
+        debug_assert!(vec.len() >= cols, "matvec: vec size mismatch");
+        let mut output = std::vec![0.0f32; rows];
+        // SAFETY: pointers and dimensions are validated by debug_assert above.
+        // mat is row-major with `cols` as the leading dimension, matching
+        // CblasRowMajor layout. Accelerate manages its own threading internally.
+        unsafe {
+            cblas_sgemv(
+                101,               // CblasRowMajor
+                111,               // CblasNoTrans
+                rows as i32,
+                cols as i32,
+                1.0,               // alpha
+                mat.as_ptr(),
+                cols as i32,       // lda
+                vec.as_ptr(),
+                1,                 // incx
+                0.0,               // beta
+                output.as_mut_ptr(),
+                1,                 // incy
+            );
+        }
+        return output;
+    }
+    #[cfg(all(target_arch = "aarch64", not(target_os = "macos")))]
     {
         matvec_simd(mat, vec, rows, cols)
     }
@@ -1757,7 +1809,7 @@ pub fn matvec(mat: &[f32], vec: &[f32], rows: usize, cols: usize) -> Vec<f32> {
         }
         matvec_scalar(mat, vec, rows, cols)
     }
-    #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
+    #[cfg(not(any(target_os = "macos", target_arch = "aarch64", target_arch = "x86_64")))]
     {
         matvec_scalar(mat, vec, rows, cols)
     }
@@ -1864,7 +1916,7 @@ unsafe fn matvec_avx2_row(row: &[f32], vec: &[f32], cols: usize) -> f32 {
 ///
 /// # Safety
 /// `row` and `vec` must both have length `cols`. NEON is always available on aarch64.
-#[cfg(target_arch = "aarch64")]
+#[cfg(all(target_arch = "aarch64", not(target_os = "macos")))]
 #[inline(always)]
 unsafe fn matvec_simd_row(row: &[f32], vec: &[f32], cols: usize) -> f32 {
     use std::arch::aarch64::*;
@@ -1909,7 +1961,8 @@ unsafe fn matvec_simd_row(row: &[f32], vec: &[f32], cols: usize) -> f32 {
 }
 
 /// ARM NEON SIMD matvec with rayon parallelism on native, serial on wasm32.
-#[cfg(target_arch = "aarch64")]
+/// On macOS, we use Accelerate's cblas_sgemv instead (AMX coprocessor).
+#[cfg(all(target_arch = "aarch64", not(target_os = "macos")))]
 fn matvec_simd(mat: &[f32], vec: &[f32], rows: usize, cols: usize) -> Vec<f32> {
     // Total FMAs above which parallelism wins. ~5M FMAs / ~50µs sequential break-even.
     const PARALLEL_FMA_THRESHOLD: usize = 5_000_000;
