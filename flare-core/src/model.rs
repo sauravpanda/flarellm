@@ -1420,10 +1420,7 @@ impl Model {
     /// call `forward()` (full model) you should call `reset()` first to avoid
     /// stale cache entries from the partial pass.
     pub fn forward_partial(&mut self, token_id: u32, pos: usize, num_layers: usize) -> Tensor {
-        assert!(
-            num_layers > 0,
-            "forward_partial requires at least 1 layer"
-        );
+        assert!(num_layers > 0, "forward_partial requires at least 1 layer");
         assert!(
             num_layers <= self.available_layers(),
             "forward_partial: requested {num_layers} layers but only {} are available",
@@ -2021,11 +2018,12 @@ pub fn matvec_scalar(mat: &[f32], vec: &[f32], rows: usize, cols: usize) -> Vec<
 ///   00 = 0, 01 = +1, 10 = -1, 11 = unused/reserved
 ///
 /// Weights are packed LSB-first: bits [1:0] = weight 0, bits [3:2] = weight 1, etc.
-
+///
 /// Pack an f32 weight slice into ternary 2-bit encoding (4 weights per byte).
 ///
 /// Each weight is quantized by sign: positive -> +1, negative -> -1, zero -> 0.
 /// The number of output bytes is `ceil(weights.len() / 4)`.
+#[allow(clippy::manual_div_ceil)]
 pub fn quantize_to_ternary(weights: &[f32]) -> Vec<u8> {
     let num_bytes = (weights.len() + 3) / 4;
     let mut packed = vec![0u8; num_bytes];
@@ -2064,13 +2062,14 @@ fn unpack_ternary(packed: &[u8], index: usize) -> i8 {
 /// the ternary weight value {-1, 0, +1}.
 ///
 /// `packed_weights`: row-major ternary-packed bytes, each row uses `ceil(cols/4)` bytes.
+#[allow(clippy::needless_range_loop)]
 pub fn matvec_ternary_scalar(
     packed_weights: &[u8],
     input: &[f32],
     rows: usize,
     cols: usize,
 ) -> Vec<f32> {
-    let bytes_per_row = (cols + 3) / 4;
+    let bytes_per_row = cols.div_ceil(4);
     let mut output = vec![0.0f32; rows];
 
     for (row_idx, out) in output.iter_mut().enumerate() {
@@ -2116,13 +2115,14 @@ pub fn matvec_ternary_scalar(
 /// Processes 4 floats at a time using NEON intrinsics with branchless
 /// conditional add/sub based on ternary weight sign bits.
 #[cfg(target_arch = "aarch64")]
+#[allow(clippy::manual_div_ceil)]
 pub fn matvec_ternary_neon(
     packed_weights: &[u8],
     input: &[f32],
     rows: usize,
     cols: usize,
 ) -> Vec<f32> {
-    let bytes_per_row = (cols + 3) / 4;
+    let bytes_per_row = cols.div_ceil(4);
     let mut output = vec![0.0f32; rows];
 
     for (row_idx, out) in output.iter_mut().enumerate() {
@@ -2141,6 +2141,7 @@ pub fn matvec_ternary_neon(
 /// `input` has at least `cols` elements. NEON must be available (always true on aarch64).
 #[cfg(target_arch = "aarch64")]
 #[inline(always)]
+#[allow(clippy::needless_range_loop)]
 unsafe fn matvec_ternary_neon_row(row_bytes: &[u8], input: &[f32], cols: usize) -> f32 {
     use std::arch::aarch64::*;
 
@@ -2198,12 +2199,7 @@ unsafe fn matvec_ternary_neon_row(row_bytes: &[u8], input: &[f32], cols: usize) 
 ///
 /// On aarch64: uses NEON SIMD.
 /// On other targets: uses the scalar fallback.
-pub fn matvec_ternary(
-    packed_weights: &[u8],
-    input: &[f32],
-    rows: usize,
-    cols: usize,
-) -> Vec<f32> {
+pub fn matvec_ternary(packed_weights: &[u8], input: &[f32], rows: usize, cols: usize) -> Vec<f32> {
     #[cfg(target_arch = "aarch64")]
     {
         matvec_ternary_neon(packed_weights, input, rows, cols)
@@ -2904,12 +2900,23 @@ mod tests {
         // Verify each unpacked value matches the expected sign
         let expected: Vec<i8> = weights
             .iter()
-            .map(|&w| if w > 0.0 { 1 } else if w < 0.0 { -1 } else { 0 })
+            .map(|&w| {
+                if w > 0.0 {
+                    1
+                } else if w < 0.0 {
+                    -1
+                } else {
+                    0
+                }
+            })
             .collect();
 
         for (i, &exp) in expected.iter().enumerate() {
             let got = unpack_ternary(&packed, i);
-            assert_eq!(got, exp, "ternary roundtrip mismatch at index {i}: got {got}, expected {exp}");
+            assert_eq!(
+                got, exp,
+                "ternary roundtrip mismatch at index {i}: got {got}, expected {exp}"
+            );
         }
     }
 
@@ -2955,8 +2962,16 @@ mod tests {
         let result = matvec_ternary_scalar(&packed, &input, 2, 3);
 
         assert_eq!(result.len(), 2);
-        assert!((result[0] - (3.0 - 5.0)).abs() < 1e-5, "row0: got {}", result[0]);
-        assert!((result[1] - (5.0 + 7.0)).abs() < 1e-5, "row1: got {}", result[1]);
+        assert!(
+            (result[0] - (3.0 - 5.0)).abs() < 1e-5,
+            "row0: got {}",
+            result[0]
+        );
+        assert!(
+            (result[1] - (5.0 + 7.0)).abs() < 1e-5,
+            "row1: got {}",
+            result[1]
+        );
     }
 
     #[test]
@@ -2995,14 +3010,14 @@ mod tests {
     #[test]
     fn test_matvec_ternary_dispatch_matches_scalar() {
         // Verify that matvec_ternary (dispatch) matches the scalar reference
-        let rows = 16;
-        let cols = 33; // odd size to test remainder handling
+        let rows: usize = 16;
+        let cols: usize = 33; // odd size to test remainder handling
         let weights: Vec<f32> = (0..rows * cols)
             .map(|i| ((i % 5) as f32 - 2.0) * 0.3) // mix of positive, negative, ~zero
             .collect();
 
         // Pack row by row
-        let bytes_per_row = (cols + 3) / 4;
+        let bytes_per_row = cols.div_ceil(4);
         let mut packed = vec![0u8; rows * bytes_per_row];
         for r in 0..rows {
             let row_packed = quantize_to_ternary(&weights[r * cols..(r + 1) * cols]);
@@ -3031,8 +3046,8 @@ mod tests {
     fn test_matvec_ternary_vs_f32_reference() {
         // Verify ternary matvec produces the same result as standard matvec
         // when the f32 matrix contains only {-1, 0, +1} values.
-        let rows = 8;
-        let cols = 16;
+        let rows: usize = 8;
+        let cols: usize = 16;
 
         // Create a matrix with only ternary values
         let f32_weights: Vec<f32> = (0..rows * cols)
@@ -3044,7 +3059,7 @@ mod tests {
             .collect();
 
         // Pack row by row
-        let bytes_per_row = (cols + 3) / 4;
+        let bytes_per_row = cols.div_ceil(4);
         let mut packed = vec![0u8; rows * bytes_per_row];
         for r in 0..rows {
             let row_packed = quantize_to_ternary(&f32_weights[r * cols..(r + 1) * cols]);
@@ -3113,14 +3128,33 @@ mod tests {
         let layers: Vec<LayerWeights> = (0..num_layers)
             .map(|_| LayerWeights {
                 attn_norm: Tensor::from_vec(vec![1.0; dim], &[dim]).unwrap(),
-                wq: Tensor::from_vec(make_weights(heads * head_dim * dim), &[heads * head_dim * dim]).unwrap(),
-                wk: Tensor::from_vec(make_weights(kv_heads * head_dim * dim), &[kv_heads * head_dim * dim]).unwrap(),
-                wv: Tensor::from_vec(make_weights(kv_heads * head_dim * dim), &[kv_heads * head_dim * dim]).unwrap(),
-                wo: Tensor::from_vec(make_weights(dim * heads * head_dim), &[dim * heads * head_dim]).unwrap(),
+                wq: Tensor::from_vec(
+                    make_weights(heads * head_dim * dim),
+                    &[heads * head_dim * dim],
+                )
+                .unwrap(),
+                wk: Tensor::from_vec(
+                    make_weights(kv_heads * head_dim * dim),
+                    &[kv_heads * head_dim * dim],
+                )
+                .unwrap(),
+                wv: Tensor::from_vec(
+                    make_weights(kv_heads * head_dim * dim),
+                    &[kv_heads * head_dim * dim],
+                )
+                .unwrap(),
+                wo: Tensor::from_vec(
+                    make_weights(dim * heads * head_dim),
+                    &[dim * heads * head_dim],
+                )
+                .unwrap(),
                 ffn_norm: Tensor::from_vec(vec![1.0; dim], &[dim]).unwrap(),
-                w_gate: Tensor::from_vec(make_weights(intermediate * dim), &[intermediate * dim]).unwrap(),
-                w_up: Tensor::from_vec(make_weights(intermediate * dim), &[intermediate * dim]).unwrap(),
-                w_down: Tensor::from_vec(make_weights(dim * intermediate), &[dim * intermediate]).unwrap(),
+                w_gate: Tensor::from_vec(make_weights(intermediate * dim), &[intermediate * dim])
+                    .unwrap(),
+                w_up: Tensor::from_vec(make_weights(intermediate * dim), &[intermediate * dim])
+                    .unwrap(),
+                w_down: Tensor::from_vec(make_weights(dim * intermediate), &[dim * intermediate])
+                    .unwrap(),
                 attn_q_bias: None,
                 attn_k_bias: None,
                 attn_v_bias: None,
@@ -3143,7 +3177,11 @@ mod tests {
     fn test_forward_partial_output_shape() {
         let mut model = tiny_multi_layer_model(4);
         let logits = model.forward_partial(0, 0, 2);
-        assert_eq!(logits.shape(), &[8], "partial forward should produce [vocab_size] logits");
+        assert_eq!(
+            logits.shape(),
+            &[8],
+            "partial forward should produce [vocab_size] logits"
+        );
     }
 
     #[test]
@@ -3197,7 +3235,11 @@ mod tests {
     fn test_forward_partial_kv_cache_advances() {
         let mut model = tiny_multi_layer_model(4);
         model.forward_partial(0, 0, 2);
-        assert_eq!(model.kv_cache().len(), 1, "KV cache should advance after partial forward");
+        assert_eq!(
+            model.kv_cache().len(),
+            1,
+            "KV cache should advance after partial forward"
+        );
         model.forward_partial(1, 1, 2);
         assert_eq!(model.kv_cache().len(), 2);
     }
@@ -3211,7 +3253,10 @@ mod tests {
     #[test]
     fn test_inference_quality() {
         let model = tiny_multi_layer_model(4);
-        assert!((model.inference_quality() - 1.0).abs() < 1e-5, "fully loaded model should have quality 1.0");
+        assert!(
+            (model.inference_quality() - 1.0).abs() < 1e-5,
+            "fully loaded model should have quality 1.0"
+        );
     }
 
     #[test]
@@ -3242,10 +3287,20 @@ mod tests {
         // Start with placeholder (zero) weights for all layers
         let make_placeholder_layer = || LayerWeights {
             attn_norm: Tensor::from_vec(vec![1.0; dim], &[dim]).unwrap(),
-            wq: Tensor::from_vec(vec![0.0; heads * head_dim * dim], &[heads * head_dim * dim]).unwrap(),
-            wk: Tensor::from_vec(vec![0.0; kv_heads * head_dim * dim], &[kv_heads * head_dim * dim]).unwrap(),
-            wv: Tensor::from_vec(vec![0.0; kv_heads * head_dim * dim], &[kv_heads * head_dim * dim]).unwrap(),
-            wo: Tensor::from_vec(vec![0.0; dim * heads * head_dim], &[dim * heads * head_dim]).unwrap(),
+            wq: Tensor::from_vec(vec![0.0; heads * head_dim * dim], &[heads * head_dim * dim])
+                .unwrap(),
+            wk: Tensor::from_vec(
+                vec![0.0; kv_heads * head_dim * dim],
+                &[kv_heads * head_dim * dim],
+            )
+            .unwrap(),
+            wv: Tensor::from_vec(
+                vec![0.0; kv_heads * head_dim * dim],
+                &[kv_heads * head_dim * dim],
+            )
+            .unwrap(),
+            wo: Tensor::from_vec(vec![0.0; dim * heads * head_dim], &[dim * heads * head_dim])
+                .unwrap(),
             ffn_norm: Tensor::from_vec(vec![1.0; dim], &[dim]).unwrap(),
             w_gate: Tensor::from_vec(vec![0.0; intermediate * dim], &[intermediate * dim]).unwrap(),
             w_up: Tensor::from_vec(vec![0.0; intermediate * dim], &[intermediate * dim]).unwrap(),
@@ -3316,8 +3371,17 @@ mod tests {
         let logits_4 = m4.forward_partial(0, 0, 4).data().to_vec();
 
         // All should be different (with random weights, collisions are extremely unlikely)
-        assert_ne!(logits_1, logits_2, "1-layer vs 2-layer logits should differ");
-        assert_ne!(logits_2, logits_4, "2-layer vs 4-layer logits should differ");
-        assert_ne!(logits_1, logits_4, "1-layer vs 4-layer logits should differ");
+        assert_ne!(
+            logits_1, logits_2,
+            "1-layer vs 2-layer logits should differ"
+        );
+        assert_ne!(
+            logits_2, logits_4,
+            "2-layer vs 4-layer logits should differ"
+        );
+        assert_ne!(
+            logits_1, logits_4,
+            "1-layer vs 4-layer logits should differ"
+        );
     }
 }

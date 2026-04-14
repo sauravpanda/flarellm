@@ -356,9 +356,7 @@ fn run_speculative_bench(model: &mut Model, backend_label: &str, json_mode: bool
         println!("Generation: {gen_count} tokens");
         println!();
         println!("Without speculation: {tok_s_off:.1} tok/s");
-        println!(
-            "With speculation:    {tok_s_on:.1} tok/s ({speedup:.2}x speedup)"
-        );
+        println!("With speculation:    {tok_s_on:.1} tok/s ({speedup:.2}x speedup)");
         println!(
             "  Attempts: {}, Drafted: {}, Accepted: {} ({acceptance_pct:.1}% acceptance)",
             stats.attempts, stats.drafted, stats.accepted,

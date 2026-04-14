@@ -50,8 +50,7 @@ const DEQUANT_MATVEC_IQ2XS_SHADER: &str = include_str!("../shaders/dequant_matve
 const DEQUANT_MATVEC_IQ3XXS_SHADER: &str = include_str!("../shaders/dequant_matvec_iq3xxs.wgsl");
 const DEQUANT_MATVEC_IQ2S_SHADER: &str = include_str!("../shaders/dequant_matvec_iq2s.wgsl");
 const DEQUANT_MATVEC_IQ1S_SHADER: &str = include_str!("../shaders/dequant_matvec_iq1s.wgsl");
-const DEQUANT_MATVEC_TERNARY_SHADER: &str =
-    include_str!("../shaders/dequant_matvec_ternary.wgsl");
+const DEQUANT_MATVEC_TERNARY_SHADER: &str = include_str!("../shaders/dequant_matvec_ternary.wgsl");
 const DEQUANT_Q5K_SHADER: &str = include_str!("../shaders/dequant_q5k.wgsl");
 const DEQUANT_Q6K_SHADER: &str = include_str!("../shaders/dequant_q6k.wgsl");
 const PREFILL_ATTENTION_SHADER: &str = include_str!("../shaders/prefill_attention.wgsl");

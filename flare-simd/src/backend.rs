@@ -107,12 +107,7 @@ impl ComputeBackend for SimdBackend {
 ///
 /// Ternary encoding: 2 bits per weight (4 per byte).
 /// 00=0, 01=+1, 10=-1, 11=unused (treated as 0).
-fn matvec_ternary_wasm(
-    packed_weights: &[u8],
-    input: &[f32],
-    rows: usize,
-    cols: usize,
-) -> Vec<f32> {
+fn matvec_ternary_wasm(packed_weights: &[u8], input: &[f32], rows: usize, cols: usize) -> Vec<f32> {
     // On non-WASM targets, delegate to the core scalar implementation.
     // The WASM SIMD128 path would use std::arch::wasm32::* intrinsics
     // (f32x4_add, f32x4_sub, v128_bitselect, etc.) but these are only

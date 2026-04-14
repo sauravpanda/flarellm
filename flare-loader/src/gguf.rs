@@ -564,12 +564,12 @@ pub(crate) fn dequantize_tensor(
             // Ternary: 4 weights per byte, 2 bits each.
             // Encoding: 00=0, 01=+1, 10=-1, 11=unused (treated as 0).
             let mut data = vec![0.0f32; numel];
-            for i in 0..numel {
+            for (i, val) in data.iter_mut().enumerate() {
                 let byte_idx = i / 4;
                 let bit_shift = (i % 4) * 2;
                 if byte_idx < raw.len() {
                     let bits = (raw[byte_idx] >> bit_shift) & 0b11;
-                    data[i] = match bits {
+                    *val = match bits {
                         0b01 => 1.0,
                         0b10 => -1.0,
                         _ => 0.0,
