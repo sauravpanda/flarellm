@@ -1151,7 +1151,8 @@ impl Model {
         //
         // Run all transformer layers + final RMSNorm via forward_layers().
         // The result is left in self.forward_buffers.final_normed.
-        let (_use_raw, use_cpu_q8, use_cpu_q4k) = self.forward_layers(token_id, pos);
+        let (_use_raw, _use_q8_attn, _use_q8_ffn, use_q8_output, use_cpu_q4k) =
+            self.forward_layers(token_id, pos);
 
         // Output logits: [vocab_size] = output_weight [vocab_size, dim] x normed [dim]
         // Use quantized path when raw output weight is available (bandwidth reduction).
@@ -1164,7 +1165,7 @@ impl Model {
                     dim,
                     &mut self.forward_buffers.logits,
                 );
-            } else if row.format == WeightFormat::Q8_0 && use_cpu_q8 {
+            } else if row.format == WeightFormat::Q8_0 && use_q8_output {
                 quantize_input_q8_0_into(
                     &self.forward_buffers.final_normed,
                     &mut self.forward_buffers.output_q8,
@@ -1238,7 +1239,8 @@ impl Model {
 
         // Run all transformer layers + final RMSNorm, leaving the result in
         // forward_buffers.final_normed. Shared with forward().
-        let (_use_raw, use_cpu_q8, use_cpu_q4k) = self.forward_layers(token_id, pos);
+        let (_use_raw, _use_q8_attn, _use_q8_ffn, use_q8_output, use_cpu_q4k) =
+            self.forward_layers(token_id, pos);
 
         let dim = self.config.hidden_dim;
         let vocab_size = self.config.vocab_size;
@@ -1265,7 +1267,7 @@ impl Model {
                     }
                 }
                 (bi, bv)
-            } else if row.format == WeightFormat::Q8_0 && use_cpu_q8 {
+            } else if row.format == WeightFormat::Q8_0 && use_q8_output {
                 quantize_input_q8_0_into(
                     &self.forward_buffers.final_normed,
                     &mut self.forward_buffers.output_q8,
@@ -1305,10 +1307,11 @@ impl Model {
     /// This is the shared prefix of `forward()` and `forward_greedy()`,
     /// extracted to avoid code duplication in the ~400-line layer loop.
     ///
-    /// Returns `(use_raw, use_cpu_q8, use_cpu_q4k)` so the caller can dispatch
-    /// the correct output projection variant without recomputing the flags.
+    /// Returns `(use_raw, use_q8_attn, use_q8_ffn, use_q8_output, use_cpu_q4k)`
+    /// so the caller can dispatch the correct output projection variant without
+    /// recomputing the flags.
     #[allow(clippy::needless_range_loop)]
-    fn forward_layers(&mut self, token_id: u32, pos: usize) -> (bool, bool, bool) {
+    fn forward_layers(&mut self, token_id: u32, pos: usize) -> (bool, bool, bool, bool, bool) {
         let config = &self.config;
         let dim = config.hidden_dim;
         let head_dim = config.head_dim;
@@ -1322,7 +1325,9 @@ impl Model {
         let mut x = Tensor::from_vec(embed_data[offset..offset + dim].to_vec(), &[dim]).unwrap();
 
         let use_raw = self.backend.supports_dequant_matmul() && self.raw_weights.is_some();
-        let use_cpu_q8 = !use_raw
+
+        // Base Q8_0 eligibility: raw weights present and in Q8_0 format.
+        let has_q8 = !use_raw
             && dim >= 1024
             && self.raw_weights.is_some()
             && self
@@ -1330,11 +1335,20 @@ impl Model {
                 .as_ref()
                 .is_some_and(|rw| !rw.is_empty() && rw[0].wq.format == WeightFormat::Q8_0);
 
+        // Per-operation hybrid compute: use Q8_0 only for matrices that exceed
+        // the L2 cache threshold (bandwidth-bound). Smaller matrices stay on the
+        // f32 Accelerate/BLAS path where AMX throughput dominates.
+        let q_dim = num_heads * head_dim;
+        let qkv_rows = q_dim + kv_dim + kv_dim;
+        let use_q8_attn = has_q8 && should_use_q8_for_size(qkv_rows, dim);
+        let use_q8_ffn = has_q8 && should_use_q8_for_size(config.intermediate_dim, dim);
+        let use_q8_output = has_q8 && should_use_q8_for_size(config.vocab_size, dim);
+
         // CPU Q4_K direct path: compute 4-bit x f32 dot product directly on
         // quantized data. ~4.5 bits/weight vs Q8_0's ~8.5 bits, roughly halving
         // memory bandwidth requirements compared to Q8_0.
         let use_cpu_q4k = !use_raw
-            && !use_cpu_q8
+            && !has_q8
             && dim >= 1024
             && self.raw_weights.is_some()
             && self
@@ -1354,7 +1368,6 @@ impl Model {
                 &mut self.forward_buffers.normed,
             );
 
-            let q_dim = num_heads * head_dim;
             if use_raw {
                 let rw = &self.raw_weights.as_ref().unwrap()[layer_idx];
                 let q_tmp =
@@ -1392,7 +1405,7 @@ impl Model {
                     dim,
                     &mut self.forward_buffers.v_data,
                 );
-            } else if use_cpu_q8 {
+            } else if use_q8_attn {
                 quantize_input_q8_0_into(
                     &self.forward_buffers.normed,
                     &mut self.forward_buffers.normed_q8,
@@ -1563,7 +1576,7 @@ impl Model {
                 );
             }
 
-            // Output projection (wo)
+            // Output projection (wo) — uses same hybrid flag as QKV
             if use_raw {
                 let rw = &self.raw_weights.as_ref().unwrap()[layer_idx];
                 let tmp = self.backend.batched_dequant_matmul(
@@ -1581,7 +1594,7 @@ impl Model {
                     num_heads * head_dim,
                     &mut self.forward_buffers.attn_proj,
                 );
-            } else if use_cpu_q8 {
+            } else if use_q8_attn {
                 let rw = &self.raw_weights.as_ref().unwrap()[layer_idx];
                 quantize_input_q8_0_into(
                     &self.forward_buffers.attn_output,
@@ -1657,7 +1670,7 @@ impl Model {
                 // The norm is lightweight (~dim FLOPs) and doesn't touch weight
                 // memory, so issuing prefetch hints here lets the memory subsystem
                 // start pulling gate/up data into L2 before the matvec needs it.
-                if use_cpu_q8 {
+                if use_q8_ffn {
                     let fused = &self.fused_weights.as_ref().unwrap()[layer_idx];
                     prefetch_weight_bytes(&fused.gate_up_data);
                 } else if self.fused_f32_gate_up.is_some() {
@@ -1698,7 +1711,7 @@ impl Model {
                         dim,
                         &mut self.forward_buffers.up,
                     );
-                } else if use_cpu_q8 {
+                } else if use_q8_ffn {
                     quantize_input_q8_0_into(
                         &self.forward_buffers.ffn_normed,
                         &mut self.forward_buffers.ffn_normed_q8,
@@ -1769,7 +1782,7 @@ impl Model {
                 if layer_idx + 1 < config.num_layers {
                     let next_layer = &self.weights.layers[layer_idx + 1];
                     prefetch_weight_f32(next_layer.attn_norm.data());
-                    if use_cpu_q8 {
+                    if use_q8_attn {
                         let next_fused = &self.fused_weights.as_ref().unwrap()[layer_idx + 1];
                         prefetch_weight_bytes(&next_fused.qkv_data);
                     } else if self.fused_f32_qkv.is_some() {
@@ -1797,7 +1810,7 @@ impl Model {
                         config.intermediate_dim,
                         &mut self.forward_buffers.ffn_out,
                     );
-                } else if use_cpu_q8 {
+                } else if use_q8_ffn {
                     let rw = &self.raw_weights.as_ref().unwrap()[layer_idx];
                     quantize_input_q8_0_into(
                         &self.forward_buffers.ffn_hidden,
@@ -1855,7 +1868,7 @@ impl Model {
             &mut self.forward_buffers.final_normed,
         );
 
-        (use_raw, use_cpu_q8, use_cpu_q4k)
+        (use_raw, use_q8_attn, use_q8_ffn, use_q8_output, use_cpu_q4k)
     }
 
     /// Batched forward pass for a full prompt sequence.
@@ -2339,15 +2352,25 @@ impl Model {
         let mut x = Tensor::from_vec(embed_data[offset..offset + dim].to_vec(), &[dim]).unwrap();
 
         let use_raw = self.backend.supports_dequant_matmul() && self.raw_weights.is_some();
-        let use_cpu_q8 = !use_raw
+
+        // Base Q8_0 eligibility: raw weights present and in Q8_0 format.
+        let has_q8 = !use_raw
             && dim >= 1024
             && self.raw_weights.is_some()
             && self
                 .raw_weights
                 .as_ref()
                 .is_some_and(|rw| !rw.is_empty() && rw[0].wq.format == WeightFormat::Q8_0);
+
+        // Per-operation hybrid compute: use Q8_0 only for bandwidth-bound matrices.
+        let q_dim = num_heads * head_dim;
+        let qkv_rows = q_dim + kv_dim + kv_dim;
+        let use_q8_attn = has_q8 && should_use_q8_for_size(qkv_rows, dim);
+        let use_q8_ffn = has_q8 && should_use_q8_for_size(config.intermediate_dim, dim);
+        let use_q8_output = has_q8 && should_use_q8_for_size(config.vocab_size, dim);
+
         let use_cpu_q4k = !use_raw
-            && !use_cpu_q8
+            && !has_q8
             && dim >= 1024
             && self.raw_weights.is_some()
             && self
@@ -2369,7 +2392,6 @@ impl Model {
             );
 
             // QKV projections — fused into a single matvec where possible.
-            let q_dim = num_heads * head_dim;
             if use_raw {
                 let rw = &self.raw_weights.as_ref().unwrap()[layer_idx];
                 let q_tmp =
@@ -2407,7 +2429,7 @@ impl Model {
                     dim,
                     &mut self.forward_buffers.v_data,
                 );
-            } else if use_cpu_q8 {
+            } else if use_q8_attn {
                 quantize_input_q8_0_into(
                     &self.forward_buffers.normed,
                     &mut self.forward_buffers.normed_q8,
@@ -2593,7 +2615,7 @@ impl Model {
                     num_heads * head_dim,
                     &mut self.forward_buffers.attn_proj,
                 );
-            } else if use_cpu_q8 {
+            } else if use_q8_attn {
                 let rw = &self.raw_weights.as_ref().unwrap()[layer_idx];
                 quantize_input_q8_0_into(
                     &self.forward_buffers.attn_output,
@@ -2636,7 +2658,7 @@ impl Model {
             // --- FFN block ---
 
             // Prefetch FFN gate/up weights while computing FFN RMSNorm.
-            if use_cpu_q8 {
+            if use_q8_ffn {
                 let fused = &self.fused_weights.as_ref().unwrap()[layer_idx];
                 prefetch_weight_bytes(&fused.gate_up_data);
             } else if self.fused_f32_gate_up.is_some() {
@@ -2684,7 +2706,7 @@ impl Model {
                     dim,
                     &mut self.forward_buffers.up,
                 );
-            } else if use_cpu_q8 {
+            } else if use_q8_ffn {
                 quantize_input_q8_0_into(
                     &self.forward_buffers.ffn_normed,
                     &mut self.forward_buffers.ffn_normed_q8,
@@ -2751,7 +2773,7 @@ impl Model {
             if layer_idx + 1 < num_layers {
                 let next_layer = &self.weights.layers[layer_idx + 1];
                 prefetch_weight_f32(next_layer.attn_norm.data());
-                if use_cpu_q8 {
+                if use_q8_attn {
                     let next_fused = &self.fused_weights.as_ref().unwrap()[layer_idx + 1];
                     prefetch_weight_bytes(&next_fused.qkv_data);
                 } else if self.fused_f32_qkv.is_some() {
@@ -2778,7 +2800,7 @@ impl Model {
                     config.intermediate_dim,
                     &mut self.forward_buffers.ffn_out,
                 );
-            } else if use_cpu_q8 {
+            } else if use_q8_ffn {
                 let rw = &self.raw_weights.as_ref().unwrap()[layer_idx];
                 quantize_input_q8_0_into(
                     &self.forward_buffers.ffn_hidden,
@@ -2842,7 +2864,7 @@ impl Model {
                     dim,
                     &mut self.forward_buffers.logits,
                 );
-            } else if row.format == WeightFormat::Q8_0 && use_cpu_q8 {
+            } else if row.format == WeightFormat::Q8_0 && use_q8_output {
                 quantize_input_q8_0_into(
                     &self.forward_buffers.final_normed,
                     &mut self.forward_buffers.output_q8,
@@ -2928,15 +2950,25 @@ impl Model {
         let mut x = Tensor::from_vec(embed_data[offset..offset + dim].to_vec(), &[dim]).unwrap();
 
         let use_raw = self.backend.supports_dequant_matmul() && self.raw_weights.is_some();
-        let use_cpu_q8 = !use_raw
+
+        // Base Q8_0 eligibility: raw weights present and in Q8_0 format.
+        let has_q8 = !use_raw
             && dim >= 1024
             && self.raw_weights.is_some()
             && self
                 .raw_weights
                 .as_ref()
                 .is_some_and(|rw| !rw.is_empty() && rw[0].wq.format == WeightFormat::Q8_0);
+
+        // Per-operation hybrid compute: use Q8_0 only for bandwidth-bound matrices.
+        let q_dim = num_heads * head_dim;
+        let qkv_rows = q_dim + kv_dim + kv_dim;
+        let use_q8_attn = has_q8 && should_use_q8_for_size(qkv_rows, dim);
+        let use_q8_ffn = has_q8 && should_use_q8_for_size(config.intermediate_dim, dim);
+        let use_q8_output = has_q8 && should_use_q8_for_size(config.vocab_size, dim);
+
         let use_cpu_q4k = !use_raw
-            && !use_cpu_q8
+            && !has_q8
             && dim >= 1024
             && self.raw_weights.is_some()
             && self
@@ -2957,7 +2989,6 @@ impl Model {
             );
 
             // QKV projections
-            let q_dim = num_heads * head_dim;
             if use_raw {
                 let rw = &self.raw_weights.as_ref().unwrap()[layer_idx];
                 let q_tmp =
@@ -2995,7 +3026,7 @@ impl Model {
                     dim,
                     &mut self.forward_buffers.v_data,
                 );
-            } else if use_cpu_q8 {
+            } else if use_q8_attn {
                 quantize_input_q8_0_into(
                     &self.forward_buffers.normed,
                     &mut self.forward_buffers.normed_q8,
@@ -3182,7 +3213,7 @@ impl Model {
                     num_heads * head_dim,
                     &mut self.forward_buffers.attn_proj,
                 );
-            } else if use_cpu_q8 {
+            } else if use_q8_attn {
                 let rw = &self.raw_weights.as_ref().unwrap()[layer_idx];
                 quantize_input_q8_0_into(
                     &self.forward_buffers.attn_output,
@@ -3224,7 +3255,7 @@ impl Model {
 
             // --- FFN block ---
 
-            if use_cpu_q8 {
+            if use_q8_ffn {
                 let fused = &self.fused_weights.as_ref().unwrap()[layer_idx];
                 prefetch_weight_bytes(&fused.gate_up_data);
             } else if self.fused_f32_gate_up.is_some() {
@@ -3271,7 +3302,7 @@ impl Model {
                     dim,
                     &mut self.forward_buffers.up,
                 );
-            } else if use_cpu_q8 {
+            } else if use_q8_ffn {
                 quantize_input_q8_0_into(
                     &self.forward_buffers.ffn_normed,
                     &mut self.forward_buffers.ffn_normed_q8,
@@ -3351,7 +3382,7 @@ impl Model {
                     config.intermediate_dim,
                     &mut self.forward_buffers.ffn_out,
                 );
-            } else if use_cpu_q8 {
+            } else if use_q8_ffn {
                 let rw = &self.raw_weights.as_ref().unwrap()[layer_idx];
                 quantize_input_q8_0_into(
                     &self.forward_buffers.ffn_hidden,
@@ -3416,7 +3447,7 @@ impl Model {
                     dim,
                     &mut self.forward_buffers.logits,
                 );
-            } else if row.format == WeightFormat::Q8_0 && use_cpu_q8 {
+            } else if row.format == WeightFormat::Q8_0 && use_q8_output {
                 quantize_input_q8_0_into(
                     &self.forward_buffers.final_normed,
                     &mut self.forward_buffers.output_q8,
@@ -3964,6 +3995,27 @@ fn f16_to_f32_inline(bits: u16) -> f32 {
 /// cover the first few hundred rows of weight data that will be accessed next.
 #[cfg(target_arch = "aarch64")]
 const PREFETCH_BYTES: usize = 8192;
+
+/// L2 cache threshold for hybrid compute strategy (bytes, f32 basis).
+///
+/// Matrices whose f32 representation exceeds this size are bandwidth-bound and
+/// benefit from Q8_0 quantized dot products (halving memory traffic).  Smaller
+/// matrices fit in L2 cache and are faster with Accelerate `cblas_sgemv` (AMX).
+///
+/// 16 MB is a conservative estimate for Apple M-series chips (~48 MB total L2)
+/// leaving headroom for activations, KV cache, and other working data.
+const Q8_MATRIX_BYTE_THRESHOLD: usize = 16 * 1024 * 1024;
+
+/// Decide whether a matvec with the given weight matrix dimensions should use
+/// the Q8_0 quantized dot-product path instead of f32 Accelerate/BLAS.
+///
+/// Returns `true` when the matrix is too large for L2 cache (bandwidth-bound),
+/// meaning Q8_0's ~2x bandwidth reduction outweighs the AMX f32 throughput
+/// advantage.  For cache-resident matrices, f32 BLAS is faster.
+#[inline]
+fn should_use_q8_for_size(rows: usize, cols: usize) -> bool {
+    rows * cols * 4 > Q8_MATRIX_BYTE_THRESHOLD
+}
 
 /// Issue software prefetch hints for the first `PREFETCH_BYTES` of a byte slice.
 ///
