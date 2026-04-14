@@ -12,6 +12,9 @@
 //! Run with GPU (Metal/Vulkan/DX12) acceleration:
 //!   cargo run -p flarellm-server --example e2e_bench --release -- --gpu
 //!
+//! Run speculative decoding A/B comparison:
+//!   cargo run -p flarellm-server --example e2e_bench --release -- --speculative
+//!
 //! Use a different model via --model flag or MODEL_PATH env var:
 //!   cargo run -p flarellm-server --example e2e_bench --release -- --model path/to/model.gguf
 //!   MODEL_PATH=path/to/model.gguf cargo run -p flarellm-server --example e2e_bench --release
@@ -38,6 +41,7 @@ fn main() {
     let log_mode = args.iter().any(|a| a == "--log");
     let json_mode = args.iter().any(|a| a == "--json");
     let gpu_mode = args.iter().any(|a| a == "--gpu");
+    let speculative_mode = args.iter().any(|a| a == "--speculative");
 
     // Parse --model <path> flag, falling back to MODEL_PATH env var, then default.
     let model_path = args
@@ -135,6 +139,12 @@ fn main() {
     );
     eprintln!("Loaded in {:.2}s ({model_info})", load_time.as_secs_f64());
     eprintln!("Backend: {backend_label}");
+
+    // --- Speculative decoding A/B comparison ---
+    if speculative_mode {
+        run_speculative_bench(&mut model, &backend_label, json_mode);
+        return;
+    }
 
     // --- Run benchmarks ---
     let prompt_tokens: Vec<u32> = vec![1, 100, 200, 300, 400, 500];
@@ -247,6 +257,112 @@ fn main() {
     } else {
         eprintln!();
         eprintln!("Tip: run with --log to append results to {HISTORY_FILE}");
+    }
+}
+
+fn run_speculative_bench(model: &mut Model, backend_label: &str, json_mode: bool) {
+    // Use a repetitive prompt that encourages pattern-heavy output (code with
+    // loops, counters, and repeated structures).  Since we feed raw token IDs,
+    // we build a short prompt followed by a repetitive seed to prime the
+    // n-gram cache for speculation.
+    let prompt_text = "Write a Python function that prints numbers 1 to 100:";
+
+    // Build a prompt token sequence with a repetitive tail so the n-gram
+    // cache has patterns to latch onto during generation.
+    let base: Vec<u32> = vec![1, 100, 200, 300, 400, 500, 600];
+    let repeat_pattern: Vec<u32> = vec![10, 20, 30, 10, 20, 30, 10, 20, 30];
+    let prompt_tokens: Vec<u32> = base.into_iter().chain(repeat_pattern).collect();
+    let prompt_len = prompt_tokens.len();
+
+    let gen_count: usize = 256;
+
+    let hw = get_hw_info();
+    let git_info = get_git_info();
+    let date = get_date();
+
+    // --- Run WITHOUT speculation ---
+    model.reset();
+    let params_off = SamplingParams {
+        temperature: 0.0,
+        speculative: false,
+        ..Default::default()
+    };
+    let mut gen_off = Generator::new(model, params_off);
+    gen_off.prefill(&prompt_tokens);
+
+    let start_off = Instant::now();
+    for _ in 0..gen_count {
+        gen_off.step(0.5);
+    }
+    let elapsed_off = start_off.elapsed();
+    let tok_s_off = gen_count as f64 / elapsed_off.as_secs_f64();
+
+    // --- Run WITH speculation ---
+    model.reset();
+    let params_on = SamplingParams {
+        temperature: 0.0,
+        speculative: true,
+        ..Default::default()
+    };
+    let mut gen_on = Generator::new(model, params_on);
+    gen_on.prefill(&prompt_tokens);
+
+    let start_on = Instant::now();
+    for _ in 0..gen_count {
+        gen_on.step(0.5);
+    }
+    let elapsed_on = start_on.elapsed();
+    let tok_s_on = gen_count as f64 / elapsed_on.as_secs_f64();
+
+    let stats = gen_on.speculative_stats();
+    let acceptance_pct = if stats.drafted > 0 {
+        stats.accepted as f64 / stats.drafted as f64 * 100.0
+    } else {
+        0.0
+    };
+    let speedup = if tok_s_off > 0.0 {
+        tok_s_on / tok_s_off
+    } else {
+        0.0
+    };
+
+    if json_mode {
+        print!("{{");
+        print!("\"date\":\"{date}\",");
+        print!("\"commit\":\"{}\",", json_escape(&git_info));
+        print!("\"hardware\":\"{}\",", json_escape(&hw));
+        print!("\"backend\":\"{}\",", json_escape(backend_label));
+        print!("\"benchmark\":\"speculative\",");
+        print!("\"prompt\":\"{}\",", json_escape(prompt_text));
+        print!("\"prompt_len\":{prompt_len},");
+        print!("\"gen_count\":{gen_count},");
+        print!("\"without_speculation_tok_s\":{tok_s_off:.2},");
+        print!("\"with_speculation_tok_s\":{tok_s_on:.2},");
+        print!("\"speedup\":{speedup:.3},");
+        print!("\"attempts\":{},", stats.attempts);
+        print!("\"drafted\":{},", stats.drafted);
+        print!("\"accepted\":{},", stats.accepted);
+        print!("\"acceptance_pct\":{acceptance_pct:.1}");
+        println!("}}");
+    } else {
+        println!();
+        println!("Speculative Decoding Benchmark");
+        println!("================================");
+        println!("Date:     {date}");
+        println!("Commit:   {git_info}");
+        println!("Hardware: {hw}");
+        println!("Backend:  {backend_label}");
+        println!("Prompt:   \"{prompt_text}\"");
+        println!("Generation: {gen_count} tokens");
+        println!();
+        println!("Without speculation: {tok_s_off:.1} tok/s");
+        println!(
+            "With speculation:    {tok_s_on:.1} tok/s ({speedup:.2}x speedup)"
+        );
+        println!(
+            "  Attempts: {}, Drafted: {}, Accepted: {} ({acceptance_pct:.1}% acceptance)",
+            stats.attempts, stats.drafted, stats.accepted,
+        );
     }
 }
 
