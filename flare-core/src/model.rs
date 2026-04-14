@@ -908,40 +908,103 @@ impl Model {
             // or _into variants for pure CPU f32 path (zero allocations).
             if use_raw {
                 let rw = &self.raw_weights.as_ref().unwrap()[layer_idx];
-                let q_tmp = self.backend.batched_dequant_matmul(&rw.wq, &self.forward_buffers.normed, 1);
+                let q_tmp =
+                    self.backend
+                        .batched_dequant_matmul(&rw.wq, &self.forward_buffers.normed, 1);
                 self.forward_buffers.q_data.copy_from_slice(&q_tmp);
-                let k_tmp = self.backend.batched_dequant_matmul(&rw.wk, &self.forward_buffers.normed, 1);
+                let k_tmp =
+                    self.backend
+                        .batched_dequant_matmul(&rw.wk, &self.forward_buffers.normed, 1);
                 self.forward_buffers.k_data.copy_from_slice(&k_tmp);
-                let v_tmp = self.backend.batched_dequant_matmul(&rw.wv, &self.forward_buffers.normed, 1);
+                let v_tmp =
+                    self.backend
+                        .batched_dequant_matmul(&rw.wv, &self.forward_buffers.normed, 1);
                 self.forward_buffers.v_data.copy_from_slice(&v_tmp);
             } else if use_cpu_q8 {
                 let rw = &self.raw_weights.as_ref().unwrap()[layer_idx];
-                matvec_q8_0_into(&rw.wq.data, &self.forward_buffers.normed, rw.wq.num_rows, dim, &mut self.forward_buffers.q_data);
-                matvec_q8_0_into(&rw.wk.data, &self.forward_buffers.normed, rw.wk.num_rows, dim, &mut self.forward_buffers.k_data);
-                matvec_q8_0_into(&rw.wv.data, &self.forward_buffers.normed, rw.wv.num_rows, dim, &mut self.forward_buffers.v_data);
+                matvec_q8_0_into(
+                    &rw.wq.data,
+                    &self.forward_buffers.normed,
+                    rw.wq.num_rows,
+                    dim,
+                    &mut self.forward_buffers.q_data,
+                );
+                matvec_q8_0_into(
+                    &rw.wk.data,
+                    &self.forward_buffers.normed,
+                    rw.wk.num_rows,
+                    dim,
+                    &mut self.forward_buffers.k_data,
+                );
+                matvec_q8_0_into(
+                    &rw.wv.data,
+                    &self.forward_buffers.normed,
+                    rw.wv.num_rows,
+                    dim,
+                    &mut self.forward_buffers.v_data,
+                );
             } else {
-                matvec_into(layer.wq.data(), &self.forward_buffers.normed, num_heads * head_dim, dim, &mut self.forward_buffers.q_data);
-                matvec_into(layer.wk.data(), &self.forward_buffers.normed, kv_dim, dim, &mut self.forward_buffers.k_data);
-                matvec_into(layer.wv.data(), &self.forward_buffers.normed, kv_dim, dim, &mut self.forward_buffers.v_data);
+                matvec_into(
+                    layer.wq.data(),
+                    &self.forward_buffers.normed,
+                    num_heads * head_dim,
+                    dim,
+                    &mut self.forward_buffers.q_data,
+                );
+                matvec_into(
+                    layer.wk.data(),
+                    &self.forward_buffers.normed,
+                    kv_dim,
+                    dim,
+                    &mut self.forward_buffers.k_data,
+                );
+                matvec_into(
+                    layer.wv.data(),
+                    &self.forward_buffers.normed,
+                    kv_dim,
+                    dim,
+                    &mut self.forward_buffers.v_data,
+                );
             }
 
             // Add attention biases if present (Qwen2)
             if let Some(bias) = &layer.attn_q_bias {
-                for (q, &b) in self.forward_buffers.q_data.iter_mut().zip(bias.data().iter()) {
+                for (q, &b) in self
+                    .forward_buffers
+                    .q_data
+                    .iter_mut()
+                    .zip(bias.data().iter())
+                {
                     *q += b;
                 }
             }
             if let Some(bias) = &layer.attn_k_bias {
-                for (k, &b) in self.forward_buffers.k_data.iter_mut().zip(bias.data().iter()) {
+                for (k, &b) in self
+                    .forward_buffers
+                    .k_data
+                    .iter_mut()
+                    .zip(bias.data().iter())
+                {
                     *k += b;
                 }
             }
             if let Some(bias) = &layer.attn_v_bias {
-                for (v, &b) in self.forward_buffers.v_data.iter_mut().zip(bias.data().iter()) {
+                for (v, &b) in self
+                    .forward_buffers
+                    .v_data
+                    .iter_mut()
+                    .zip(bias.data().iter())
+                {
                     *v += b;
                 }
             }
-            apply_rope(&mut self.forward_buffers.q_data, num_heads, head_dim, pos, config.rope_theta);
+            apply_rope(
+                &mut self.forward_buffers.q_data,
+                num_heads,
+                head_dim,
+                pos,
+                config.rope_theta,
+            );
             apply_rope(
                 &mut self.forward_buffers.k_data,
                 num_kv_heads,
@@ -952,9 +1015,17 @@ impl Model {
 
             // Write K, V to CPU cache (always) and GPU cache (if initialized).
             // The GPU write is a host→device queue.write_buffer — no readback.
-            self.kv_cache.write(layer_idx, &self.forward_buffers.k_data, &self.forward_buffers.v_data);
+            self.kv_cache.write(
+                layer_idx,
+                &self.forward_buffers.k_data,
+                &self.forward_buffers.v_data,
+            );
             if let Some(ref mut qkv) = self.quantized_kv_cache {
-                qkv.write(layer_idx, &self.forward_buffers.k_data, &self.forward_buffers.v_data);
+                qkv.write(
+                    layer_idx,
+                    &self.forward_buffers.k_data,
+                    &self.forward_buffers.v_data,
+                );
             }
             self.backend.gpu_kv_write(
                 layer_idx,
@@ -1011,7 +1082,11 @@ impl Model {
             // Output projection
             if use_raw {
                 let rw = &self.raw_weights.as_ref().unwrap()[layer_idx];
-                let tmp = self.backend.batched_dequant_matmul(&rw.wo, &self.forward_buffers.attn_output, 1);
+                let tmp = self.backend.batched_dequant_matmul(
+                    &rw.wo,
+                    &self.forward_buffers.attn_output,
+                    1,
+                );
                 self.forward_buffers.attn_proj.copy_from_slice(&tmp);
             } else if use_cpu_q8 {
                 let rw = &self.raw_weights.as_ref().unwrap()[layer_idx];
@@ -1063,30 +1138,74 @@ impl Model {
             // Gate and up projections
             if use_raw {
                 let rw = &self.raw_weights.as_ref().unwrap()[layer_idx];
-                let gate_tmp = self.backend.batched_dequant_matmul(&rw.w_gate, &self.forward_buffers.ffn_normed, 1);
+                let gate_tmp = self.backend.batched_dequant_matmul(
+                    &rw.w_gate,
+                    &self.forward_buffers.ffn_normed,
+                    1,
+                );
                 self.forward_buffers.gate.copy_from_slice(&gate_tmp);
-                let up_tmp = self.backend.batched_dequant_matmul(&rw.w_up, &self.forward_buffers.ffn_normed, 1);
+                let up_tmp = self.backend.batched_dequant_matmul(
+                    &rw.w_up,
+                    &self.forward_buffers.ffn_normed,
+                    1,
+                );
                 self.forward_buffers.up.copy_from_slice(&up_tmp);
             } else if use_cpu_q8 {
                 let rw = &self.raw_weights.as_ref().unwrap()[layer_idx];
-                matvec_q8_0_into(&rw.w_gate.data, &self.forward_buffers.ffn_normed, rw.w_gate.num_rows, dim, &mut self.forward_buffers.gate);
-                matvec_q8_0_into(&rw.w_up.data, &self.forward_buffers.ffn_normed, rw.w_up.num_rows, dim, &mut self.forward_buffers.up);
+                matvec_q8_0_into(
+                    &rw.w_gate.data,
+                    &self.forward_buffers.ffn_normed,
+                    rw.w_gate.num_rows,
+                    dim,
+                    &mut self.forward_buffers.gate,
+                );
+                matvec_q8_0_into(
+                    &rw.w_up.data,
+                    &self.forward_buffers.ffn_normed,
+                    rw.w_up.num_rows,
+                    dim,
+                    &mut self.forward_buffers.up,
+                );
             } else {
-                matvec_into(layer.w_gate.data(), &self.forward_buffers.ffn_normed, config.intermediate_dim, dim, &mut self.forward_buffers.gate);
-                matvec_into(layer.w_up.data(), &self.forward_buffers.ffn_normed, config.intermediate_dim, dim, &mut self.forward_buffers.up);
+                matvec_into(
+                    layer.w_gate.data(),
+                    &self.forward_buffers.ffn_normed,
+                    config.intermediate_dim,
+                    dim,
+                    &mut self.forward_buffers.gate,
+                );
+                matvec_into(
+                    layer.w_up.data(),
+                    &self.forward_buffers.ffn_normed,
+                    config.intermediate_dim,
+                    dim,
+                    &mut self.forward_buffers.up,
+                );
             }
 
             // Gemma 2 uses GELU activation; Llama / Phi-3 use SiLU
             if config.architecture == Architecture::Gemma2 {
-                gelu_mul_into(&self.forward_buffers.gate, &self.forward_buffers.up, &mut self.forward_buffers.ffn_hidden);
+                gelu_mul_into(
+                    &self.forward_buffers.gate,
+                    &self.forward_buffers.up,
+                    &mut self.forward_buffers.ffn_hidden,
+                );
             } else {
-                silu_mul_into(&self.forward_buffers.gate, &self.forward_buffers.up, &mut self.forward_buffers.ffn_hidden);
+                silu_mul_into(
+                    &self.forward_buffers.gate,
+                    &self.forward_buffers.up,
+                    &mut self.forward_buffers.ffn_hidden,
+                );
             }
 
             // Down projection
             if use_raw {
                 let rw = &self.raw_weights.as_ref().unwrap()[layer_idx];
-                let tmp = self.backend.batched_dequant_matmul(&rw.w_down, &self.forward_buffers.ffn_hidden, 1);
+                let tmp = self.backend.batched_dequant_matmul(
+                    &rw.w_down,
+                    &self.forward_buffers.ffn_hidden,
+                    1,
+                );
                 self.forward_buffers.ffn_out.copy_from_slice(&tmp);
             } else if use_cpu_q8 {
                 let rw = &self.raw_weights.as_ref().unwrap()[layer_idx];
@@ -1618,40 +1737,103 @@ impl Model {
 
             if use_raw {
                 let rw = &self.raw_weights.as_ref().unwrap()[layer_idx];
-                let q_tmp = self.backend.batched_dequant_matmul(&rw.wq, &self.forward_buffers.normed, 1);
+                let q_tmp =
+                    self.backend
+                        .batched_dequant_matmul(&rw.wq, &self.forward_buffers.normed, 1);
                 self.forward_buffers.q_data.copy_from_slice(&q_tmp);
-                let k_tmp = self.backend.batched_dequant_matmul(&rw.wk, &self.forward_buffers.normed, 1);
+                let k_tmp =
+                    self.backend
+                        .batched_dequant_matmul(&rw.wk, &self.forward_buffers.normed, 1);
                 self.forward_buffers.k_data.copy_from_slice(&k_tmp);
-                let v_tmp = self.backend.batched_dequant_matmul(&rw.wv, &self.forward_buffers.normed, 1);
+                let v_tmp =
+                    self.backend
+                        .batched_dequant_matmul(&rw.wv, &self.forward_buffers.normed, 1);
                 self.forward_buffers.v_data.copy_from_slice(&v_tmp);
             } else if use_cpu_q8 {
                 let rw = &self.raw_weights.as_ref().unwrap()[layer_idx];
-                matvec_q8_0_into(&rw.wq.data, &self.forward_buffers.normed, rw.wq.num_rows, dim, &mut self.forward_buffers.q_data);
-                matvec_q8_0_into(&rw.wk.data, &self.forward_buffers.normed, rw.wk.num_rows, dim, &mut self.forward_buffers.k_data);
-                matvec_q8_0_into(&rw.wv.data, &self.forward_buffers.normed, rw.wv.num_rows, dim, &mut self.forward_buffers.v_data);
+                matvec_q8_0_into(
+                    &rw.wq.data,
+                    &self.forward_buffers.normed,
+                    rw.wq.num_rows,
+                    dim,
+                    &mut self.forward_buffers.q_data,
+                );
+                matvec_q8_0_into(
+                    &rw.wk.data,
+                    &self.forward_buffers.normed,
+                    rw.wk.num_rows,
+                    dim,
+                    &mut self.forward_buffers.k_data,
+                );
+                matvec_q8_0_into(
+                    &rw.wv.data,
+                    &self.forward_buffers.normed,
+                    rw.wv.num_rows,
+                    dim,
+                    &mut self.forward_buffers.v_data,
+                );
             } else {
-                matvec_into(layer.wq.data(), &self.forward_buffers.normed, num_heads * head_dim, dim, &mut self.forward_buffers.q_data);
-                matvec_into(layer.wk.data(), &self.forward_buffers.normed, kv_dim, dim, &mut self.forward_buffers.k_data);
-                matvec_into(layer.wv.data(), &self.forward_buffers.normed, kv_dim, dim, &mut self.forward_buffers.v_data);
+                matvec_into(
+                    layer.wq.data(),
+                    &self.forward_buffers.normed,
+                    num_heads * head_dim,
+                    dim,
+                    &mut self.forward_buffers.q_data,
+                );
+                matvec_into(
+                    layer.wk.data(),
+                    &self.forward_buffers.normed,
+                    kv_dim,
+                    dim,
+                    &mut self.forward_buffers.k_data,
+                );
+                matvec_into(
+                    layer.wv.data(),
+                    &self.forward_buffers.normed,
+                    kv_dim,
+                    dim,
+                    &mut self.forward_buffers.v_data,
+                );
             }
 
             // Attention biases (Qwen2)
             if let Some(bias) = &layer.attn_q_bias {
-                for (q, &b) in self.forward_buffers.q_data.iter_mut().zip(bias.data().iter()) {
+                for (q, &b) in self
+                    .forward_buffers
+                    .q_data
+                    .iter_mut()
+                    .zip(bias.data().iter())
+                {
                     *q += b;
                 }
             }
             if let Some(bias) = &layer.attn_k_bias {
-                for (k, &b) in self.forward_buffers.k_data.iter_mut().zip(bias.data().iter()) {
+                for (k, &b) in self
+                    .forward_buffers
+                    .k_data
+                    .iter_mut()
+                    .zip(bias.data().iter())
+                {
                     *k += b;
                 }
             }
             if let Some(bias) = &layer.attn_v_bias {
-                for (v, &b) in self.forward_buffers.v_data.iter_mut().zip(bias.data().iter()) {
+                for (v, &b) in self
+                    .forward_buffers
+                    .v_data
+                    .iter_mut()
+                    .zip(bias.data().iter())
+                {
                     *v += b;
                 }
             }
-            apply_rope(&mut self.forward_buffers.q_data, num_heads, head_dim, pos, config.rope_theta);
+            apply_rope(
+                &mut self.forward_buffers.q_data,
+                num_heads,
+                head_dim,
+                pos,
+                config.rope_theta,
+            );
             apply_rope(
                 &mut self.forward_buffers.k_data,
                 num_kv_heads,
@@ -1660,9 +1842,17 @@ impl Model {
                 config.rope_theta,
             );
 
-            self.kv_cache.write(layer_idx, &self.forward_buffers.k_data, &self.forward_buffers.v_data);
+            self.kv_cache.write(
+                layer_idx,
+                &self.forward_buffers.k_data,
+                &self.forward_buffers.v_data,
+            );
             if let Some(ref mut qkv) = self.quantized_kv_cache {
-                qkv.write(layer_idx, &self.forward_buffers.k_data, &self.forward_buffers.v_data);
+                qkv.write(
+                    layer_idx,
+                    &self.forward_buffers.k_data,
+                    &self.forward_buffers.v_data,
+                );
             }
             self.backend.gpu_kv_write(
                 layer_idx,
@@ -1715,7 +1905,11 @@ impl Model {
 
             if use_raw {
                 let rw = &self.raw_weights.as_ref().unwrap()[layer_idx];
-                let tmp = self.backend.batched_dequant_matmul(&rw.wo, &self.forward_buffers.attn_output, 1);
+                let tmp = self.backend.batched_dequant_matmul(
+                    &rw.wo,
+                    &self.forward_buffers.attn_output,
+                    1,
+                );
                 self.forward_buffers.attn_proj.copy_from_slice(&tmp);
             } else if use_cpu_q8 {
                 let rw = &self.raw_weights.as_ref().unwrap()[layer_idx];
@@ -1764,28 +1958,72 @@ impl Model {
 
             if use_raw {
                 let rw = &self.raw_weights.as_ref().unwrap()[layer_idx];
-                let gate_tmp = self.backend.batched_dequant_matmul(&rw.w_gate, &self.forward_buffers.ffn_normed, 1);
+                let gate_tmp = self.backend.batched_dequant_matmul(
+                    &rw.w_gate,
+                    &self.forward_buffers.ffn_normed,
+                    1,
+                );
                 self.forward_buffers.gate.copy_from_slice(&gate_tmp);
-                let up_tmp = self.backend.batched_dequant_matmul(&rw.w_up, &self.forward_buffers.ffn_normed, 1);
+                let up_tmp = self.backend.batched_dequant_matmul(
+                    &rw.w_up,
+                    &self.forward_buffers.ffn_normed,
+                    1,
+                );
                 self.forward_buffers.up.copy_from_slice(&up_tmp);
             } else if use_cpu_q8 {
                 let rw = &self.raw_weights.as_ref().unwrap()[layer_idx];
-                matvec_q8_0_into(&rw.w_gate.data, &self.forward_buffers.ffn_normed, rw.w_gate.num_rows, dim, &mut self.forward_buffers.gate);
-                matvec_q8_0_into(&rw.w_up.data, &self.forward_buffers.ffn_normed, rw.w_up.num_rows, dim, &mut self.forward_buffers.up);
+                matvec_q8_0_into(
+                    &rw.w_gate.data,
+                    &self.forward_buffers.ffn_normed,
+                    rw.w_gate.num_rows,
+                    dim,
+                    &mut self.forward_buffers.gate,
+                );
+                matvec_q8_0_into(
+                    &rw.w_up.data,
+                    &self.forward_buffers.ffn_normed,
+                    rw.w_up.num_rows,
+                    dim,
+                    &mut self.forward_buffers.up,
+                );
             } else {
-                matvec_into(layer.w_gate.data(), &self.forward_buffers.ffn_normed, config.intermediate_dim, dim, &mut self.forward_buffers.gate);
-                matvec_into(layer.w_up.data(), &self.forward_buffers.ffn_normed, config.intermediate_dim, dim, &mut self.forward_buffers.up);
+                matvec_into(
+                    layer.w_gate.data(),
+                    &self.forward_buffers.ffn_normed,
+                    config.intermediate_dim,
+                    dim,
+                    &mut self.forward_buffers.gate,
+                );
+                matvec_into(
+                    layer.w_up.data(),
+                    &self.forward_buffers.ffn_normed,
+                    config.intermediate_dim,
+                    dim,
+                    &mut self.forward_buffers.up,
+                );
             }
 
             if config.architecture == Architecture::Gemma2 {
-                gelu_mul_into(&self.forward_buffers.gate, &self.forward_buffers.up, &mut self.forward_buffers.ffn_hidden);
+                gelu_mul_into(
+                    &self.forward_buffers.gate,
+                    &self.forward_buffers.up,
+                    &mut self.forward_buffers.ffn_hidden,
+                );
             } else {
-                silu_mul_into(&self.forward_buffers.gate, &self.forward_buffers.up, &mut self.forward_buffers.ffn_hidden);
+                silu_mul_into(
+                    &self.forward_buffers.gate,
+                    &self.forward_buffers.up,
+                    &mut self.forward_buffers.ffn_hidden,
+                );
             }
 
             if use_raw {
                 let rw = &self.raw_weights.as_ref().unwrap()[layer_idx];
-                let tmp = self.backend.batched_dequant_matmul(&rw.w_down, &self.forward_buffers.ffn_hidden, 1);
+                let tmp = self.backend.batched_dequant_matmul(
+                    &rw.w_down,
+                    &self.forward_buffers.ffn_hidden,
+                    1,
+                );
                 self.forward_buffers.ffn_out.copy_from_slice(&tmp);
             } else if use_cpu_q8 {
                 let rw = &self.raw_weights.as_ref().unwrap()[layer_idx];
@@ -3354,13 +3592,7 @@ fn matvec_scalar_into(mat: &[f32], vec: &[f32], rows: usize, cols: usize, output
 
 /// ARM NEON SIMD matvec into pre-allocated output.
 #[cfg(all(target_arch = "aarch64", not(target_os = "macos")))]
-fn matvec_simd_into(
-    mat: &[f32],
-    vec: &[f32],
-    rows: usize,
-    cols: usize,
-    output: &mut [f32],
-) {
+fn matvec_simd_into(mat: &[f32], vec: &[f32], rows: usize, cols: usize, output: &mut [f32]) {
     for (i, out) in output.iter_mut().enumerate() {
         let row = &mat[i * cols..i * cols + cols];
         // SAFETY: row.len() == cols, SIMD feature gated by cfg
@@ -3374,13 +3606,7 @@ fn matvec_simd_into(
 /// Caller must ensure AVX2 + FMA are available.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2,fma")]
-unsafe fn matvec_avx2_into(
-    mat: &[f32],
-    vec: &[f32],
-    rows: usize,
-    cols: usize,
-    output: &mut [f32],
-) {
+unsafe fn matvec_avx2_into(mat: &[f32], vec: &[f32], rows: usize, cols: usize, output: &mut [f32]) {
     for (i, out) in output.iter_mut().enumerate() {
         let row = &mat[i * cols..i * cols + cols];
         *out = matvec_avx2_row(row, vec, cols);
@@ -3451,13 +3677,31 @@ fn matvec_q8_0_neon_into(
         input_quants[start..start + Q8_0_BLOCK_SIZE].copy_from_slice(&quants);
     }
 
-    for (i, out) in output.iter_mut().enumerate() {
-        let start = i * bytes_per_row;
-        let row_bytes = &weight_data[start..start + bytes_per_row];
-        // SAFETY: NEON always available on aarch64
-        *out = unsafe {
-            dot_q8_0_q8_0_neon(row_bytes, &input_scales, &input_quants, blocks_per_row)
-        };
+    let rows = output.len();
+    let total_work = rows * cols;
+    if total_work >= 2_000_000 {
+        use rayon::prelude::*;
+        output
+            .par_chunks_mut(32)
+            .enumerate()
+            .for_each(|(chunk_idx, chunk)| {
+                for (local_idx, out) in chunk.iter_mut().enumerate() {
+                    let row = chunk_idx * 32 + local_idx;
+                    let start = row * bytes_per_row;
+                    let row_bytes = &weight_data[start..start + bytes_per_row];
+                    *out = unsafe {
+                        dot_q8_0_q8_0_neon(row_bytes, &input_scales, &input_quants, blocks_per_row)
+                    };
+                }
+            });
+    } else {
+        for (i, out) in output.iter_mut().enumerate() {
+            let start = i * bytes_per_row;
+            let row_bytes = &weight_data[start..start + bytes_per_row];
+            *out = unsafe {
+                dot_q8_0_q8_0_neon(row_bytes, &input_scales, &input_quants, blocks_per_row)
+            };
+        }
     }
 }
 

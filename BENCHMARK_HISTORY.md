@@ -559,3 +559,68 @@ Baseline model: SmolLM2-135M-Instruct Q8_0 (138MB, 30 layers, dim=576).
 | Decode (256 tok) | 30.5 |
 | Sustained (512 tok) | **29.5** |
 
+### 2026-04-13 18:54 — `e34507b Merge pull request #412 from sauravpanda/eliminate-forwar...`
+
+**Hardware:** Apple M5 Pro, ARM64 (NEON SIMD)  
+**Model:** Llama, ~1498M params, 16 layers, dim=2048  
+**Load time:** 1.04s
+
+| Metric | tok/s |
+|---|---|
+| Decode (16 tok) | 21.5 |
+| Decode (64 tok) | 21.5 |
+| Decode (256 tok) | 21.0 |
+| Sustained (512 tok) | **20.4** |
+
+### 2026-04-13 18:54 — `e34507b Merge pull request #412 from sauravpanda/eliminate-forwar...`
+
+**Hardware:** Apple M5 Pro, ARM64 (NEON SIMD)  
+**Model:** Llama, ~162M params, 30 layers, dim=576  
+**Load time:** 0.10s
+
+| Metric | tok/s |
+|---|---|
+| Decode (16 tok) | 233.1 |
+| Decode (64 tok) | 225.4 |
+| Decode (256 tok) | 201.6 |
+| Sustained (512 tok) | **172.1** |
+
+### 2026-04-13 18:57 — `e34507b Merge pull request #412 from sauravpanda/eliminate-forwar...`
+
+**Hardware:** Apple M5 Pro, ARM64 (NEON SIMD)  
+**Model:** Llama, ~1498M params, 16 layers, dim=2048  
+**Load time:** 0.86s
+
+| Metric | tok/s |
+|---|---|
+| Decode (16 tok) | 30.4 |
+| Decode (64 tok) | 30.2 |
+| Decode (256 tok) | 28.1 |
+| Sustained (512 tok) | **25.6** |
+
+### 2026-04-13 18:57 — `e34507b Merge pull request #412 from sauravpanda/eliminate-forwar...`
+
+**Hardware:** Apple M5 Pro, ARM64 (NEON SIMD)  
+**Model:** Llama, ~162M params, 30 layers, dim=576  
+**Load time:** 0.10s
+
+| Metric | tok/s |
+|---|---|
+| Decode (16 tok) | 205.3 |
+| Decode (64 tok) | 195.1 |
+| Decode (256 tok) | 159.3 |
+| Sustained (512 tok) | **152.3** |
+
+### 2026-04-13 18:58 — `e34507b Merge pull request #412 from sauravpanda/eliminate-forwar...`
+
+**Hardware:** Apple M5 Pro, ARM64 (NEON SIMD)  
+**Model:** Llama, ~162M params, 30 layers, dim=576  
+**Load time:** 0.10s
+
+| Metric | tok/s |
+|---|---|
+| Decode (16 tok) | 219.8 |
+| Decode (64 tok) | 206.5 |
+| Decode (256 tok) | 181.5 |
+| Sustained (512 tok) | **156.5** |
+
