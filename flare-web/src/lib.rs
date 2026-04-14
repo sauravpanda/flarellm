@@ -84,6 +84,36 @@ pub fn supports_webnn() -> bool {
         .is_some_and(|ml| !ml.is_undefined() && !ml.is_null())
 }
 
+/// Check if the browser exposes the Web Speech API for speech recognition.
+///
+/// This probes `window.SpeechRecognition` and the WebKit-prefixed
+/// `window.webkitSpeechRecognition`. Returning `true` means the demo voice
+/// mode can capture microphone input and produce transcripts through the
+/// platform speech engine. This is a foundation for the voice pipeline
+/// (issue #395); a fully offline path will eventually run Whisper in WASM.
+#[wasm_bindgen]
+pub fn supports_speech_recognition() -> bool {
+    web_sys::window()
+        .and_then(|w| {
+            js_sys::Reflect::get(&w, &"SpeechRecognition".into())
+                .or_else(|_| js_sys::Reflect::get(&w, &"webkitSpeechRecognition".into()))
+                .ok()
+        })
+        .is_some_and(|sr| !sr.is_undefined() && !sr.is_null())
+}
+
+/// Check if the browser exposes the Web Speech API for speech synthesis.
+///
+/// Returns `true` when `window.speechSynthesis` is available, enabling the
+/// demo voice mode to speak model responses. A fully offline path will
+/// eventually run a neural TTS model in WASM.
+#[wasm_bindgen]
+pub fn supports_speech_synthesis() -> bool {
+    web_sys::window()
+        .and_then(|w| js_sys::Reflect::get(&w, &"speechSynthesis".into()).ok())
+        .is_some_and(|ss| !ss.is_undefined() && !ss.is_null())
+}
+
 /// Check if this WASM build was compiled with relaxed SIMD support.
 ///
 /// Relaxed SIMD provides hardware-specific faster operations like fused
