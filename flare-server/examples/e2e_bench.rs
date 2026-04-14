@@ -119,6 +119,9 @@ fn main() {
         }
     }
 
+    // Build fused f32 weight matrices for Accelerate path (QKV and gate/up fused)
+    model.build_fused_f32_weights();
+
     // --- GPU backend ---
     let backend_label;
     if gpu_mode {

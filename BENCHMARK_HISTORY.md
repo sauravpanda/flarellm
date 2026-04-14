@@ -728,3 +728,29 @@ Baseline model: SmolLM2-135M-Instruct Q8_0 (138MB, 30 layers, dim=576).
 | Decode (256 tok) | 174.2 |
 | Sustained (512 tok) | **153.5** |
 
+### 2026-04-14 11:02 — `5b5b84b Fix clippy warnings in fused attention test`
+
+**Hardware:** Apple M5 Pro, ARM64 (NEON SIMD)  
+**Model:** Llama, ~162M params, 30 layers, dim=576  
+**Load time:** 0.09s
+
+| Metric | tok/s |
+|---|---|
+| Decode (16 tok) | 223.0 |
+| Decode (64 tok) | 218.7 |
+| Decode (256 tok) | 195.5 |
+| Sustained (512 tok) | **168.4** |
+
+### 2026-04-14 11:03 — `5b5b84b Fix clippy warnings in fused attention test`
+
+**Hardware:** Apple M5 Pro, ARM64 (NEON SIMD)  
+**Model:** Llama, ~1498M params, 16 layers, dim=2048  
+**Load time:** 0.86s
+
+| Metric | tok/s |
+|---|---|
+| Decode (16 tok) | 38.9 |
+| Decode (64 tok) | 37.1 |
+| Decode (256 tok) | 34.9 |
+| Sustained (512 tok) | **32.7** |
+
