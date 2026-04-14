@@ -312,3 +312,133 @@ Baseline model: SmolLM2-135M-Instruct Q8_0 (138MB, 30 layers, dim=576).
 | Decode (256 tok) | 25.0 |
 | Sustained (512 tok) | **24.0** |
 
+### 2026-04-13 17:22 — `01448a5 Escape brackets in doc comment to fix rustdoc build`
+
+**Hardware:** Apple M5 Pro, ARM64 (NEON SIMD)  
+**Model:** Llama, ~162M params, 30 layers, dim=576  
+**Load time:** 0.09s
+
+| Metric | tok/s |
+|---|---|
+| Decode (16 tok) | 141.4 |
+| Decode (64 tok) | 138.2 |
+| Decode (256 tok) | 121.1 |
+| Sustained (512 tok) | **104.7** |
+
+### 2026-04-13 17:23 — `01448a5 Escape brackets in doc comment to fix rustdoc build`
+
+**Hardware:** Apple M5 Pro, ARM64 (NEON SIMD)  
+**Model:** Llama, ~1498M params, 16 layers, dim=2048  
+**Load time:** 0.96s
+
+| Metric | tok/s |
+|---|---|
+| Decode (16 tok) | 25.9 |
+| Decode (64 tok) | 25.8 |
+| Decode (256 tok) | 24.8 |
+| Sustained (512 tok) | **23.9** |
+
+### 2026-04-13 17:25 — `01448a5 Escape brackets in doc comment to fix rustdoc build`
+
+**Hardware:** Apple M5 Pro, ARM64 (NEON SIMD)  
+**Model:** Llama, ~162M params, 30 layers, dim=576  
+**Load time:** 0.09s
+
+| Metric | tok/s |
+|---|---|
+| Decode (16 tok) | 8.9 |
+| Decode (64 tok) | 8.8 |
+| Decode (256 tok) | 8.3 |
+| Sustained (512 tok) | **7.6** |
+
+### 2026-04-13 17:42 — `0870941 Merge pull request #407 from sauravpanda/direct-q8-0-matvec`
+
+**Hardware:** Apple M5 Pro, ARM64 (NEON SIMD)  
+**Model:** Llama, ~162M params, 30 layers, dim=576  
+**Load time:** 0.10s
+
+| Metric | tok/s |
+|---|---|
+| Decode (16 tok) | 229.7 |
+| Decode (64 tok) | 219.6 |
+| Decode (256 tok) | 168.3 |
+| Sustained (512 tok) | **150.7** |
+
+### 2026-04-13 17:43 — `0870941 Merge pull request #407 from sauravpanda/direct-q8-0-matvec`
+
+**Hardware:** Apple M5 Pro, ARM64 (NEON SIMD)  
+**Model:** Llama, ~1498M params, 16 layers, dim=2048  
+**Load time:** 0.95s
+
+| Metric | tok/s |
+|---|---|
+| Decode (16 tok) | 24.9 |
+| Decode (64 tok) | 24.6 |
+| Decode (256 tok) | 23.7 |
+| Sustained (512 tok) | **22.8** |
+
+### 2026-04-13 17:47 — `0870941 Merge pull request #407 from sauravpanda/direct-q8-0-matvec`
+
+**Hardware:** Apple M5 Pro, ARM64 (NEON SIMD)  
+**Model:** Llama, ~1498M params, 16 layers, dim=2048  
+**Load time:** 0.91s
+
+| Metric | tok/s |
+|---|---|
+| Decode (16 tok) | 25.4 |
+| Decode (64 tok) | 25.7 |
+| Decode (256 tok) | 24.5 |
+| Sustained (512 tok) | **24.1** |
+
+### 2026-04-13 17:49 — `0870941 Merge pull request #407 from sauravpanda/direct-q8-0-matvec`
+
+**Hardware:** Apple M5 Pro, ARM64 (NEON SIMD)  
+**Model:** Llama, ~1498M params, 16 layers, dim=2048  
+**Load time:** 0.91s
+
+| Metric | tok/s |
+|---|---|
+| Decode (16 tok) | 24.3 |
+| Decode (64 tok) | 22.7 |
+| Decode (256 tok) | 21.4 |
+| Sustained (512 tok) | **21.6** |
+
+### 2026-04-13 17:55 — `285d905 Merge pull request #408 from sauravpanda/optimize-q8-neon...`
+
+**Hardware:** Apple M5 Pro, ARM64 (NEON SIMD)  
+**Model:** Llama, ~162M params, 30 layers, dim=576  
+**Load time:** 0.11s
+
+| Metric | tok/s |
+|---|---|
+| Decode (16 tok) | 113.5 |
+| Decode (64 tok) | 114.2 |
+| Decode (256 tok) | 105.4 |
+| Sustained (512 tok) | **93.1** |
+
+### 2026-04-13 17:56 — `285d905 Merge pull request #408 from sauravpanda/optimize-q8-neon...`
+
+**Hardware:** Apple M5 Pro, ARM64 (NEON SIMD)  
+**Model:** Llama, ~1498M params, 16 layers, dim=2048  
+**Load time:** 0.89s
+
+| Metric | tok/s |
+|---|---|
+| Decode (16 tok) | 25.5 |
+| Decode (64 tok) | 25.6 |
+| Decode (256 tok) | 24.4 |
+| Sustained (512 tok) | **23.5** |
+
+### 2026-04-13 17:56 — `285d905 Merge pull request #408 from sauravpanda/optimize-q8-neon...`
+
+**Hardware:** Apple M5 Pro, ARM64 (NEON SIMD)  
+**Model:** Llama, ~162M params, 30 layers, dim=576  
+**Load time:** 0.11s
+
+| Metric | tok/s |
+|---|---|
+| Decode (16 tok) | 207.3 |
+| Decode (64 tok) | 179.1 |
+| Decode (256 tok) | 175.4 |
+| Sustained (512 tok) | **147.1** |
+

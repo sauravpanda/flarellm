@@ -126,13 +126,7 @@ pub trait ComputeBackend: Send + Sync {
     /// `weight_data`: raw Q8_0 bytes (row-major).
     /// `input`: f32 vector of length `cols`.
     /// `rows`: output dimension.  `cols`: input dimension (must be multiple of 32).
-    fn matvec_q8_0(
-        &self,
-        weight_data: &[u8],
-        input: &[f32],
-        rows: usize,
-        cols: usize,
-    ) -> Vec<f32> {
+    fn matvec_q8_0(&self, weight_data: &[u8], input: &[f32], rows: usize, cols: usize) -> Vec<f32> {
         matvec_q8_0(weight_data, input, rows, cols)
     }
 
@@ -806,15 +800,19 @@ impl Model {
         // dequant+matvec, use that path to avoid dequantizing to f32 for every token.
         let use_raw = self.backend.supports_dequant_matmul() && self.raw_weights.is_some();
 
-        // CPU Q8_0 direct path: when raw weights are Q8_0 but the backend does NOT
-        // have a GPU dequant kernel, compute the dot product directly on quantized
-        // int8 data instead of reading dequantized f32 weights.
+        // CPU Q8_0 direct path: compute dot product directly on quantized int8 data
+        // instead of reading dequantized f32 weights. Saves 3.8x memory bandwidth.
+        // On macOS, Accelerate's cblas_sgemv uses AMX hardware which is faster than
+        // our NEON Q8_0 path, so we skip this optimization there.
+        #[cfg(target_os = "macos")]
+        let use_cpu_q8 = false;
+        #[cfg(not(target_os = "macos"))]
         let use_cpu_q8 = !use_raw
             && self.raw_weights.is_some()
             && self
                 .raw_weights
                 .as_ref()
-                .map_or(false, |rw| !rw.is_empty() && rw[0].wq.format == WeightFormat::Q8_0);
+                .is_some_and(|rw| !rw.is_empty() && rw[0].wq.format == WeightFormat::Q8_0);
 
         // Process each transformer layer
         for layer_idx in 0..config.num_layers {
@@ -833,7 +831,8 @@ impl Model {
                 self.backend.batched_dequant_matmul(&rw.wq, &normed, 1)
             } else if use_cpu_q8 {
                 let rw = &self.raw_weights.as_ref().unwrap()[layer_idx];
-                self.backend.matvec_q8_0(&rw.wq.data, &normed, rw.wq.num_rows, dim)
+                self.backend
+                    .matvec_q8_0(&rw.wq.data, &normed, rw.wq.num_rows, dim)
             } else {
                 self.backend
                     .matvec(layer.wq.data(), &normed, num_heads * head_dim, dim)
@@ -843,7 +842,8 @@ impl Model {
                 self.backend.batched_dequant_matmul(&rw.wk, &normed, 1)
             } else if use_cpu_q8 {
                 let rw = &self.raw_weights.as_ref().unwrap()[layer_idx];
-                self.backend.matvec_q8_0(&rw.wk.data, &normed, rw.wk.num_rows, dim)
+                self.backend
+                    .matvec_q8_0(&rw.wk.data, &normed, rw.wk.num_rows, dim)
             } else {
                 self.backend.matvec(layer.wk.data(), &normed, kv_dim, dim)
             };
@@ -852,7 +852,8 @@ impl Model {
                 self.backend.batched_dequant_matmul(&rw.wv, &normed, 1)
             } else if use_cpu_q8 {
                 let rw = &self.raw_weights.as_ref().unwrap()[layer_idx];
-                self.backend.matvec_q8_0(&rw.wv.data, &normed, rw.wv.num_rows, dim)
+                self.backend
+                    .matvec_q8_0(&rw.wv.data, &normed, rw.wv.num_rows, dim)
             } else {
                 self.backend.matvec(layer.wv.data(), &normed, kv_dim, dim)
             };
@@ -938,7 +939,12 @@ impl Model {
                 self.backend.batched_dequant_matmul(&rw.wo, &attn_output, 1)
             } else if use_cpu_q8 {
                 let rw = &self.raw_weights.as_ref().unwrap()[layer_idx];
-                self.backend.matvec_q8_0(&rw.wo.data, &attn_output, rw.wo.num_rows, num_heads * head_dim)
+                self.backend.matvec_q8_0(
+                    &rw.wo.data,
+                    &attn_output,
+                    rw.wo.num_rows,
+                    num_heads * head_dim,
+                )
             } else {
                 self.backend
                     .matvec(layer.wo.data(), &attn_output, dim, num_heads * head_dim)
@@ -969,7 +975,8 @@ impl Model {
                 self.backend.batched_dequant_matmul(&rw.w_gate, &normed, 1)
             } else if use_cpu_q8 {
                 let rw = &self.raw_weights.as_ref().unwrap()[layer_idx];
-                self.backend.matvec_q8_0(&rw.w_gate.data, &normed, rw.w_gate.num_rows, dim)
+                self.backend
+                    .matvec_q8_0(&rw.w_gate.data, &normed, rw.w_gate.num_rows, dim)
             } else {
                 self.backend
                     .matvec(layer.w_gate.data(), &normed, config.intermediate_dim, dim)
@@ -979,7 +986,8 @@ impl Model {
                 self.backend.batched_dequant_matmul(&rw.w_up, &normed, 1)
             } else if use_cpu_q8 {
                 let rw = &self.raw_weights.as_ref().unwrap()[layer_idx];
-                self.backend.matvec_q8_0(&rw.w_up.data, &normed, rw.w_up.num_rows, dim)
+                self.backend
+                    .matvec_q8_0(&rw.w_up.data, &normed, rw.w_up.num_rows, dim)
             } else {
                 self.backend
                     .matvec(layer.w_up.data(), &normed, config.intermediate_dim, dim)
@@ -999,7 +1007,12 @@ impl Model {
                     .batched_dequant_matmul(&rw.w_down, &ffn_hidden, 1)
             } else if use_cpu_q8 {
                 let rw = &self.raw_weights.as_ref().unwrap()[layer_idx];
-                self.backend.matvec_q8_0(&rw.w_down.data, &ffn_hidden, rw.w_down.num_rows, config.intermediate_dim)
+                self.backend.matvec_q8_0(
+                    &rw.w_down.data,
+                    &ffn_hidden,
+                    rw.w_down.num_rows,
+                    config.intermediate_dim,
+                )
             } else {
                 self.backend.matvec(
                     layer.w_down.data(),
@@ -1493,7 +1506,7 @@ impl Model {
             && self
                 .raw_weights
                 .as_ref()
-                .map_or(false, |rw| !rw.is_empty() && rw[0].wq.format == WeightFormat::Q8_0);
+                .is_some_and(|rw| !rw.is_empty() && rw[0].wq.format == WeightFormat::Q8_0);
 
         // Process only the first `num_layers` transformer layers
         for layer_idx in 0..num_layers {
@@ -1509,7 +1522,8 @@ impl Model {
                 self.backend.batched_dequant_matmul(&rw.wq, &normed, 1)
             } else if use_cpu_q8 {
                 let rw = &self.raw_weights.as_ref().unwrap()[layer_idx];
-                self.backend.matvec_q8_0(&rw.wq.data, &normed, rw.wq.num_rows, dim)
+                self.backend
+                    .matvec_q8_0(&rw.wq.data, &normed, rw.wq.num_rows, dim)
             } else {
                 self.backend
                     .matvec(layer.wq.data(), &normed, num_heads * head_dim, dim)
@@ -1519,7 +1533,8 @@ impl Model {
                 self.backend.batched_dequant_matmul(&rw.wk, &normed, 1)
             } else if use_cpu_q8 {
                 let rw = &self.raw_weights.as_ref().unwrap()[layer_idx];
-                self.backend.matvec_q8_0(&rw.wk.data, &normed, rw.wk.num_rows, dim)
+                self.backend
+                    .matvec_q8_0(&rw.wk.data, &normed, rw.wk.num_rows, dim)
             } else {
                 self.backend.matvec(layer.wk.data(), &normed, kv_dim, dim)
             };
@@ -1528,7 +1543,8 @@ impl Model {
                 self.backend.batched_dequant_matmul(&rw.wv, &normed, 1)
             } else if use_cpu_q8 {
                 let rw = &self.raw_weights.as_ref().unwrap()[layer_idx];
-                self.backend.matvec_q8_0(&rw.wv.data, &normed, rw.wv.num_rows, dim)
+                self.backend
+                    .matvec_q8_0(&rw.wv.data, &normed, rw.wv.num_rows, dim)
             } else {
                 self.backend.matvec(layer.wv.data(), &normed, kv_dim, dim)
             };
@@ -1608,7 +1624,12 @@ impl Model {
                 self.backend.batched_dequant_matmul(&rw.wo, &attn_output, 1)
             } else if use_cpu_q8 {
                 let rw = &self.raw_weights.as_ref().unwrap()[layer_idx];
-                self.backend.matvec_q8_0(&rw.wo.data, &attn_output, rw.wo.num_rows, num_heads * head_dim)
+                self.backend.matvec_q8_0(
+                    &rw.wo.data,
+                    &attn_output,
+                    rw.wo.num_rows,
+                    num_heads * head_dim,
+                )
             } else {
                 self.backend
                     .matvec(layer.wo.data(), &attn_output, dim, num_heads * head_dim)
@@ -1636,7 +1657,8 @@ impl Model {
                 self.backend.batched_dequant_matmul(&rw.w_gate, &normed, 1)
             } else if use_cpu_q8 {
                 let rw = &self.raw_weights.as_ref().unwrap()[layer_idx];
-                self.backend.matvec_q8_0(&rw.w_gate.data, &normed, rw.w_gate.num_rows, dim)
+                self.backend
+                    .matvec_q8_0(&rw.w_gate.data, &normed, rw.w_gate.num_rows, dim)
             } else {
                 self.backend
                     .matvec(layer.w_gate.data(), &normed, config.intermediate_dim, dim)
@@ -1646,7 +1668,8 @@ impl Model {
                 self.backend.batched_dequant_matmul(&rw.w_up, &normed, 1)
             } else if use_cpu_q8 {
                 let rw = &self.raw_weights.as_ref().unwrap()[layer_idx];
-                self.backend.matvec_q8_0(&rw.w_up.data, &normed, rw.w_up.num_rows, dim)
+                self.backend
+                    .matvec_q8_0(&rw.w_up.data, &normed, rw.w_up.num_rows, dim)
             } else {
                 self.backend
                     .matvec(layer.w_up.data(), &normed, config.intermediate_dim, dim)
@@ -1664,7 +1687,12 @@ impl Model {
                     .batched_dequant_matmul(&rw.w_down, &ffn_hidden, 1)
             } else if use_cpu_q8 {
                 let rw = &self.raw_weights.as_ref().unwrap()[layer_idx];
-                self.backend.matvec_q8_0(&rw.w_down.data, &ffn_hidden, rw.w_down.num_rows, config.intermediate_dim)
+                self.backend.matvec_q8_0(
+                    &rw.w_down.data,
+                    &ffn_hidden,
+                    rw.w_down.num_rows,
+                    config.intermediate_dim,
+                )
             } else {
                 self.backend.matvec(
                     layer.w_down.data(),
@@ -1819,7 +1847,7 @@ unsafe fn rmsnorm_neon(x: &[f32], weight: &[f32], eps: f32) -> Vec<f32> {
 #[cfg(target_os = "macos")]
 extern "C" {
     fn cblas_sgemv(
-        order: i32,   // CblasRowMajor = 101
+        order: i32,    // CblasRowMajor = 101
         trans: i32,    // CblasNoTrans = 111
         m: i32,        // rows
         n: i32,        // cols
@@ -1856,21 +1884,21 @@ pub fn matvec(mat: &[f32], vec: &[f32], rows: usize, cols: usize) -> Vec<f32> {
         // CblasRowMajor layout. Accelerate manages its own threading internally.
         unsafe {
             cblas_sgemv(
-                101,               // CblasRowMajor
-                111,               // CblasNoTrans
+                101, // CblasRowMajor
+                111, // CblasNoTrans
                 rows as i32,
                 cols as i32,
-                1.0,               // alpha
+                1.0, // alpha
                 mat.as_ptr(),
-                cols as i32,       // lda
+                cols as i32, // lda
                 vec.as_ptr(),
-                1,                 // incx
-                0.0,               // beta
+                1,   // incx
+                0.0, // beta
                 output.as_mut_ptr(),
-                1,                 // incy
+                1, // incy
             );
         }
-        return output;
+        output
     }
     #[cfg(all(target_arch = "aarch64", not(target_os = "macos")))]
     {
@@ -1901,6 +1929,7 @@ pub fn matvec(mat: &[f32], vec: &[f32], rows: usize, cols: usize) -> Vec<f32> {
 /// The 2M threshold ensures 2048x2048 matvecs (4.2M FMAs, common in Q/K/V/O
 /// projections for 1B-class models) are parallelized across available cores.
 #[inline]
+#[allow(dead_code)]
 fn parallel_chunk_rows(total_work: usize, rows: usize) -> Option<usize> {
     if total_work < 2_000_000 {
         // Small matrix: rayon overhead would dominate
@@ -2239,12 +2268,7 @@ fn matvec_q8_0_scalar_row(row_bytes: &[u8], input: &[f32], blocks_per_row: usize
 /// `weight_data`: raw Q8_0 bytes (row-major, `rows * blocks_per_row * 34` bytes).
 /// `input`: f32 vector of length `cols` (= `blocks_per_row * 32`).
 /// `rows`: number of output rows.  `cols`: input dimension (must be multiple of 32).
-pub fn matvec_q8_0_scalar(
-    weight_data: &[u8],
-    input: &[f32],
-    rows: usize,
-    cols: usize,
-) -> Vec<f32> {
+pub fn matvec_q8_0_scalar(weight_data: &[u8], input: &[f32], rows: usize, cols: usize) -> Vec<f32> {
     let blocks_per_row = cols / Q8_0_BLOCK_SIZE;
     let bytes_per_row = blocks_per_row * Q8_0_BLOCK_BYTES;
 
@@ -2288,26 +2312,58 @@ unsafe fn matvec_q8_0_neon_row(row_bytes: &[u8], input: &[f32], blocks_per_row: 
         // Batch 0: indices 0..8
         let q8 = vld1_s8(q);
         let q16 = vmovl_s8(q8);
-        a0 = vfmaq_f32(a0, vcvtq_f32_s32(vmovl_s16(vget_low_s16(q16))), vld1q_f32(inp));
-        a1 = vfmaq_f32(a1, vcvtq_f32_s32(vmovl_s16(vget_high_s16(q16))), vld1q_f32(inp.add(4)));
+        a0 = vfmaq_f32(
+            a0,
+            vcvtq_f32_s32(vmovl_s16(vget_low_s16(q16))),
+            vld1q_f32(inp),
+        );
+        a1 = vfmaq_f32(
+            a1,
+            vcvtq_f32_s32(vmovl_s16(vget_high_s16(q16))),
+            vld1q_f32(inp.add(4)),
+        );
 
         // Batch 1: indices 8..16
         let q8 = vld1_s8(q.add(8));
         let q16 = vmovl_s8(q8);
-        a2 = vfmaq_f32(a2, vcvtq_f32_s32(vmovl_s16(vget_low_s16(q16))), vld1q_f32(inp.add(8)));
-        a3 = vfmaq_f32(a3, vcvtq_f32_s32(vmovl_s16(vget_high_s16(q16))), vld1q_f32(inp.add(12)));
+        a2 = vfmaq_f32(
+            a2,
+            vcvtq_f32_s32(vmovl_s16(vget_low_s16(q16))),
+            vld1q_f32(inp.add(8)),
+        );
+        a3 = vfmaq_f32(
+            a3,
+            vcvtq_f32_s32(vmovl_s16(vget_high_s16(q16))),
+            vld1q_f32(inp.add(12)),
+        );
 
         // Batch 2: indices 16..24
         let q8 = vld1_s8(q.add(16));
         let q16 = vmovl_s8(q8);
-        a0 = vfmaq_f32(a0, vcvtq_f32_s32(vmovl_s16(vget_low_s16(q16))), vld1q_f32(inp.add(16)));
-        a1 = vfmaq_f32(a1, vcvtq_f32_s32(vmovl_s16(vget_high_s16(q16))), vld1q_f32(inp.add(20)));
+        a0 = vfmaq_f32(
+            a0,
+            vcvtq_f32_s32(vmovl_s16(vget_low_s16(q16))),
+            vld1q_f32(inp.add(16)),
+        );
+        a1 = vfmaq_f32(
+            a1,
+            vcvtq_f32_s32(vmovl_s16(vget_high_s16(q16))),
+            vld1q_f32(inp.add(20)),
+        );
 
         // Batch 3: indices 24..32
         let q8 = vld1_s8(q.add(24));
         let q16 = vmovl_s8(q8);
-        a2 = vfmaq_f32(a2, vcvtq_f32_s32(vmovl_s16(vget_low_s16(q16))), vld1q_f32(inp.add(24)));
-        a3 = vfmaq_f32(a3, vcvtq_f32_s32(vmovl_s16(vget_high_s16(q16))), vld1q_f32(inp.add(28)));
+        a2 = vfmaq_f32(
+            a2,
+            vcvtq_f32_s32(vmovl_s16(vget_low_s16(q16))),
+            vld1q_f32(inp.add(24)),
+        );
+        a3 = vfmaq_f32(
+            a3,
+            vcvtq_f32_s32(vmovl_s16(vget_high_s16(q16))),
+            vld1q_f32(inp.add(28)),
+        );
 
         // Horizontal sum of all 4 accumulators, multiply by block scale
         let sum = vaddq_f32(vaddq_f32(a0, a1), vaddq_f32(a2, a3));
@@ -2319,12 +2375,7 @@ unsafe fn matvec_q8_0_neon_row(row_bytes: &[u8], input: &[f32], blocks_per_row: 
 
 /// ARM NEON Q8_0 direct matvec with rayon parallelism on native targets.
 #[cfg(target_arch = "aarch64")]
-fn matvec_q8_0_neon(
-    weight_data: &[u8],
-    input: &[f32],
-    rows: usize,
-    cols: usize,
-) -> Vec<f32> {
+fn matvec_q8_0_neon(weight_data: &[u8], input: &[f32], rows: usize, cols: usize) -> Vec<f32> {
     let blocks_per_row = cols / Q8_0_BLOCK_SIZE;
     let bytes_per_row = blocks_per_row * Q8_0_BLOCK_BYTES;
 
@@ -2368,7 +2419,11 @@ fn matvec_q8_0_neon(
 /// `input`: f32 vector of length `cols`.
 /// `rows`: output dimension.  `cols`: input dimension (multiple of 32).
 pub fn matvec_q8_0(weight_data: &[u8], input: &[f32], rows: usize, cols: usize) -> Vec<f32> {
-    debug_assert_eq!(cols % Q8_0_BLOCK_SIZE, 0, "cols must be multiple of 32 for Q8_0");
+    debug_assert_eq!(
+        cols % Q8_0_BLOCK_SIZE,
+        0,
+        "cols must be multiple of 32 for Q8_0"
+    );
     debug_assert_eq!(
         weight_data.len(),
         rows * (cols / Q8_0_BLOCK_SIZE) * Q8_0_BLOCK_BYTES,
@@ -3785,8 +3840,8 @@ mod tests {
                 buf.push(scale_f16 as u8);
                 buf.push((scale_f16 >> 8) as u8);
                 // Write 32 int8 quants
-                for j in 0..32 {
-                    let q = (block[j] * inv_scale).round().clamp(-128.0, 127.0) as i8;
+                for &val in block {
+                    let q = (val * inv_scale).round().clamp(-128.0, 127.0) as i8;
                     buf.push(q as u8);
                 }
             }
@@ -3806,7 +3861,7 @@ mod tests {
         }
         if exp == 0xFF {
             // Inf / NaN
-            return (sign | 0x7C00 | (mant >> 13) as u32) as u16;
+            return (sign | 0x7C00 | (mant >> 13)) as u16;
         }
         let new_exp = exp - 127 + 15;
         if new_exp >= 31 {
@@ -3824,7 +3879,7 @@ mod tests {
         let rows = 2;
         let cols = 32;
         let mut weights = vec![0.0f32; rows * cols];
-        weights[0] = 1.0;  // row 0, col 0
+        weights[0] = 1.0; // row 0, col 0
         weights[cols + 1] = 1.0; // row 1, col 1
         let q8_data = quantize_f32_to_q8_0(&weights, rows, cols);
 
@@ -3938,10 +3993,7 @@ mod tests {
 
         let result = matvec_q8_0(&q8_data, &input, rows, cols);
         for (i, &v) in result.iter().enumerate() {
-            assert!(
-                v.abs() < 1e-6,
-                "row {i}: expected 0.0, got {v}"
-            );
+            assert!(v.abs() < 1e-6, "row {i}: expected 0.0, got {v}");
         }
     }
 

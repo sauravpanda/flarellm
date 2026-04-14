@@ -78,6 +78,33 @@ fn main() {
 
     let load_time = load_start.elapsed();
 
+    // Load raw quantized weights for direct Q8_0 matvec (CPU) and GPU fused kernels
+    {
+        let file2 = File::open(&model_path).expect("Failed to reopen model file");
+        let mut reader2 = BufReader::new(file2);
+        let gguf2 = GgufFile::parse_header(&mut reader2).expect("Failed to reparse GGUF");
+        let num_layers = config.num_layers;
+        let mut raw_layers = Vec::with_capacity(num_layers);
+        let mut all_ok = true;
+
+        for layer_idx in 0..num_layers {
+            match gguf2.load_raw_layer_weights(&mut reader2, layer_idx) {
+                Ok(Some(rw)) => raw_layers.push(rw),
+                _ => {
+                    all_ok = false;
+                    break;
+                }
+            }
+        }
+
+        if raw_layers.len() == num_layers {
+            model.set_raw_weights(raw_layers);
+            eprintln!("Raw quantized weights loaded");
+        } else if !all_ok {
+            eprintln!("Warning: could not load raw weights, using f32 path");
+        }
+    }
+
     // --- GPU backend ---
     let backend_label;
     if gpu_mode {
@@ -88,36 +115,12 @@ fn main() {
                 model.set_backend(Box::new(gpu));
                 eprintln!("GPU backend initialized");
 
-                // Load raw quantized weights for fused dequant+matvec kernels
-                let file2 = File::open(&model_path).expect("Failed to reopen model file");
-                let mut reader2 = BufReader::new(file2);
-                let gguf2 = GgufFile::parse_header(&mut reader2).expect("Failed to reparse GGUF");
-                let num_layers = config.num_layers;
-                let mut raw_layers = Vec::with_capacity(num_layers);
-                let mut all_ok = true;
-
-                for layer_idx in 0..num_layers {
-                    match gguf2.load_raw_layer_weights(&mut reader2, layer_idx) {
-                        Ok(Some(rw)) => raw_layers.push(rw),
-                        _ => {
-                            all_ok = false;
-                            break;
-                        }
-                    }
-                }
-
-                if raw_layers.len() == num_layers {
-                    model.set_raw_weights(raw_layers);
-                    eprintln!("Raw quantized weights loaded for GPU fused kernels");
-                    // Upload weights to persistent GPU buffers for single-encoder forward
-                    model.upload_weights_to_gpu();
-                    if model.backend().has_gpu_weights() {
-                        eprintln!(
-                            "GPU-resident weights uploaded (single-encoder forward path enabled)"
-                        );
-                    }
-                } else if !all_ok {
-                    eprintln!("Warning: could not load raw weights, using f32 path on GPU");
+                // Upload weights to persistent GPU buffers for single-encoder forward
+                model.upload_weights_to_gpu();
+                if model.backend().has_gpu_weights() {
+                    eprintln!(
+                        "GPU-resident weights uploaded (single-encoder forward path enabled)"
+                    );
                 }
             }
             Err(e) => {
