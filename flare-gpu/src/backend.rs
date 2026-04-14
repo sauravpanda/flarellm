@@ -62,6 +62,12 @@ const ADD_RESIDUAL_SHADER: &str = include_str!("../shaders/add_residual.wgsl");
 const FUSED_SILU_MUL_DEQUANT_MATVEC_Q8_0_SHADER: &str =
     include_str!("../shaders/fused_silu_mul_dequant_matvec_q8_0.wgsl");
 
+// f16 shader variants (require SHADER_F16 feature / `enable f16` in WGSL)
+const ATTENTION_F16_SHADER: &str = include_str!("../shaders/attention_f16.wgsl");
+#[allow(dead_code)] // Infrastructure for future f16 norm weight support
+const BATCHED_RMSNORM_F16_SHADER: &str = include_str!("../shaders/batched_rmsnorm_f16.wgsl");
+const F32_TO_F16_SHADER: &str = include_str!("../shaders/f32_to_f16.wgsl");
+
 /// GPU-resident weight buffer for a single quantized weight matrix.
 ///
 /// Holds the raw bytes (packed GGUF data) in a persistent GPU storage buffer,
@@ -215,15 +221,23 @@ impl WebGpuBackend {
             .await
             .ok_or(GpuError::NoAdapter)?;
 
-        // Enable PIPELINE_CACHE if the backend supports it (Vulkan).
-        // On WebGPU / Metal / DX12 the feature flag is absent; requesting an
-        // absent feature is an error, so we check first.
+        // Enable optional features if the backend supports them.
+        // Requesting an absent feature is an error, so we check first.
         let adapter_features = adapter.features();
-        let extra_features = if adapter_features.contains(wgpu::Features::PIPELINE_CACHE) {
-            wgpu::Features::PIPELINE_CACHE
-        } else {
-            wgpu::Features::empty()
-        };
+        let mut extra_features = wgpu::Features::empty();
+
+        // PIPELINE_CACHE: reuse compiled GPU machine code across sessions (Vulkan).
+        if adapter_features.contains(wgpu::Features::PIPELINE_CACHE) {
+            extra_features |= wgpu::Features::PIPELINE_CACHE;
+        }
+
+        // SHADER_F16: native half-precision in WGSL (Chrome 120+, Vulkan, Metal).
+        // Enables f16 KV cache and f16 norm weight shaders for reduced memory
+        // bandwidth on memory-bound operations (attention, RMSNorm).
+        if adapter_features.contains(wgpu::Features::SHADER_F16) {
+            extra_features |= wgpu::Features::SHADER_F16;
+            log::info!("flare-gpu: shader-f16 extension available, enabling f16 KV cache path");
+        }
 
         let (device, queue) = adapter
             .request_device(
@@ -270,6 +284,15 @@ impl WebGpuBackend {
     /// or when the driver has not produced any serialisable data yet.
     pub fn get_pipeline_cache_bytes(&self) -> Vec<u8> {
         self.cache.get_data()
+    }
+
+    /// Returns `true` if the GPU device supports the `shader-f16` extension.
+    ///
+    /// When available, the backend uses f16 KV cache buffers and f16 shader
+    /// variants for memory-bound operations (attention, RMSNorm), roughly
+    /// halving memory bandwidth for those kernels.
+    pub fn supports_shader_f16(&self) -> bool {
+        self.device.features().contains(wgpu::Features::SHADER_F16)
     }
 
     pub fn device(&self) -> &wgpu::Device {
@@ -3151,6 +3174,69 @@ impl WebGpuBackend {
         self.pool.return_uniform(params_buf);
     }
 
+    /// Dispatch RMSNorm with f16 norm weights on an existing compute pass.
+    ///
+    /// Identical to `dispatch_rmsnorm` but uses the `batched_rmsnorm_f16` shader
+    /// that reads norm weights from `array<f16>`, halving weight bandwidth.
+    ///
+    /// The `weight_buf` must contain f16 data (2 bytes per element).
+    /// Only call this when `supports_shader_f16()` returns `true`.
+    #[allow(dead_code)] // Infrastructure for future f16 norm weight support
+    fn dispatch_rmsnorm_f16(
+        &self,
+        pass: &mut wgpu::ComputePass<'_>,
+        input_buf: &wgpu::Buffer,
+        weight_buf: &wgpu::Buffer,
+        output_buf: &wgpu::Buffer,
+        dim: usize,
+        batch: usize,
+        eps: f32,
+    ) {
+        let params: [u32; 3] = [dim as u32, batch as u32, eps.to_bits()];
+        let params_buf =
+            self.pool
+                .get_uniform(&self.device, &self.queue, bytemuck::cast_slice(&params));
+
+        let layout_entries = Self::standard_layout();
+        self.cache.with_pipeline(
+            &self.device,
+            "batched_rmsnorm_f16",
+            BATCHED_RMSNORM_F16_SHADER,
+            "batched_rmsnorm_f16",
+            &layout_entries,
+            |cached| {
+                let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: None,
+                    layout: &cached.layout,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: input_buf.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: weight_buf.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 2,
+                            resource: output_buf.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 3,
+                            resource: params_buf.as_entire_binding(),
+                        },
+                    ],
+                });
+
+                pass.set_pipeline(&cached.pipeline);
+                pass.set_bind_group(0, &bind_group, &[]);
+                pass.dispatch_workgroups(batch as u32, 1, 1);
+            },
+        );
+
+        self.pool.return_uniform(params_buf);
+    }
+
     /// Dispatch a rope transform on an existing compute pass.
     fn dispatch_rope(
         &self,
@@ -3250,6 +3336,152 @@ impl WebGpuBackend {
             "attention_scores",
             ATTENTION_SHADER,
             "attention_scores",
+            &layout_entries,
+            |cached| {
+                let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: None,
+                    layout: &cached.layout,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                                buffer: q_buf,
+                                offset: q_offset_bytes,
+                                size: std::num::NonZeroU64::new(q_head_size),
+                            }),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: k_cache_buf.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 2,
+                            resource: v_cache_buf.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 3,
+                            resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                                buffer: output_buf,
+                                offset: out_offset_bytes,
+                                size: std::num::NonZeroU64::new(out_head_size),
+                            }),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 4,
+                            resource: params_buf.as_entire_binding(),
+                        },
+                    ],
+                });
+
+                pass.set_pipeline(&cached.pipeline);
+                pass.set_bind_group(0, &bind_group, &[]);
+                pass.dispatch_workgroups(1, 1, 1);
+            },
+        );
+
+        self.pool.return_uniform(params_buf);
+    }
+
+    /// Dispatch f32-to-f16 conversion on an existing compute pass.
+    ///
+    /// Converts `count` f32 elements from `src_buf` to f16 in `dst_buf` starting
+    /// at element offset `dst_elem_offset`.  Used to write f32 K/V projection
+    /// outputs into the f16 KV cache on GPU without CPU readback.
+    fn dispatch_f32_to_f16(
+        &self,
+        pass: &mut wgpu::ComputePass<'_>,
+        src_buf: &wgpu::Buffer,
+        dst_buf: &wgpu::Buffer,
+        count: usize,
+        dst_elem_offset: usize,
+    ) {
+        let params: [u32; 2] = [count as u32, dst_elem_offset as u32];
+        let params_buf =
+            self.pool
+                .get_uniform(&self.device, &self.queue, bytemuck::cast_slice(&params));
+
+        let layout_entries = Self::single_input_layout();
+        self.cache.with_pipeline(
+            &self.device,
+            "f32_to_f16",
+            F32_TO_F16_SHADER,
+            "f32_to_f16",
+            &layout_entries,
+            |cached| {
+                let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: None,
+                    layout: &cached.layout,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: src_buf.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: dst_buf.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 2,
+                            resource: params_buf.as_entire_binding(),
+                        },
+                    ],
+                });
+
+                pass.set_pipeline(&cached.pipeline);
+                pass.set_bind_group(0, &bind_group, &[]);
+                let workgroups = ((count as u32) + 255) / 256;
+                pass.dispatch_workgroups(workgroups, 1, 1);
+            },
+        );
+
+        self.pool.return_uniform(params_buf);
+    }
+
+    /// Dispatch attention with f16 KV cache on an existing compute pass.
+    ///
+    /// Identical to `dispatch_attention_head` but uses the `attention_f16` shader
+    /// that reads K/V from `array<f16>` buffers, halving memory bandwidth for the
+    /// KV cache reads which dominate attention latency during generation.
+    ///
+    /// Only call this when `supports_shader_f16()` returns `true`.
+    #[allow(clippy::too_many_arguments)]
+    fn dispatch_attention_head_f16(
+        &self,
+        pass: &mut wgpu::ComputePass<'_>,
+        q_buf: &wgpu::Buffer,
+        q_offset_bytes: u64,
+        k_cache_buf: &wgpu::Buffer,
+        v_cache_buf: &wgpu::Buffer,
+        output_buf: &wgpu::Buffer,
+        out_offset_bytes: u64,
+        head_dim: usize,
+        seq_len: usize,
+        num_kv_heads: usize,
+        kv_head_idx: usize,
+    ) {
+        let scale = 1.0_f32 / (head_dim as f32).sqrt();
+        let params_data: [u32; 5] = [
+            seq_len as u32,
+            head_dim as u32,
+            scale.to_bits(),
+            num_kv_heads as u32,
+            kv_head_idx as u32,
+        ];
+        let params_buf = self.pool.get_uniform(
+            &self.device,
+            &self.queue,
+            bytemuck::cast_slice(&params_data),
+        );
+
+        let q_head_size = (head_dim * 4) as u64; // f32
+        let out_head_size = (head_dim * 4) as u64; // f32
+
+        let layout_entries = Self::attention_layout();
+        self.cache.with_pipeline(
+            &self.device,
+            "attention_scores_f16",
+            ATTENTION_F16_SHADER,
+            "attention_scores_f16",
             &layout_entries,
             |cached| {
                 let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -3601,24 +3833,48 @@ impl WebGpuBackend {
                 );
             }
 
-            // 4. Write K/V to GPU KV cache (copy ops must be outside compute passes).
+            // 4. Write K/V to GPU KV cache.
             let ring_pos = pos % kv.max_seq_len;
-            let kv_byte_offset = (ring_pos * kv_dim * 4) as u64;
-            let kv_copy_size = (kv_dim * 4) as u64;
-            encoder.copy_buffer_to_buffer(
-                k_rope_buf,
-                0,
-                kv.key_buf(layer_idx),
-                kv_byte_offset,
-                kv_copy_size,
-            );
-            encoder.copy_buffer_to_buffer(
-                v_buf,
-                0,
-                kv.val_buf(layer_idx),
-                kv_byte_offset,
-                kv_copy_size,
-            );
+            if kv.is_f16() {
+                // f16 KV cache: convert f32 K/V on GPU via compute shader.
+                let dst_elem_offset = ring_pos * kv_dim;
+                let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some("kv_f32_to_f16"),
+                    timestamp_writes: None,
+                });
+                self.dispatch_f32_to_f16(
+                    &mut pass,
+                    k_rope_buf,
+                    kv.key_buf(layer_idx),
+                    kv_dim,
+                    dst_elem_offset,
+                );
+                self.dispatch_f32_to_f16(
+                    &mut pass,
+                    v_buf,
+                    kv.val_buf(layer_idx),
+                    kv_dim,
+                    dst_elem_offset,
+                );
+            } else {
+                // f32 KV cache: direct buffer copy (must be outside compute passes).
+                let kv_byte_offset = (ring_pos * kv_dim * 4) as u64;
+                let kv_copy_size = (kv_dim * 4) as u64;
+                encoder.copy_buffer_to_buffer(
+                    k_rope_buf,
+                    0,
+                    kv.key_buf(layer_idx),
+                    kv_byte_offset,
+                    kv_copy_size,
+                );
+                encoder.copy_buffer_to_buffer(
+                    v_buf,
+                    0,
+                    kv.val_buf(layer_idx),
+                    kv_byte_offset,
+                    kv_copy_size,
+                );
+            }
 
             // 5-6. Attention heads + output projection (merged pass)
             {
@@ -3627,21 +3883,42 @@ impl WebGpuBackend {
                     timestamp_writes: None,
                 });
 
-                for h in 0..num_heads {
-                    let kv_head = h / heads_per_kv;
-                    self.dispatch_attention_head(
-                        &mut pass,
-                        q_rope_buf,
-                        (h * head_dim * 4) as u64,
-                        kv.key_buf(layer_idx),
-                        kv.val_buf(layer_idx),
-                        attn_out_buf,
-                        (h * head_dim * 4) as u64,
-                        head_dim,
-                        seq_len,
-                        num_kv_heads,
-                        kv_head,
-                    );
+                if kv.is_f16() {
+                    // f16 KV cache: use f16 attention shader
+                    for h in 0..num_heads {
+                        let kv_head = h / heads_per_kv;
+                        self.dispatch_attention_head_f16(
+                            &mut pass,
+                            q_rope_buf,
+                            (h * head_dim * 4) as u64,
+                            kv.key_buf(layer_idx),
+                            kv.val_buf(layer_idx),
+                            attn_out_buf,
+                            (h * head_dim * 4) as u64,
+                            head_dim,
+                            seq_len,
+                            num_kv_heads,
+                            kv_head,
+                        );
+                    }
+                } else {
+                    // f32 KV cache: use standard attention shader
+                    for h in 0..num_heads {
+                        let kv_head = h / heads_per_kv;
+                        self.dispatch_attention_head(
+                            &mut pass,
+                            q_rope_buf,
+                            (h * head_dim * 4) as u64,
+                            kv.key_buf(layer_idx),
+                            kv.val_buf(layer_idx),
+                            attn_out_buf,
+                            (h * head_dim * 4) as u64,
+                            head_dim,
+                            seq_len,
+                            num_kv_heads,
+                            kv_head,
+                        );
+                    }
                 }
 
                 // 6. Output projection: wo @ attn_out -> attn_proj
@@ -4262,13 +4539,21 @@ impl ComputeBackend for WebGpuBackend {
         num_kv_heads: usize,
         head_dim: usize,
     ) {
-        let kv = GpuKvCache::new(
-            &self.device,
-            num_layers,
-            max_seq_len,
-            num_kv_heads,
-            head_dim,
-        );
+        let kv = if self.supports_shader_f16() {
+            log::info!(
+                "flare-gpu: allocating f16 KV cache ({} layers, {} seq, {} heads, {} dim) — \
+                 {:.1} MB (half of f32)",
+                num_layers,
+                max_seq_len,
+                num_kv_heads,
+                head_dim,
+                (num_layers * max_seq_len * num_kv_heads * head_dim * 2 * 2) as f64
+                    / (1024.0 * 1024.0),
+            );
+            GpuKvCache::new_f16(&self.device, num_layers, max_seq_len, num_kv_heads, head_dim)
+        } else {
+            GpuKvCache::new(&self.device, num_layers, max_seq_len, num_kv_heads, head_dim)
+        };
         *self
             .gpu_kv_cache
             .lock()

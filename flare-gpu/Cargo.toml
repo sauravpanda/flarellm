@@ -19,6 +19,7 @@ thiserror = { workspace = true }
 log = { workspace = true }
 byteorder = { workspace = true }
 bytemuck = { workspace = true }
+half = { workspace = true }
 pollster = "0.4"
 
 [dev-dependencies]
