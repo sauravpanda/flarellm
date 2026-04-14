@@ -2259,8 +2259,9 @@ pub fn matvec_q8_0_scalar(
 
 /// Compute one row of Q8_0 direct dot product using ARM NEON intrinsics.
 ///
-/// Strategy: for each block, load 32 int8 quants, widen to int16, then to f32,
-/// multiply by input f32, accumulate. Multiply block sum by scale.
+/// Strategy: for each block, load all 32 int8 quants in 4 batches of 8,
+/// widen int8→int16→int32→f32, FMA with input f32 values. Uses 4 independent
+/// accumulators for instruction-level parallelism across the CPU pipeline.
 ///
 /// # Safety
 /// NEON is always available on aarch64. `row_bytes` must have
@@ -2270,47 +2271,50 @@ pub fn matvec_q8_0_scalar(
 unsafe fn matvec_q8_0_neon_row(row_bytes: &[u8], input: &[f32], blocks_per_row: usize) -> f32 {
     use std::arch::aarch64::*;
 
-    let mut total = vdupq_n_f32(0.0);
+    let mut total_sum = 0.0f32;
 
     for block in 0..blocks_per_row {
-        let block_start = block * Q8_0_BLOCK_BYTES;
-        let scale = f16_to_f32_inline(u16::from_le_bytes([
-            row_bytes[block_start],
-            row_bytes[block_start + 1],
-        ]));
-        let quants_ptr = row_bytes.as_ptr().add(block_start + 2);
-        let input_ptr = input.as_ptr().add(block * Q8_0_BLOCK_SIZE);
+        let block_ptr = row_bytes.as_ptr().add(block * Q8_0_BLOCK_BYTES);
+        let scale = f16_to_f32_inline(u16::from_le_bytes([*block_ptr, *block_ptr.add(1)]));
+        let q = block_ptr.add(2) as *const i8;
+        let inp = input.as_ptr().add(block * Q8_0_BLOCK_SIZE);
 
-        // Process 32 values in groups of 8 (4 groups per block)
-        let mut block_acc = vdupq_n_f32(0.0);
+        // 4 independent accumulators for ILP
+        let mut a0 = vdupq_n_f32(0.0);
+        let mut a1 = vdupq_n_f32(0.0);
+        let mut a2 = vdupq_n_f32(0.0);
+        let mut a3 = vdupq_n_f32(0.0);
 
-        // Unroll: 4 groups of 8
-        for g in 0..4 {
-            let offset = g * 8;
-            // Load 8 int8 values
-            let q8 = vld1_s8(quants_ptr.add(offset) as *const i8);
-            // Widen to two int16x4 → then to f32x4
-            let q16 = vmovl_s8(q8); // int16x8
+        // Batch 0: indices 0..8
+        let q8 = vld1_s8(q);
+        let q16 = vmovl_s8(q8);
+        a0 = vfmaq_f32(a0, vcvtq_f32_s32(vmovl_s16(vget_low_s16(q16))), vld1q_f32(inp));
+        a1 = vfmaq_f32(a1, vcvtq_f32_s32(vmovl_s16(vget_high_s16(q16))), vld1q_f32(inp.add(4)));
 
-            let q16_lo = vget_low_s16(q16);
-            let q16_hi = vget_high_s16(q16);
+        // Batch 1: indices 8..16
+        let q8 = vld1_s8(q.add(8));
+        let q16 = vmovl_s8(q8);
+        a2 = vfmaq_f32(a2, vcvtq_f32_s32(vmovl_s16(vget_low_s16(q16))), vld1q_f32(inp.add(8)));
+        a3 = vfmaq_f32(a3, vcvtq_f32_s32(vmovl_s16(vget_high_s16(q16))), vld1q_f32(inp.add(12)));
 
-            let q32_0 = vcvtq_f32_s32(vmovl_s16(q16_lo)); // f32x4
-            let q32_1 = vcvtq_f32_s32(vmovl_s16(q16_hi)); // f32x4
+        // Batch 2: indices 16..24
+        let q8 = vld1_s8(q.add(16));
+        let q16 = vmovl_s8(q8);
+        a0 = vfmaq_f32(a0, vcvtq_f32_s32(vmovl_s16(vget_low_s16(q16))), vld1q_f32(inp.add(16)));
+        a1 = vfmaq_f32(a1, vcvtq_f32_s32(vmovl_s16(vget_high_s16(q16))), vld1q_f32(inp.add(20)));
 
-            let in0 = vld1q_f32(input_ptr.add(offset));
-            let in1 = vld1q_f32(input_ptr.add(offset + 4));
+        // Batch 3: indices 24..32
+        let q8 = vld1_s8(q.add(24));
+        let q16 = vmovl_s8(q8);
+        a2 = vfmaq_f32(a2, vcvtq_f32_s32(vmovl_s16(vget_low_s16(q16))), vld1q_f32(inp.add(24)));
+        a3 = vfmaq_f32(a3, vcvtq_f32_s32(vmovl_s16(vget_high_s16(q16))), vld1q_f32(inp.add(28)));
 
-            block_acc = vfmaq_f32(block_acc, q32_0, in0);
-            block_acc = vfmaq_f32(block_acc, q32_1, in1);
-        }
-
-        let block_sum = vaddvq_f32(block_acc);
-        let scaled = vdupq_n_f32(scale * block_sum);
-        total = vaddq_f32(total, scaled);
+        // Horizontal sum of all 4 accumulators, multiply by block scale
+        let sum = vaddq_f32(vaddq_f32(a0, a1), vaddq_f32(a2, a3));
+        total_sum += vaddvq_f32(sum) * scale;
     }
 
-    vgetq_lane_f32(total, 0)
+    total_sum
 }
 
 /// ARM NEON Q8_0 direct matvec with rayon parallelism on native targets.
@@ -2325,7 +2329,7 @@ fn matvec_q8_0_neon(
     let bytes_per_row = blocks_per_row * Q8_0_BLOCK_BYTES;
 
     const PARALLEL_THRESHOLD: usize = 5_000_000;
-    const CHUNK_ROWS: usize = 64;
+    const CHUNK_ROWS: usize = 32;
     let total_work = rows * cols;
 
     #[cfg(not(target_arch = "wasm32"))]
