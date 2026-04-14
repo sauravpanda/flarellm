@@ -758,6 +758,9 @@ pub struct Model {
     /// for [wq;wk;wv] and [w_gate;w_up] per layer.
     fused_f32_qkv: Option<Vec<Vec<f32>>>,
     fused_f32_gate_up: Option<Vec<Vec<f32>>>,
+    /// Pre-computed cos/sin lookup table for RoPE, eliminating transcendental
+    /// function calls from the per-token forward path.
+    rope_table: RopeTable,
 }
 
 impl Model {
@@ -817,6 +820,7 @@ impl Model {
             None
         };
         let forward_buffers = ForwardBuffers::new(&config);
+        let rope_table = RopeTable::new(config.head_dim, config.max_seq_len, config.rope_theta);
         Self {
             config,
             weights,
@@ -830,6 +834,7 @@ impl Model {
             fused_weights: None,
             fused_f32_qkv: None,
             fused_f32_gate_up: None,
+            rope_table,
         }
     }
 
@@ -1508,19 +1513,21 @@ impl Model {
                     *v += b;
                 }
             }
-            apply_rope(
+            apply_rope_with_table(
                 &mut self.forward_buffers.q_data,
                 num_heads,
                 head_dim,
                 pos,
                 config.rope_theta,
+                &self.rope_table,
             );
-            apply_rope(
+            apply_rope_with_table(
                 &mut self.forward_buffers.k_data,
                 num_kv_heads,
                 head_dim,
                 pos,
                 config.rope_theta,
+                &self.rope_table,
             );
 
             // Write K, V to CPU cache (always) and GPU cache (if initialized).
@@ -2532,19 +2539,21 @@ impl Model {
                     *v += b;
                 }
             }
-            apply_rope(
+            apply_rope_with_table(
                 &mut self.forward_buffers.q_data,
                 num_heads,
                 head_dim,
                 pos,
                 config.rope_theta,
+                &self.rope_table,
             );
-            apply_rope(
+            apply_rope_with_table(
                 &mut self.forward_buffers.k_data,
                 num_kv_heads,
                 head_dim,
                 pos,
                 config.rope_theta,
+                &self.rope_table,
             );
 
             self.kv_cache.write(
@@ -3129,19 +3138,21 @@ impl Model {
                     *v += b;
                 }
             }
-            apply_rope(
+            apply_rope_with_table(
                 &mut self.forward_buffers.q_data,
                 num_heads,
                 head_dim,
                 pos,
                 config.rope_theta,
+                &self.rope_table,
             );
-            apply_rope(
+            apply_rope_with_table(
                 &mut self.forward_buffers.k_data,
                 num_kv_heads,
                 head_dim,
                 pos,
                 config.rope_theta,
+                &self.rope_table,
             );
 
             self.kv_cache.write(
@@ -5007,11 +5018,139 @@ pub fn gelu_mul_cpu(gate: &[f32], up: &[f32]) -> Vec<f32> {
         .collect()
 }
 
+/// Maximum number of positions to pre-compute in the RoPE lookup table.
+///
+/// For models with very large context windows (e.g. 128K), allocating a table
+/// for every position would consume too much memory. Positions beyond this cap
+/// fall back to inline cos/sin computation.
+const ROPE_TABLE_MAX_SEQ_LEN: usize = 8192;
+
+/// Pre-computed cos/sin lookup table for Rotary Position Embeddings (RoPE).
+///
+/// Stores `cos(pos * freq)` and `sin(pos * freq)` for every `(pos, dim_index)`
+/// pair up to `max_seq_len` positions and `head_dim / 2` frequency slots.
+/// Tables are flattened as `[max_seq_len, head_dim / 2]`.
+pub struct RopeTable {
+    cos: Vec<f32>,
+    sin: Vec<f32>,
+    head_dim: usize,
+    max_seq_len: usize,
+}
+
+impl RopeTable {
+    /// Build the table for the given model parameters.
+    ///
+    /// `max_seq_len` is capped at [`ROPE_TABLE_MAX_SEQ_LEN`] to limit memory
+    /// usage. Positions beyond the cap must use [`apply_rope`] instead.
+    pub fn new(head_dim: usize, max_seq_len: usize, rope_theta: f32) -> Self {
+        let capped = max_seq_len.min(ROPE_TABLE_MAX_SEQ_LEN);
+        let half = head_dim / 2;
+        let mut cos = vec![0.0f32; capped * half];
+        let mut sin = vec![0.0f32; capped * half];
+
+        for pos in 0..capped {
+            for d in 0..half {
+                let freq = 1.0 / rope_theta.powf(2.0 * d as f32 / head_dim as f32);
+                let angle = pos as f32 * freq;
+                let (s, c) = angle.sin_cos();
+                cos[pos * half + d] = c;
+                sin[pos * half + d] = s;
+            }
+        }
+
+        Self {
+            cos,
+            sin,
+            head_dim,
+            max_seq_len: capped,
+        }
+    }
+
+    /// Look up `(cos, sin)` for a single `(pos, d)` pair.
+    #[inline]
+    pub fn get(&self, pos: usize, d: usize) -> (f32, f32) {
+        let half = self.head_dim / 2;
+        let idx = pos * half + d;
+        (self.cos[idx], self.sin[idx])
+    }
+
+    /// Returns the maximum cached position (exclusive).
+    #[inline]
+    pub fn max_seq_len(&self) -> usize {
+        self.max_seq_len
+    }
+
+    /// Returns the head dimension this table was built for.
+    #[inline]
+    pub fn head_dim(&self) -> usize {
+        self.head_dim
+    }
+
+    /// Returns a slice of `head_dim / 2` cos values for a given position.
+    #[inline]
+    pub fn cos_row(&self, pos: usize) -> &[f32] {
+        let half = self.head_dim / 2;
+        let start = pos * half;
+        &self.cos[start..start + half]
+    }
+
+    /// Returns a slice of `head_dim / 2` sin values for a given position.
+    #[inline]
+    pub fn sin_row(&self, pos: usize) -> &[f32] {
+        let half = self.head_dim / 2;
+        let start = pos * half;
+        &self.sin[start..start + half]
+    }
+}
+
+/// Apply RoPE using a pre-computed [`RopeTable`].
+///
+/// Looks up cos/sin from the table instead of computing transcendental
+/// functions per element. Falls back to [`apply_rope`] for positions
+/// beyond the table's range.
+pub fn apply_rope_with_table(
+    data: &mut [f32],
+    num_heads: usize,
+    head_dim: usize,
+    pos: usize,
+    theta: f32,
+    table: &RopeTable,
+) {
+    // Fall back to inline computation for out-of-range positions.
+    if pos >= table.max_seq_len() || head_dim != table.head_dim() {
+        apply_rope(data, num_heads, head_dim, pos, theta);
+        return;
+    }
+
+    let half = head_dim / 2;
+    let cos_row = table.cos_row(pos);
+    let sin_row = table.sin_row(pos);
+
+    #[cfg(target_arch = "aarch64")]
+    {
+        apply_rope_neon(data, cos_row, sin_row, num_heads, head_dim, half);
+    }
+    #[cfg(not(target_arch = "aarch64"))]
+    {
+        for h in 0..num_heads {
+            let offset = h * head_dim;
+            for i in 0..half {
+                let c = cos_row[i];
+                let s = sin_row[i];
+                let x0 = data[offset + i];
+                let x1 = data[offset + i + half];
+                data[offset + i] = x0 * c - x1 * s;
+                data[offset + i + half] = x0 * s + x1 * c;
+            }
+        }
+    }
+}
+
 /// Apply RoPE to interleaved Q or K vectors (CPU implementation).
 ///
-/// Pre-computes (cos, sin) per dimension index once for the given pos/theta/head_dim,
-/// then applies the rotation to all heads. On aarch64, the per-head rotation loop
-/// uses NEON intrinsics (2 FMA-style ops per pair, 4 pairs per iteration).
+/// Computes cos/sin inline for the given position. Prefer
+/// [`apply_rope_with_table`] on the hot path when a [`RopeTable`] is
+/// available — it eliminates transcendental function calls entirely.
 pub fn apply_rope(data: &mut [f32], num_heads: usize, head_dim: usize, pos: usize, theta: f32) {
     let half = head_dim / 2;
 
@@ -7375,6 +7514,80 @@ mod tests {
                 after
             );
         }
+    }
+
+    #[test]
+    fn test_rope_table_matches_inline() {
+        // apply_rope_with_table must produce identical results to apply_rope.
+        let head_dim = 8;
+        let theta = 10000.0;
+        let table = RopeTable::new(head_dim, 128, theta);
+
+        for pos in [0, 1, 5, 42, 127] {
+            let num_heads = 3;
+            let original: Vec<f32> = (0..(num_heads * head_dim))
+                .map(|i| ((i + 1) as f32) * 0.3)
+                .collect();
+
+            let mut via_inline = original.clone();
+            apply_rope(&mut via_inline, num_heads, head_dim, pos, theta);
+
+            let mut via_table = original.clone();
+            apply_rope_with_table(&mut via_table, num_heads, head_dim, pos, theta, &table);
+
+            for (i, (&a, &b)) in via_inline.iter().zip(via_table.iter()).enumerate() {
+                assert!(
+                    (a - b).abs() < 1e-6,
+                    "table vs inline mismatch at pos={pos} elem {i}: {a} vs {b}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_rope_table_fallback_beyond_max_seq_len() {
+        // Positions beyond the table's range should fall back to inline computation.
+        let head_dim = 4;
+        let theta = 10000.0;
+        let table = RopeTable::new(head_dim, 16, theta); // only 16 positions cached
+
+        let pos = 20; // beyond the table
+        let num_heads = 1;
+        let original: Vec<f32> = vec![1.0, 2.0, 3.0, 4.0];
+
+        let mut via_inline = original.clone();
+        apply_rope(&mut via_inline, num_heads, head_dim, pos, theta);
+
+        let mut via_table = original.clone();
+        apply_rope_with_table(&mut via_table, num_heads, head_dim, pos, theta, &table);
+
+        for (i, (&a, &b)) in via_inline.iter().zip(via_table.iter()).enumerate() {
+            assert!(
+                (a - b).abs() < 1e-6,
+                "fallback mismatch at elem {i}: {a} vs {b}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_rope_table_cap() {
+        // RopeTable should cap at ROPE_TABLE_MAX_SEQ_LEN.
+        let table = RopeTable::new(4, 1_000_000, 10000.0);
+        assert!(table.max_seq_len() <= ROPE_TABLE_MAX_SEQ_LEN);
+    }
+
+    #[test]
+    fn test_rope_table_preserves_magnitude() {
+        let head_dim = 4;
+        let table = RopeTable::new(head_dim, 64, 10000.0);
+        let mut data = vec![1.0, 0.0, 0.0, 1.0];
+        let mag_before: f32 = data.iter().map(|x| x * x).sum();
+        apply_rope_with_table(&mut data, 1, head_dim, 5, 10000.0, &table);
+        let mag_after: f32 = data.iter().map(|x| x * x).sum();
+        assert!(
+            (mag_before - mag_after).abs() < 1e-4,
+            "RoPE table lookup should preserve magnitude"
+        );
     }
 
     #[test]
