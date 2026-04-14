@@ -239,8 +239,7 @@ mod tests {
 
     #[test]
     fn test_serialize_finish_chunk() {
-        let chunk =
-            ChatCompletionChunk::new_delta("test-model", "id-1", None, Some("stop".into()));
+        let chunk = ChatCompletionChunk::new_delta("test-model", "id-1", None, Some("stop".into()));
         let json = serde_json::to_string(&chunk).unwrap();
         assert!(json.contains("\"finish_reason\":\"stop\""));
         assert!(!json.contains("\"content\""));

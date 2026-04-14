@@ -15,9 +15,7 @@ use flare_loader::tokenizer::GgufVocab;
 use flare_loader::weights::load_model_weights;
 use thiserror::Error;
 
-use crate::api::{
-    ChatCompletionChunk, ChatCompletionRequest, ChatCompletionResponse, Message,
-};
+use crate::api::{ChatCompletionChunk, ChatCompletionRequest, ChatCompletionResponse, Message};
 
 /// Errors that can occur in the edge engine.
 #[derive(Debug, Error)]
@@ -56,8 +54,8 @@ impl EdgeEngine {
     pub fn from_gguf_bytes_with_name(data: &[u8], name: &str) -> Result<Self, EdgeError> {
         let mut cursor = Cursor::new(data);
 
-        let gguf = GgufFile::parse_header(&mut cursor)
-            .map_err(|e| EdgeError::GgufParse(e.to_string()))?;
+        let gguf =
+            GgufFile::parse_header(&mut cursor).map_err(|e| EdgeError::GgufParse(e.to_string()))?;
 
         let config = gguf
             .to_model_config()
@@ -66,8 +64,8 @@ impl EdgeEngine {
         let weights = load_model_weights(&gguf, &mut cursor)
             .map_err(|e| EdgeError::WeightError(e.to_string()))?;
 
-        let vocab = GgufVocab::from_gguf(&gguf)
-            .map_err(|e| EdgeError::TokenizerError(e.to_string()))?;
+        let vocab =
+            GgufVocab::from_gguf(&gguf).map_err(|e| EdgeError::TokenizerError(e.to_string()))?;
 
         // Detect chat template from GGUF metadata
         let arch = gguf.architecture().unwrap_or("llama");
@@ -88,11 +86,7 @@ impl EdgeEngine {
 
     /// Process a chat completion request, returning a non-streaming response.
     pub fn chat_completion(&mut self, req: &ChatCompletionRequest) -> ChatCompletionResponse {
-        let model_name = req
-            .model
-            .as_deref()
-            .unwrap_or(&self.model_name)
-            .to_string();
+        let model_name = req.model.as_deref().unwrap_or(&self.model_name).to_string();
 
         let prompt = self.format_prompt(&req.messages);
         let mut prompt_tokens = self.vocab.encode(&prompt);
@@ -135,7 +129,12 @@ impl EdgeEngine {
 
         let completion_tokens = generated.len();
 
-        ChatCompletionResponse::new(&model_name, collected, prompt_token_count, completion_tokens)
+        ChatCompletionResponse::new(
+            &model_name,
+            collected,
+            prompt_token_count,
+            completion_tokens,
+        )
     }
 
     /// Process a chat completion request and return SSE-formatted stream chunks.
@@ -147,11 +146,7 @@ impl EdgeEngine {
     /// Edge runtimes can iterate over these and write them to their
     /// streaming response body.
     pub fn chat_completion_stream(&mut self, req: &ChatCompletionRequest) -> Vec<String> {
-        let model_name = req
-            .model
-            .as_deref()
-            .unwrap_or(&self.model_name)
-            .to_string();
+        let model_name = req.model.as_deref().unwrap_or(&self.model_name).to_string();
         let id = format!("chatcmpl-stream-{}", generate_stream_id());
 
         let prompt = self.format_prompt(&req.messages);

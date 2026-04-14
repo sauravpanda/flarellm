@@ -14,10 +14,7 @@ fn main() {
         .map(|s| s.as_str())
         .unwrap_or("models/smollm2-135m-instruct-q8_0.gguf");
 
-    let user_message = args
-        .get(2)
-        .map(|s| s.as_str())
-        .unwrap_or("Hello!");
+    let user_message = args.get(2).map(|s| s.as_str()).unwrap_or("Hello!");
 
     eprintln!("Loading model from {model_path}...");
     let model_data = match std::fs::read(model_path) {

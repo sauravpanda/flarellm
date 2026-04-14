@@ -106,8 +106,7 @@ mod tests {
     #[test]
     fn test_invalid_json_is_rejected() {
         // Verify that serde_json rejects malformed input
-        let result: Result<api::ChatCompletionRequest, _> =
-            serde_json::from_str("not valid json");
+        let result: Result<api::ChatCompletionRequest, _> = serde_json::from_str("not valid json");
         assert!(result.is_err());
     }
 }

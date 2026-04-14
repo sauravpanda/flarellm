@@ -332,11 +332,9 @@ impl<'a> Generator<'a> {
         let mut draft_last_token = *self.tokens.last().unwrap_or(&0);
 
         for _ in 0..max_drafts {
-            let logits_tensor = self.model.forward_skip_layers(
-                draft_last_token,
-                self.position,
-                &draft_layers,
-            );
+            let logits_tensor =
+                self.model
+                    .forward_skip_layers(draft_last_token, self.position, &draft_layers);
             let draft_token = sampling::sample_greedy(logits_tensor.data());
             draft_tokens.push(draft_token);
             draft_last_token = draft_token;
