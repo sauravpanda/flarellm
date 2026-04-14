@@ -72,6 +72,18 @@ pub fn webgpu_available() -> bool {
         .unwrap_or(false)
 }
 
+/// Check if WebNN is available in the current browser.
+///
+/// WebNN (`navigator.ml`) exposes neural-network acceleration through
+/// platform NPUs/DSPs. This is a foundation check so JS code can decide
+/// whether to build a WebNN graph from exported weights.
+#[wasm_bindgen]
+pub fn supports_webnn() -> bool {
+    web_sys::window()
+        .and_then(|w| js_sys::Reflect::get(&w.navigator(), &"ml".into()).ok())
+        .is_some_and(|ml| !ml.is_undefined() && !ml.is_null())
+}
+
 /// Check if this WASM build was compiled with relaxed SIMD support.
 ///
 /// Relaxed SIMD provides hardware-specific faster operations like fused
