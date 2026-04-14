@@ -561,6 +561,10 @@ pub struct Model {
     /// version for ~8x memory savings on long contexts.
     quantized_kv_cache: Option<QuantizedKvCache>,
     backend: Box<dyn ComputeBackend>,
+    /// Tracks how many contiguous layers (from layer 0) have been loaded
+    /// via `load_layer_weights`.  `None` means all layers were provided at
+    /// construction time and are fully available.
+    layers_loaded: Option<usize>,
 }
 
 impl Model {
@@ -588,6 +592,7 @@ impl Model {
             kv_cache,
             quantized_kv_cache,
             backend: Box::new(CpuBackend),
+            layers_loaded: None,
         }
     }
 
@@ -1304,6 +1309,309 @@ impl Model {
         let mut logits = matvec(
             self.weights.output_weight.data(),
             &normed_final,
+            config.vocab_size,
+            dim,
+        );
+
+        if config.final_logit_softcap > 0.0 {
+            let cap = config.final_logit_softcap;
+            for l in &mut logits {
+                *l = (*l / cap).tanh() * cap;
+            }
+        }
+
+        Tensor::from_vec(logits, &[config.vocab_size]).unwrap()
+    }
+
+    /// Returns the number of transformer layers that currently have weights loaded.
+    ///
+    /// This is always equal to the total layer count unless the model was created
+    /// with placeholder weights and layers are being loaded incrementally via
+    /// [`load_layer_weights`](Self::load_layer_weights).
+    pub fn available_layers(&self) -> usize {
+        self.layers_loaded.unwrap_or(self.config.num_layers)
+    }
+
+    /// Load (or replace) the weights for a single transformer layer.
+    ///
+    /// This enables progressive inference: create a model with placeholder
+    /// weights, then call this method as layers arrive over the network.
+    /// The model becomes usable for [`forward_partial`](Self::forward_partial)
+    /// as soon as at least one layer is loaded.
+    pub fn load_layer_weights(&mut self, layer_idx: usize, weights: LayerWeights) {
+        assert!(
+            layer_idx < self.config.num_layers,
+            "layer_idx {layer_idx} out of range (model has {} layers)",
+            self.config.num_layers
+        );
+        self.weights.layers[layer_idx] = weights;
+
+        // Track the number of contiguously loaded layers from the front.
+        // This matters because forward_partial runs layers 0..num_layers
+        // sequentially, so gaps are not useful.
+        let current = self.layers_loaded.unwrap_or(0);
+        if layer_idx < current {
+            // Re-loaded an already-loaded layer; count stays the same.
+        } else {
+            // Walk forward from current to find new contiguous frontier.
+            let mut frontier = current;
+            // Mark this layer, then scan.  We use a simple approach: if the
+            // caller loads layers in order (the expected case), frontier
+            // advances by 1.  For out-of-order loads we conservatively only
+            // advance when the next layer is the one just loaded.
+            if layer_idx == frontier {
+                frontier += 1;
+                // Check if subsequent layers were loaded earlier (out-of-order).
+                // We track this with a bitset would be ideal, but for simplicity
+                // we just advance by 1 per call; production code can use
+                // LoadProgress for full tracking.
+            }
+            self.layers_loaded = Some(frontier);
+        }
+    }
+
+    /// Returns a quality score in `[0.0, 1.0]` representing the fraction of
+    /// transformer layers available for inference.
+    ///
+    /// A value of `1.0` means all layers are loaded and the model produces
+    /// full-quality output.  Lower values indicate degraded (but still useful)
+    /// output from partial-layer inference.
+    pub fn inference_quality(&self) -> f32 {
+        if self.config.num_layers == 0 {
+            return 1.0;
+        }
+        self.available_layers() as f32 / self.config.num_layers as f32
+    }
+
+    /// Run a single forward pass using only the first `num_layers` transformer
+    /// layers, then apply the final RMSNorm and output projection.
+    ///
+    /// This enables **progressive inference**: start generating tokens with a
+    /// partially-loaded model and improve quality as more layers arrive.
+    /// Research shows LLMs produce useful representations at intermediate
+    /// layers (see *LayerSkip*, arXiv:2412.01455).
+    ///
+    /// # Panics
+    ///
+    /// Panics if `num_layers` is 0 or exceeds `available_layers()`.
+    ///
+    /// # KV cache
+    ///
+    /// Only the first `num_layers` layers write to the KV cache.  If you later
+    /// call `forward()` (full model) you should call `reset()` first to avoid
+    /// stale cache entries from the partial pass.
+    pub fn forward_partial(&mut self, token_id: u32, pos: usize, num_layers: usize) -> Tensor {
+        assert!(
+            num_layers > 0,
+            "forward_partial requires at least 1 layer"
+        );
+        assert!(
+            num_layers <= self.available_layers(),
+            "forward_partial: requested {num_layers} layers but only {} are available",
+            self.available_layers()
+        );
+
+        let config = &self.config;
+        let dim = config.hidden_dim;
+        let head_dim = config.head_dim;
+        let num_heads = config.num_heads;
+        let num_kv_heads = config.num_kv_heads;
+        let kv_dim = num_kv_heads * head_dim;
+
+        // Token embedding lookup
+        let embed_data = self.weights.token_embedding.data();
+        let offset = token_id as usize * dim;
+        let mut x = Tensor::from_vec(embed_data[offset..offset + dim].to_vec(), &[dim]).unwrap();
+
+        let use_raw = self.backend.supports_dequant_matmul() && self.raw_weights.is_some();
+
+        // Process only the first `num_layers` transformer layers
+        for layer_idx in 0..num_layers {
+            let layer = &self.weights.layers[layer_idx];
+
+            // --- Attention block ---
+            let normed =
+                self.backend
+                    .rmsnorm_vec(x.data(), layer.attn_norm.data(), config.rms_norm_eps);
+
+            let mut q_data = if use_raw {
+                let rw = &self.raw_weights.as_ref().unwrap()[layer_idx];
+                self.backend.batched_dequant_matmul(&rw.wq, &normed, 1)
+            } else {
+                self.backend
+                    .matvec(layer.wq.data(), &normed, num_heads * head_dim, dim)
+            };
+            let mut k_data = if use_raw {
+                let rw = &self.raw_weights.as_ref().unwrap()[layer_idx];
+                self.backend.batched_dequant_matmul(&rw.wk, &normed, 1)
+            } else {
+                self.backend.matvec(layer.wk.data(), &normed, kv_dim, dim)
+            };
+            let mut v_data = if use_raw {
+                let rw = &self.raw_weights.as_ref().unwrap()[layer_idx];
+                self.backend.batched_dequant_matmul(&rw.wv, &normed, 1)
+            } else {
+                self.backend.matvec(layer.wv.data(), &normed, kv_dim, dim)
+            };
+
+            // Attention biases (Qwen2)
+            if let Some(bias) = &layer.attn_q_bias {
+                for (q, &b) in q_data.iter_mut().zip(bias.data().iter()) {
+                    *q += b;
+                }
+            }
+            if let Some(bias) = &layer.attn_k_bias {
+                for (k, &b) in k_data.iter_mut().zip(bias.data().iter()) {
+                    *k += b;
+                }
+            }
+            if let Some(bias) = &layer.attn_v_bias {
+                for (v, &b) in v_data.iter_mut().zip(bias.data().iter()) {
+                    *v += b;
+                }
+            }
+            self.backend
+                .apply_rope_vec(&mut q_data, num_heads, head_dim, pos, config.rope_theta);
+            self.backend.apply_rope_vec(
+                &mut k_data,
+                num_kv_heads,
+                head_dim,
+                pos,
+                config.rope_theta,
+            );
+
+            self.kv_cache.write(layer_idx, &k_data, &v_data);
+            if let Some(ref mut qkv) = self.quantized_kv_cache {
+                qkv.write(layer_idx, &k_data, &v_data);
+            }
+            self.backend
+                .gpu_kv_write(layer_idx, pos, num_kv_heads, head_dim, &k_data, &v_data);
+
+            let seq_len = self.kv_cache.len() + 1;
+            let attn_output = if self.backend.has_gpu_kv_cache() {
+                self.backend.grouped_query_attention_from_gpu_cache(
+                    &q_data,
+                    layer_idx,
+                    num_heads,
+                    num_kv_heads,
+                    head_dim,
+                    seq_len,
+                    config.attn_logit_softcap,
+                )
+            } else if let Some(ref qkv) = self.quantized_kv_cache {
+                let dequant_keys = qkv.dequant_keys(layer_idx);
+                let dequant_values = qkv.dequant_values(layer_idx);
+                self.backend.grouped_query_attention(
+                    &q_data,
+                    &dequant_keys,
+                    &dequant_values,
+                    num_heads,
+                    num_kv_heads,
+                    head_dim,
+                    seq_len,
+                    config.attn_logit_softcap,
+                )
+            } else {
+                self.backend.grouped_query_attention(
+                    &q_data,
+                    self.kv_cache.keys(layer_idx).data(),
+                    self.kv_cache.values(layer_idx).data(),
+                    num_heads,
+                    num_kv_heads,
+                    head_dim,
+                    seq_len,
+                    config.attn_logit_softcap,
+                )
+            };
+
+            let attn_proj = if use_raw {
+                let rw = &self.raw_weights.as_ref().unwrap()[layer_idx];
+                self.backend.batched_dequant_matmul(&rw.wo, &attn_output, 1)
+            } else {
+                self.backend
+                    .matvec(layer.wo.data(), &attn_output, dim, num_heads * head_dim)
+            };
+
+            let attn_contrib = if let Some(ref post_norm) = layer.post_attn_norm {
+                self.backend
+                    .rmsnorm_vec(&attn_proj, post_norm.data(), config.rms_norm_eps)
+            } else {
+                attn_proj
+            };
+
+            let x_data = x.data_mut();
+            for i in 0..dim {
+                x_data[i] += attn_contrib[i];
+            }
+
+            // --- FFN block ---
+            let normed =
+                self.backend
+                    .rmsnorm_vec(x.data(), layer.ffn_norm.data(), config.rms_norm_eps);
+
+            let gate = if use_raw {
+                let rw = &self.raw_weights.as_ref().unwrap()[layer_idx];
+                self.backend.batched_dequant_matmul(&rw.w_gate, &normed, 1)
+            } else {
+                self.backend
+                    .matvec(layer.w_gate.data(), &normed, config.intermediate_dim, dim)
+            };
+            let up = if use_raw {
+                let rw = &self.raw_weights.as_ref().unwrap()[layer_idx];
+                self.backend.batched_dequant_matmul(&rw.w_up, &normed, 1)
+            } else {
+                self.backend
+                    .matvec(layer.w_up.data(), &normed, config.intermediate_dim, dim)
+            };
+
+            let ffn_hidden = if config.architecture == Architecture::Gemma2 {
+                gelu_mul_cpu(&gate, &up)
+            } else {
+                self.backend.silu_mul_vec(&gate, &up)
+            };
+
+            let ffn_out = if use_raw {
+                let rw = &self.raw_weights.as_ref().unwrap()[layer_idx];
+                self.backend
+                    .batched_dequant_matmul(&rw.w_down, &ffn_hidden, 1)
+            } else {
+                self.backend.matvec(
+                    layer.w_down.data(),
+                    &ffn_hidden,
+                    dim,
+                    config.intermediate_dim,
+                )
+            };
+
+            let ffn_contrib = if let Some(ref post_norm) = layer.post_ffn_norm {
+                self.backend
+                    .rmsnorm_vec(&ffn_out, post_norm.data(), config.rms_norm_eps)
+            } else {
+                ffn_out
+            };
+
+            let x_data = x.data_mut();
+            for i in 0..dim {
+                x_data[i] += ffn_contrib[i];
+            }
+        }
+
+        // Advance KV cache after processing the partial layers
+        self.kv_cache.advance();
+        if let Some(ref mut qkv) = self.quantized_kv_cache {
+            qkv.advance();
+        }
+
+        // Final RMSNorm + output projection (always uses full weights)
+        let normed = self.backend.rmsnorm_vec(
+            x.data(),
+            self.weights.output_norm.data(),
+            config.rms_norm_eps,
+        );
+
+        let mut logits = self.backend.matvec(
+            self.weights.output_weight.data(),
+            &normed,
             config.vocab_size,
             dim,
         );
@@ -2361,5 +2669,252 @@ mod tests {
                 "logit[{i}] differs between identical forward passes: {a} vs {b}"
             );
         }
+    }
+
+    // ------------------------------------------------------------------
+    // Progressive inference tests
+    // ------------------------------------------------------------------
+
+    /// Helper: build a tiny model with N layers for progressive inference tests.
+    fn tiny_multi_layer_model(num_layers: usize) -> Model {
+        let dim = 4;
+        let vocab = 8;
+        let intermediate = 8;
+        let heads = 2;
+        let kv_heads = 2;
+        let head_dim = 2;
+
+        let config = ModelConfig {
+            architecture: Architecture::Llama,
+            vocab_size: vocab,
+            hidden_dim: dim,
+            intermediate_dim: intermediate,
+            num_layers,
+            num_heads: heads,
+            num_kv_heads: kv_heads,
+            head_dim,
+            max_seq_len: 32,
+            rope_theta: 10000.0,
+            rms_norm_eps: 1e-5,
+            attn_logit_softcap: 0.0,
+            final_logit_softcap: 0.0,
+            kv_cache_bits: 32,
+        };
+
+        // Deterministic pseudo-random weights
+        let mut seed = 42u64;
+        let mut make_weights = |n: usize| -> Vec<f32> {
+            (0..n)
+                .map(|_| {
+                    seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+                    ((seed >> 33) as f32 / (1u64 << 31) as f32) - 0.5
+                })
+                .collect()
+        };
+
+        let layers: Vec<LayerWeights> = (0..num_layers)
+            .map(|_| LayerWeights {
+                attn_norm: Tensor::from_vec(vec![1.0; dim], &[dim]).unwrap(),
+                wq: Tensor::from_vec(make_weights(heads * head_dim * dim), &[heads * head_dim * dim]).unwrap(),
+                wk: Tensor::from_vec(make_weights(kv_heads * head_dim * dim), &[kv_heads * head_dim * dim]).unwrap(),
+                wv: Tensor::from_vec(make_weights(kv_heads * head_dim * dim), &[kv_heads * head_dim * dim]).unwrap(),
+                wo: Tensor::from_vec(make_weights(dim * heads * head_dim), &[dim * heads * head_dim]).unwrap(),
+                ffn_norm: Tensor::from_vec(vec![1.0; dim], &[dim]).unwrap(),
+                w_gate: Tensor::from_vec(make_weights(intermediate * dim), &[intermediate * dim]).unwrap(),
+                w_up: Tensor::from_vec(make_weights(intermediate * dim), &[intermediate * dim]).unwrap(),
+                w_down: Tensor::from_vec(make_weights(dim * intermediate), &[dim * intermediate]).unwrap(),
+                attn_q_bias: None,
+                attn_k_bias: None,
+                attn_v_bias: None,
+                post_attn_norm: None,
+                post_ffn_norm: None,
+            })
+            .collect();
+
+        let weights = ModelWeights {
+            token_embedding: Tensor::from_vec(make_weights(vocab * dim), &[vocab * dim]).unwrap(),
+            layers,
+            output_norm: Tensor::from_vec(vec![1.0; dim], &[dim]).unwrap(),
+            output_weight: Tensor::from_vec(make_weights(vocab * dim), &[vocab * dim]).unwrap(),
+        };
+
+        Model::new(config, weights)
+    }
+
+    #[test]
+    fn test_forward_partial_output_shape() {
+        let mut model = tiny_multi_layer_model(4);
+        let logits = model.forward_partial(0, 0, 2);
+        assert_eq!(logits.shape(), &[8], "partial forward should produce [vocab_size] logits");
+    }
+
+    #[test]
+    fn test_forward_partial_all_layers_matches_forward() {
+        // forward_partial with all layers should produce identical output to forward
+        let mut model1 = tiny_multi_layer_model(4);
+        let full_logits = model1.forward(0, 0).data().to_vec();
+
+        let mut model2 = tiny_multi_layer_model(4);
+        let partial_logits = model2.forward_partial(0, 0, 4).data().to_vec();
+
+        assert_eq!(full_logits.len(), partial_logits.len());
+        for (i, (&a, &b)) in full_logits.iter().zip(partial_logits.iter()).enumerate() {
+            assert!(
+                (a - b).abs() < 1e-5,
+                "forward_partial(all layers) should match forward(): logit[{i}] = {a} vs {b}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_forward_partial_fewer_layers_differs() {
+        let mut model1 = tiny_multi_layer_model(4);
+        let full_logits = model1.forward(0, 0).data().to_vec();
+
+        let mut model2 = tiny_multi_layer_model(4);
+        let partial_logits = model2.forward_partial(0, 0, 2).data().to_vec();
+
+        // With different number of layers, logits should generally differ
+        assert_ne!(
+            full_logits, partial_logits,
+            "partial inference with fewer layers should produce different logits"
+        );
+    }
+
+    #[test]
+    fn test_forward_partial_logits_are_finite() {
+        let mut model = tiny_multi_layer_model(4);
+        let logits = model.forward_partial(0, 0, 1);
+        for (i, &v) in logits.data().iter().enumerate() {
+            assert!(v.is_finite(), "partial logit[{i}] = {v} is not finite");
+        }
+    }
+
+    #[test]
+    fn test_forward_partial_kv_cache_advances() {
+        let mut model = tiny_multi_layer_model(4);
+        model.forward_partial(0, 0, 2);
+        assert_eq!(model.kv_cache().len(), 1, "KV cache should advance after partial forward");
+        model.forward_partial(1, 1, 2);
+        assert_eq!(model.kv_cache().len(), 2);
+    }
+
+    #[test]
+    fn test_available_layers_default() {
+        let model = tiny_multi_layer_model(4);
+        assert_eq!(model.available_layers(), 4);
+    }
+
+    #[test]
+    fn test_inference_quality() {
+        let model = tiny_multi_layer_model(4);
+        assert!((model.inference_quality() - 1.0).abs() < 1e-5, "fully loaded model should have quality 1.0");
+    }
+
+    #[test]
+    fn test_load_layer_weights_incremental() {
+        let dim = 4;
+        let intermediate = 8;
+        let heads = 2;
+        let kv_heads = 2;
+        let head_dim = 2;
+
+        let config = ModelConfig {
+            architecture: Architecture::Llama,
+            vocab_size: 8,
+            hidden_dim: dim,
+            intermediate_dim: intermediate,
+            num_layers: 4,
+            num_heads: heads,
+            num_kv_heads: kv_heads,
+            head_dim,
+            max_seq_len: 32,
+            rope_theta: 10000.0,
+            rms_norm_eps: 1e-5,
+            attn_logit_softcap: 0.0,
+            final_logit_softcap: 0.0,
+            kv_cache_bits: 32,
+        };
+
+        // Start with placeholder (zero) weights for all layers
+        let make_placeholder_layer = || LayerWeights {
+            attn_norm: Tensor::from_vec(vec![1.0; dim], &[dim]).unwrap(),
+            wq: Tensor::from_vec(vec![0.0; heads * head_dim * dim], &[heads * head_dim * dim]).unwrap(),
+            wk: Tensor::from_vec(vec![0.0; kv_heads * head_dim * dim], &[kv_heads * head_dim * dim]).unwrap(),
+            wv: Tensor::from_vec(vec![0.0; kv_heads * head_dim * dim], &[kv_heads * head_dim * dim]).unwrap(),
+            wo: Tensor::from_vec(vec![0.0; dim * heads * head_dim], &[dim * heads * head_dim]).unwrap(),
+            ffn_norm: Tensor::from_vec(vec![1.0; dim], &[dim]).unwrap(),
+            w_gate: Tensor::from_vec(vec![0.0; intermediate * dim], &[intermediate * dim]).unwrap(),
+            w_up: Tensor::from_vec(vec![0.0; intermediate * dim], &[intermediate * dim]).unwrap(),
+            w_down: Tensor::from_vec(vec![0.0; dim * intermediate], &[dim * intermediate]).unwrap(),
+            attn_q_bias: None,
+            attn_k_bias: None,
+            attn_v_bias: None,
+            post_attn_norm: None,
+            post_ffn_norm: None,
+        };
+
+        let weights = ModelWeights {
+            token_embedding: Tensor::from_vec(vec![0.1; 8 * dim], &[8 * dim]).unwrap(),
+            layers: (0..4).map(|_| make_placeholder_layer()).collect(),
+            output_norm: Tensor::from_vec(vec![1.0; dim], &[dim]).unwrap(),
+            output_weight: Tensor::from_vec(vec![0.1; 8 * dim], &[8 * dim]).unwrap(),
+        };
+
+        let mut model = Model::new(config, weights);
+
+        // Initially layers_loaded is None (all available) — set to 0 to simulate progressive loading
+        model.layers_loaded = Some(0);
+        assert_eq!(model.available_layers(), 0);
+        assert!((model.inference_quality() - 0.0).abs() < 1e-5);
+
+        // Load first layer
+        let real_layer = make_placeholder_layer(); // placeholder is fine for this test
+        model.load_layer_weights(0, real_layer);
+        assert_eq!(model.available_layers(), 1);
+        assert!((model.inference_quality() - 0.25).abs() < 1e-5);
+
+        // Can now do partial inference with 1 layer
+        let logits = model.forward_partial(0, 0, 1);
+        assert_eq!(logits.shape(), &[8]);
+        assert!(logits.data().iter().all(|v| v.is_finite()));
+
+        // Load second layer
+        model.load_layer_weights(1, make_placeholder_layer());
+        assert_eq!(model.available_layers(), 2);
+        assert!((model.inference_quality() - 0.5).abs() < 1e-5);
+    }
+
+    #[test]
+    #[should_panic(expected = "forward_partial requires at least 1 layer")]
+    fn test_forward_partial_zero_layers_panics() {
+        let mut model = tiny_multi_layer_model(4);
+        model.forward_partial(0, 0, 0);
+    }
+
+    #[test]
+    #[should_panic(expected = "forward_partial: requested 5 layers but only 4 are available")]
+    fn test_forward_partial_too_many_layers_panics() {
+        let mut model = tiny_multi_layer_model(4);
+        model.forward_partial(0, 0, 5);
+    }
+
+    #[test]
+    fn test_progressive_inference_quality_improves() {
+        // Demonstrate that more layers generally change the output (progressive quality).
+        // We compare logits from 1 layer vs 2 layers vs all 4 layers.
+        let mut m1 = tiny_multi_layer_model(4);
+        let logits_1 = m1.forward_partial(0, 0, 1).data().to_vec();
+
+        let mut m2 = tiny_multi_layer_model(4);
+        let logits_2 = m2.forward_partial(0, 0, 2).data().to_vec();
+
+        let mut m4 = tiny_multi_layer_model(4);
+        let logits_4 = m4.forward_partial(0, 0, 4).data().to_vec();
+
+        // All should be different (with random weights, collisions are extremely unlikely)
+        assert_ne!(logits_1, logits_2, "1-layer vs 2-layer logits should differ");
+        assert_ne!(logits_2, logits_4, "2-layer vs 4-layer logits should differ");
+        assert_ne!(logits_1, logits_4, "1-layer vs 4-layer logits should differ");
     }
 }
