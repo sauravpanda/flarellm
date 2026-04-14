@@ -2049,6 +2049,41 @@ impl FlareEngine {
             .map_err(|e| JsError::new(&format!("LoRA merge error: {e}")))?;
         Ok(())
     }
+
+    // --- P2P / collaborative inference primitives (issue #389) ---
+    //
+    // These primitives expose the "head" and "tail" of a forward pass so
+    // that a JavaScript orchestrator (e.g. a WebRTC mesh) can split
+    // inference across multiple peers. A coordinator peer calls
+    // `embed_token` to get the initial hidden state, ships it through a
+    // chain of peers that each run some subset of transformer layers, and
+    // finally calls `output_projection` on the returned hidden state to
+    // obtain logits.
+    //
+    // Note: processing an arbitrary individual transformer layer is not
+    // exposed here because the KV cache state for that layer lives inside
+    // the owning `Model`. Full P2P layer sharding will require additional
+    // KV-cache plumbing; these two primitives are sufficient to begin
+    // P2P experimentation on top of the existing forward methods.
+
+    /// Look up the token embedding row for `token_id` as a flat `Float32Array`.
+    ///
+    /// The length of the returned vector is `hidden_dim`. See also
+    /// [`FlareEngine::output_projection`] for the inverse tail step.
+    #[wasm_bindgen]
+    pub fn embed_token(&self, token_id: u32) -> Vec<f32> {
+        self.model.embed_token(token_id)
+    }
+
+    /// Apply final RMSNorm + output projection to a hidden state and
+    /// return logits over the vocabulary.
+    ///
+    /// `hidden` must have length `hidden_dim`. The returned vector has
+    /// length `vocab_size`.
+    #[wasm_bindgen]
+    pub fn output_projection(&self, hidden: Vec<f32>) -> Vec<f32> {
+        self.model.output_projection(&hidden)
+    }
 }
 
 /// Progressive loader that fetches a GGUF model from a URL with streaming
