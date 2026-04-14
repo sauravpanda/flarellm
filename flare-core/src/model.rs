@@ -645,6 +645,10 @@ pub struct ForwardBuffers {
     pub ffn_normed_q8: QuantizedInput,
     /// Pre-quantized Q8_0 buffer for final normed output (used for Q8_0 logits projection)
     pub output_q8: QuantizedInput,
+    /// Pre-quantized Q8_0 buffer for attn_output (used for wo projection)
+    pub attn_q8: QuantizedInput,
+    /// Pre-quantized Q8_0 buffer for ffn_hidden (used for w_down projection)
+    pub ffn_hidden_q8: QuantizedInput,
     /// Fused QKV output buffer `[q_dim + kv_dim + kv_dim]`
     pub qkv: Vec<f32>,
     /// Fused gate+up output buffer `[intermediate_dim * 2]`
@@ -688,6 +692,16 @@ impl ForwardBuffers {
                 scales: vec![0.0; dim / Q8_0_BLOCK_SIZE],
                 quants: vec![0; dim],
                 blocks_per_row: dim / Q8_0_BLOCK_SIZE,
+            },
+            attn_q8: QuantizedInput {
+                scales: vec![0.0; q_dim / Q8_0_BLOCK_SIZE],
+                quants: vec![0; q_dim],
+                blocks_per_row: q_dim / Q8_0_BLOCK_SIZE,
+            },
+            ffn_hidden_q8: QuantizedInput {
+                scales: vec![0.0; intermediate_dim / Q8_0_BLOCK_SIZE],
+                quants: vec![0; intermediate_dim],
+                blocks_per_row: intermediate_dim / Q8_0_BLOCK_SIZE,
             },
             qkv: vec![0.0; q_dim + kv_dim + kv_dim],
             gate_up: vec![0.0; intermediate_dim * 2],
@@ -1569,11 +1583,14 @@ impl Model {
                 );
             } else if use_cpu_q8 {
                 let rw = &self.raw_weights.as_ref().unwrap()[layer_idx];
-                matvec_q8_0_into(
-                    &rw.wo.data,
+                quantize_input_q8_0_into(
                     &self.forward_buffers.attn_output,
+                    &mut self.forward_buffers.attn_q8,
+                );
+                matvec_q8_0_preq_into(
+                    &rw.wo.data,
+                    &self.forward_buffers.attn_q8,
                     rw.wo.num_rows,
-                    num_heads * head_dim,
                     &mut self.forward_buffers.attn_proj,
                 );
             } else {
@@ -1782,11 +1799,14 @@ impl Model {
                     );
                 } else if use_cpu_q8 {
                     let rw = &self.raw_weights.as_ref().unwrap()[layer_idx];
-                    matvec_q8_0_into(
-                        &rw.w_down.data,
+                    quantize_input_q8_0_into(
                         &self.forward_buffers.ffn_hidden,
+                        &mut self.forward_buffers.ffn_hidden_q8,
+                    );
+                    matvec_q8_0_preq_into(
+                        &rw.w_down.data,
+                        &self.forward_buffers.ffn_hidden_q8,
                         rw.w_down.num_rows,
-                        config.intermediate_dim,
                         &mut self.forward_buffers.ffn_out,
                     );
                 } else {
@@ -2575,11 +2595,14 @@ impl Model {
                 );
             } else if use_cpu_q8 {
                 let rw = &self.raw_weights.as_ref().unwrap()[layer_idx];
-                matvec_q8_0_into(
-                    &rw.wo.data,
+                quantize_input_q8_0_into(
                     &self.forward_buffers.attn_output,
+                    &mut self.forward_buffers.attn_q8,
+                );
+                matvec_q8_0_preq_into(
+                    &rw.wo.data,
+                    &self.forward_buffers.attn_q8,
                     rw.wo.num_rows,
-                    num_heads * head_dim,
                     &mut self.forward_buffers.attn_proj,
                 );
             } else {
@@ -2757,11 +2780,14 @@ impl Model {
                 );
             } else if use_cpu_q8 {
                 let rw = &self.raw_weights.as_ref().unwrap()[layer_idx];
-                matvec_q8_0_into(
-                    &rw.w_down.data,
+                quantize_input_q8_0_into(
                     &self.forward_buffers.ffn_hidden,
+                    &mut self.forward_buffers.ffn_hidden_q8,
+                );
+                matvec_q8_0_preq_into(
+                    &rw.w_down.data,
+                    &self.forward_buffers.ffn_hidden_q8,
                     rw.w_down.num_rows,
-                    config.intermediate_dim,
                     &mut self.forward_buffers.ffn_out,
                 );
             } else {
@@ -3158,11 +3184,14 @@ impl Model {
                 );
             } else if use_cpu_q8 {
                 let rw = &self.raw_weights.as_ref().unwrap()[layer_idx];
-                matvec_q8_0_into(
-                    &rw.wo.data,
+                quantize_input_q8_0_into(
                     &self.forward_buffers.attn_output,
+                    &mut self.forward_buffers.attn_q8,
+                );
+                matvec_q8_0_preq_into(
+                    &rw.wo.data,
+                    &self.forward_buffers.attn_q8,
                     rw.wo.num_rows,
-                    num_heads * head_dim,
                     &mut self.forward_buffers.attn_proj,
                 );
             } else {
@@ -3324,11 +3353,14 @@ impl Model {
                 );
             } else if use_cpu_q8 {
                 let rw = &self.raw_weights.as_ref().unwrap()[layer_idx];
-                matvec_q8_0_into(
-                    &rw.w_down.data,
+                quantize_input_q8_0_into(
                     &self.forward_buffers.ffn_hidden,
+                    &mut self.forward_buffers.ffn_hidden_q8,
+                );
+                matvec_q8_0_preq_into(
+                    &rw.w_down.data,
+                    &self.forward_buffers.ffn_hidden_q8,
                     rw.w_down.num_rows,
-                    config.intermediate_dim,
                     &mut self.forward_buffers.ffn_out,
                 );
             } else {
@@ -4432,7 +4464,7 @@ fn matvec_q8_0_neon(weight_data: &[u8], input: &[f32], rows: usize, cols: usize)
 
     // Step 2: Compute int8 x int8 dot product for each row
     const PARALLEL_THRESHOLD: usize = 5_000_000;
-    const CHUNK_ROWS: usize = 64;
+    const CHUNK_ROWS: usize = 256;
     let total_work = rows * cols;
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -5564,12 +5596,13 @@ fn matvec_q8_0_neon_into(
     let total_work = rows * cols;
     if total_work >= 2_000_000 {
         use rayon::prelude::*;
+        const CHUNK: usize = 256;
         output
-            .par_chunks_mut(32)
+            .par_chunks_mut(CHUNK)
             .enumerate()
             .for_each(|(chunk_idx, chunk)| {
                 for (local_idx, out) in chunk.iter_mut().enumerate() {
-                    let row = chunk_idx * 32 + local_idx;
+                    let row = chunk_idx * CHUNK + local_idx;
                     let start = row * bytes_per_row;
                     let row_bytes = &weight_data[start..start + bytes_per_row];
                     *out = unsafe {
@@ -5609,16 +5642,35 @@ pub fn matvec_q8_0_preq_into(
         let total_work = rows * (blocks_per_row * Q8_0_BLOCK_SIZE);
         if total_work >= 2_000_000 {
             use rayon::prelude::*;
-            const CHUNK_ROWS: usize = 64;
+            const CHUNK_ROWS: usize = 256;
             output
                 .par_chunks_mut(CHUNK_ROWS)
                 .enumerate()
                 .for_each(|(chunk_idx, chunk)| {
-                    for (local_idx, out) in chunk.iter_mut().enumerate() {
-                        let row = chunk_idx * CHUNK_ROWS + local_idx;
+                    let base_row = chunk_idx * CHUNK_ROWS;
+                    let len = chunk.len();
+                    // Process pairs of rows to keep preq data in L1 cache
+                    let pairs = len / 2;
+                    for p in 0..pairs {
+                        let r0 = base_row + p * 2;
+                        let r1 = r0 + 1;
+                        let s0 = r0 * bytes_per_row;
+                        let s1 = r1 * bytes_per_row;
+                        let rb0 = &weight_data[s0..s0 + bytes_per_row];
+                        let rb1 = &weight_data[s1..s1 + bytes_per_row];
+                        chunk[p * 2] = unsafe {
+                            dot_q8_0_q8_0_neon(rb0, &preq.scales, &preq.quants, blocks_per_row)
+                        };
+                        chunk[p * 2 + 1] = unsafe {
+                            dot_q8_0_q8_0_neon(rb1, &preq.scales, &preq.quants, blocks_per_row)
+                        };
+                    }
+                    // Handle odd trailing row
+                    if len % 2 != 0 {
+                        let row = base_row + len - 1;
                         let start = row * bytes_per_row;
                         let row_bytes = &weight_data[start..start + bytes_per_row];
-                        *out = unsafe {
+                        chunk[len - 1] = unsafe {
                             dot_q8_0_q8_0_neon(
                                 row_bytes,
                                 &preq.scales,
@@ -5629,10 +5681,28 @@ pub fn matvec_q8_0_preq_into(
                     }
                 });
         } else {
-            for (i, out) in output.iter_mut().enumerate() {
-                let start = i * bytes_per_row;
+            // Process pairs of rows to keep preq data in L1 cache
+            let pairs = rows / 2;
+            for p in 0..pairs {
+                let r0 = p * 2;
+                let r1 = r0 + 1;
+                let s0 = r0 * bytes_per_row;
+                let s1 = r1 * bytes_per_row;
+                let rb0 = &weight_data[s0..s0 + bytes_per_row];
+                let rb1 = &weight_data[s1..s1 + bytes_per_row];
+                output[r0] = unsafe {
+                    dot_q8_0_q8_0_neon(rb0, &preq.scales, &preq.quants, blocks_per_row)
+                };
+                output[r1] = unsafe {
+                    dot_q8_0_q8_0_neon(rb1, &preq.scales, &preq.quants, blocks_per_row)
+                };
+            }
+            // Handle odd trailing row
+            if rows % 2 != 0 {
+                let row = rows - 1;
+                let start = row * bytes_per_row;
                 let row_bytes = &weight_data[start..start + bytes_per_row];
-                *out = unsafe {
+                output[row] = unsafe {
                     dot_q8_0_q8_0_neon(row_bytes, &preq.scales, &preq.quants, blocks_per_row)
                 };
             }
@@ -5696,7 +5766,7 @@ pub fn matvec_argmax_q8_0_preq(
         let total_work = rows * (blocks_per_row * Q8_0_BLOCK_SIZE);
         if total_work >= 2_000_000 {
             use rayon::prelude::*;
-            const CHUNK_ROWS: usize = 64;
+            const CHUNK_ROWS: usize = 256;
             let num_chunks = rows.div_ceil(CHUNK_ROWS);
             (0..num_chunks)
                 .into_par_iter()
