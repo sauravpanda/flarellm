@@ -1118,11 +1118,7 @@ impl Model {
                     &self.forward_buffers.final_normed,
                     &mut self.forward_buffers.output_q8,
                 );
-                matvec_argmax_q8_0_preq(
-                    &row.data,
-                    &self.forward_buffers.output_q8,
-                    row.num_rows,
-                )
+                matvec_argmax_q8_0_preq(&row.data, &self.forward_buffers.output_q8, row.num_rows)
             } else {
                 matvec_argmax_f32(
                     self.weights.output_weight.data(),
@@ -4557,7 +4553,7 @@ pub fn matvec_argmax_q8_0_preq(
         if total_work >= 2_000_000 {
             use rayon::prelude::*;
             const CHUNK_ROWS: usize = 64;
-            let num_chunks = (rows + CHUNK_ROWS - 1) / CHUNK_ROWS;
+            let num_chunks = rows.div_ceil(CHUNK_ROWS);
             (0..num_chunks)
                 .into_par_iter()
                 .map(|chunk_idx| {
@@ -4636,12 +4632,9 @@ pub fn matvec_argmax_q8_0_preq(
                 let mut j = 0;
                 while j < 32 {
                     s0 += (w_quants[j] as i8) as i32 * preq.quants[input_offset + j] as i32;
-                    s1 += (w_quants[j + 1] as i8) as i32
-                        * preq.quants[input_offset + j + 1] as i32;
-                    s2 += (w_quants[j + 2] as i8) as i32
-                        * preq.quants[input_offset + j + 2] as i32;
-                    s3 += (w_quants[j + 3] as i8) as i32
-                        * preq.quants[input_offset + j + 3] as i32;
+                    s1 += (w_quants[j + 1] as i8) as i32 * preq.quants[input_offset + j + 1] as i32;
+                    s2 += (w_quants[j + 2] as i8) as i32 * preq.quants[input_offset + j + 2] as i32;
+                    s3 += (w_quants[j + 3] as i8) as i32 * preq.quants[input_offset + j + 3] as i32;
                     j += 4;
                 }
                 sum += combined_scale * (s0 + s1 + s2 + s3) as f32;
@@ -6977,15 +6970,15 @@ mod tests {
 
         // Create simple weights and input
         let mut weights = [0.0f32; 256];
-        for i in 0..256 {
-            weights[i] = (i as f32 - 128.0) * 0.01;
+        for (i, w) in weights.iter_mut().enumerate() {
+            *w = (i as f32 - 128.0) * 0.01;
         }
         let block = quantize_f32_to_q4k_block(&weights);
         let dequant = dequant_q4k_block_test(&block);
 
         let mut input = vec![0.0f32; cols];
-        for i in 0..cols {
-            input[i] = (i as f32) * 0.001;
+        for (i, inp) in input.iter_mut().enumerate() {
+            *inp = (i as f32) * 0.001;
         }
 
         // Reference: dot product with dequantized weights
@@ -7086,10 +7079,7 @@ mod tests {
         matvec_q4k_into(&q4k_data, &input, rows, cols, &mut output);
 
         for (i, &v) in output.iter().enumerate() {
-            assert!(
-                v.abs() < 1e-6,
-                "row {i}: expected ~0.0, got {v}"
-            );
+            assert!(v.abs() < 1e-6, "row {i}: expected ~0.0, got {v}");
         }
     }
 

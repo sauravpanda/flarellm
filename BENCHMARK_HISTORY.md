@@ -754,3 +754,29 @@ Baseline model: SmolLM2-135M-Instruct Q8_0 (138MB, 30 layers, dim=576).
 | Decode (256 tok) | 34.9 |
 | Sustained (512 tok) | **32.7** |
 
+### 2026-04-14 11:27 — `830790e Merge pull request #420 from sauravpanda/greedy-fused-argmax`
+
+**Hardware:** Apple M5 Pro, ARM64 (NEON SIMD)  
+**Model:** Llama, ~1498M params, 16 layers, dim=2048  
+**Load time:** 0.86s
+
+| Metric | tok/s |
+|---|---|
+| Decode (16 tok) | 38.3 |
+| Decode (64 tok) | 38.4 |
+| Decode (256 tok) | 32.5 |
+| Sustained (512 tok) | **31.5** |
+
+### 2026-04-14 11:27 — `830790e Merge pull request #420 from sauravpanda/greedy-fused-argmax`
+
+**Hardware:** Apple M5 Pro, ARM64 (NEON SIMD)  
+**Model:** Llama, ~162M params, 30 layers, dim=576  
+**Load time:** 0.15s
+
+| Metric | tok/s |
+|---|---|
+| Decode (16 tok) | 208.8 |
+| Decode (64 tok) | 224.4 |
+| Decode (256 tok) | 195.0 |
+| Sustained (512 tok) | **173.0** |
+
