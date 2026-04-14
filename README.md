@@ -158,6 +158,30 @@ while (!engine.stream_done()) {
 }
 ```
 
+### P2P collaborative inference primitives
+
+For experiments in splitting inference across multiple peers (e.g. a
+WebRTC mesh), `FlareEngine` exposes the "head" and "tail" of a forward
+pass. A coordinator peer can embed a token, hand the hidden state off
+through a chain of peers running some subset of transformer layers, and
+then run the final RMSNorm + output projection locally to recover
+logits:
+
+```javascript
+// Coordinator peer: embed the next input token.
+const hidden = engine.embed_token(tokenId); // Float32Array, hidden_dim
+
+// ... ship `hidden` through the peer mesh; each peer runs some layers
+// on its local `FlareEngine` and forwards the updated hidden state ...
+
+// Coordinator peer: project the final hidden state to logits.
+const logits = engine.output_projection(finalHidden); // Float32Array, vocab_size
+```
+
+The full WebRTC orchestration layer lives in JavaScript; these two
+primitives plus the existing `forward*` methods are the minimum Rust
+surface needed to start P2P experimentation ([#389](../../issues/389)).
+
 ## Architecture
 
 ```

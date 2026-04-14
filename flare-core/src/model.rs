@@ -747,6 +747,44 @@ pub struct Model {
 }
 
 impl Model {
+    /// Look up the token embedding vector for a given token ID.
+    ///
+    /// Returns a copy of the row `token_id` of the token embedding table,
+    /// of length `config.hidden_dim`. Exposed as a primitive for P2P /
+    /// collaborative inference scenarios where one peer runs the embedding
+    /// step and streams the hidden state to downstream peers.
+    pub fn embed_token(&self, token_id: u32) -> Vec<f32> {
+        let dim = self.config.hidden_dim;
+        let offset = token_id as usize * dim;
+        let embed = self.weights.token_embedding.data();
+        embed[offset..offset + dim].to_vec()
+    }
+
+    /// Apply the final RMSNorm + output weight matvec to compute logits
+    /// from a post-last-layer hidden state.
+    ///
+    /// This is the inverse counterpart to [`Model::embed_token`]: it is the
+    /// tail of a forward pass. It is exposed as a primitive for P2P /
+    /// collaborative inference: a downstream peer can hand back the final
+    /// hidden state and an orchestrator can run this step to get logits.
+    ///
+    /// Note: this uses the dequantised f32 `output_weight` path and does
+    /// not apply Gemma 2's final logit soft-cap. P2P callers that need the
+    /// soft-cap should apply it themselves on the returned logits.
+    pub fn output_projection(&self, hidden: &[f32]) -> Vec<f32> {
+        let normed = self.backend.rmsnorm_vec(
+            hidden,
+            self.weights.output_norm.data(),
+            self.config.rms_norm_eps,
+        );
+        matvec(
+            self.weights.output_weight.data(),
+            &normed,
+            self.config.vocab_size,
+            self.config.hidden_dim,
+        )
+    }
+
     pub fn new(config: ModelConfig, weights: ModelWeights) -> Self {
         let kv_cache = KvCache::new(
             config.num_layers,
