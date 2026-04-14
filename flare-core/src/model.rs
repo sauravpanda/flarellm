@@ -1763,6 +1763,39 @@ pub fn matvec(mat: &[f32], vec: &[f32], rows: usize, cols: usize) -> Vec<f32> {
     }
 }
 
+/// Adaptive parallelism heuristic for matvec operations.
+///
+/// Returns `Some(chunk_rows)` if the work should be parallelized, `None` otherwise.
+/// Uses per-size thresholds to balance rayon task overhead against parallelism gains:
+/// - Below 2M FMAs: single-threaded (rayon overhead exceeds benefit)
+/// - 2M-10M FMAs: parallel with larger chunks (128 rows) for moderate work
+/// - Above 10M FMAs: parallel with smaller chunks (32 rows) for maximum utilization
+///
+/// The 2M threshold ensures 2048x2048 matvecs (4.2M FMAs, common in Q/K/V/O
+/// projections for 1B-class models) are parallelized across available cores.
+#[inline]
+fn parallel_chunk_rows(total_work: usize, rows: usize) -> Option<usize> {
+    if total_work < 2_000_000 {
+        // Small matrix: rayon overhead would dominate
+        return None;
+    }
+    let chunk = if total_work < 10_000_000 {
+        // Medium matrix (e.g. 2048x2048): moderate parallelism, larger chunks
+        // to keep rayon task count reasonable (~16 tasks for 2048 rows)
+        128
+    } else {
+        // Large matrix (e.g. 8192x2048): fine-grained parallelism for
+        // maximum core utilization (~64-256 tasks)
+        32
+    };
+    // Need at least 2 chunks to benefit from parallelism
+    if rows >= chunk * 2 {
+        Some(chunk)
+    } else {
+        None
+    }
+}
+
 /// x86 AVX2 matvec entry point. Runtime-detected; uses #[target_feature] to enable
 /// AVX2/FMA codegen for the inner loop.
 ///
@@ -1771,18 +1804,16 @@ pub fn matvec(mat: &[f32], vec: &[f32], rows: usize, cols: usize) -> Vec<f32> {
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2,fma")]
 unsafe fn matvec_avx2(mat: &[f32], vec: &[f32], rows: usize, cols: usize) -> Vec<f32> {
-    const PARALLEL_FMA_THRESHOLD: usize = 5_000_000;
-    const CHUNK_ROWS: usize = 64;
     let total_work = rows * cols;
 
-    if total_work >= PARALLEL_FMA_THRESHOLD && rows >= CHUNK_ROWS * 2 {
+    if let Some(chunk_rows) = parallel_chunk_rows(total_work, rows) {
         use rayon::prelude::*;
         let mut output = vec![0.0f32; rows];
         output
-            .par_chunks_mut(CHUNK_ROWS)
+            .par_chunks_mut(chunk_rows)
             .enumerate()
             .for_each(|(chunk_idx, out_chunk)| {
-                let row_start = chunk_idx * CHUNK_ROWS;
+                let row_start = chunk_idx * chunk_rows;
                 for (local_i, out) in out_chunk.iter_mut().enumerate() {
                     let i = row_start + local_i;
                     let row = &mat[i * cols..i * cols + cols];
@@ -1911,22 +1942,17 @@ unsafe fn matvec_simd_row(row: &[f32], vec: &[f32], cols: usize) -> f32 {
 /// ARM NEON SIMD matvec with rayon parallelism on native, serial on wasm32.
 #[cfg(target_arch = "aarch64")]
 fn matvec_simd(mat: &[f32], vec: &[f32], rows: usize, cols: usize) -> Vec<f32> {
-    // Total FMAs above which parallelism wins. ~5M FMAs / ~50µs sequential break-even.
-    const PARALLEL_FMA_THRESHOLD: usize = 5_000_000;
-    // Chunk size: balance task granularity vs overhead
-    const CHUNK_ROWS: usize = 64;
-
     let total_work = rows * cols;
 
     #[cfg(not(target_arch = "wasm32"))]
-    if total_work >= PARALLEL_FMA_THRESHOLD && rows >= CHUNK_ROWS * 2 {
+    if let Some(chunk_rows) = parallel_chunk_rows(total_work, rows) {
         use rayon::prelude::*;
         let mut output = vec![0.0f32; rows];
         output
-            .par_chunks_mut(CHUNK_ROWS)
+            .par_chunks_mut(chunk_rows)
             .enumerate()
             .for_each(|(chunk_idx, out_chunk)| {
-                let row_start = chunk_idx * CHUNK_ROWS;
+                let row_start = chunk_idx * chunk_rows;
                 for (local_i, out) in out_chunk.iter_mut().enumerate() {
                     let i = row_start + local_i;
                     let row = &mat[i * cols..i * cols + cols];
@@ -1979,18 +2005,16 @@ pub fn matvec_scalar(mat: &[f32], vec: &[f32], rows: usize, cols: usize) -> Vec<
     // Parallel path for wasm32 with wasm_threads feature enabled.
     #[cfg(all(target_arch = "wasm32", feature = "wasm_threads"))]
     {
-        const PARALLEL_THRESHOLD: usize = 5_000_000;
-        const CHUNK_ROWS: usize = 64;
         let total_work = rows * cols;
 
-        if total_work >= PARALLEL_THRESHOLD && rows >= CHUNK_ROWS * 2 {
+        if let Some(chunk_rows) = parallel_chunk_rows(total_work, rows) {
             use rayon::prelude::*;
             let mut output = vec![0.0f32; rows];
             output
-                .par_chunks_mut(CHUNK_ROWS)
+                .par_chunks_mut(chunk_rows)
                 .enumerate()
                 .for_each(|(chunk_idx, out_chunk)| {
-                    let row_start = chunk_idx * CHUNK_ROWS;
+                    let row_start = chunk_idx * chunk_rows;
                     for (local_i, out) in out_chunk.iter_mut().enumerate() {
                         let i = row_start + local_i;
                         let row = &mat[i * cols..i * cols + cols];
