@@ -580,7 +580,7 @@ pub struct LayerWeights {
 
 /// Pre-allocated buffers for the forward() hot path.
 ///
-/// Eliminates ~16 Vec<f32> heap allocations per layer per token by reusing
+/// Eliminates ~16 `Vec<f32>` heap allocations per layer per token by reusing
 /// these buffers across forward() calls. For a 16-layer model this saves
 /// ~256 allocations per token.
 pub struct ForwardBuffers {
@@ -3159,6 +3159,7 @@ fn f16_to_f32_inline(bits: u16) -> f32 {
 /// warm the L2 cache while the current operation's compute is running. This is
 /// small enough to avoid evicting useful data from cache, but large enough to
 /// cover the first few hundred rows of weight data that will be accessed next.
+#[cfg(target_arch = "aarch64")]
 const PREFETCH_BYTES: usize = 8192;
 
 /// Issue software prefetch hints for the first `PREFETCH_BYTES` of a byte slice.
@@ -4321,7 +4322,7 @@ pub fn matvec_into(mat: &[f32], vec: &[f32], rows: usize, cols: usize, output: &
     target_arch = "x86_64",
     not(any(target_os = "macos", target_arch = "aarch64"))
 ))]
-fn matvec_scalar_into(mat: &[f32], vec: &[f32], rows: usize, cols: usize, output: &mut [f32]) {
+fn matvec_scalar_into(mat: &[f32], vec: &[f32], _rows: usize, cols: usize, output: &mut [f32]) {
     for (i, out) in output.iter_mut().enumerate() {
         let row = &mat[i * cols..(i + 1) * cols];
         *out = matvec_scalar_row(row, vec, cols);
@@ -4344,7 +4345,7 @@ fn matvec_simd_into(mat: &[f32], vec: &[f32], rows: usize, cols: usize, output: 
 /// Caller must ensure AVX2 + FMA are available.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2,fma")]
-unsafe fn matvec_avx2_into(mat: &[f32], vec: &[f32], rows: usize, cols: usize, output: &mut [f32]) {
+unsafe fn matvec_avx2_into(mat: &[f32], vec: &[f32], _rows: usize, cols: usize, output: &mut [f32]) {
     for (i, out) in output.iter_mut().enumerate() {
         let row = &mat[i * cols..i * cols + cols];
         *out = matvec_avx2_row(row, vec, cols);
@@ -4381,7 +4382,7 @@ pub fn matvec_q8_0_into(
 fn matvec_q8_0_scalar_into(
     weight_data: &[u8],
     input: &[f32],
-    rows: usize,
+    _rows: usize,
     cols: usize,
     output: &mut [f32],
 ) {
