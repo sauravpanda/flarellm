@@ -948,12 +948,13 @@ impl Model {
     /// `set_backend` to use GPU acceleration.
     #[allow(clippy::needless_range_loop)]
     pub fn forward(&mut self, token_id: u32, pos: usize) -> Tensor {
-        let config = &self.config;
-        let dim = config.hidden_dim;
-        let head_dim = config.head_dim;
-        let num_heads = config.num_heads;
-        let num_kv_heads = config.num_kv_heads;
-        let kv_dim = num_kv_heads * head_dim;
+        // Copy config values we need for the GPU fast path (avoids holding
+        // a borrow on self.config across the forward_layers call below).
+        let dim = self.config.hidden_dim;
+        let head_dim = self.config.head_dim;
+        let num_heads = self.config.num_heads;
+        let num_kv_heads = self.config.num_kv_heads;
+        let vocab_size = self.config.vocab_size;
 
         // --- GPU-resident fast path ---
         // When GPU weights are uploaded, run the entire forward pass with a single
@@ -972,52 +973,207 @@ impl Model {
                 num_heads,
                 num_kv_heads,
                 head_dim,
-                config.intermediate_dim,
-                config.vocab_size,
-                config.rms_norm_eps,
-                config.rope_theta,
-                config.num_layers,
+                self.config.intermediate_dim,
+                vocab_size,
+                self.config.rms_norm_eps,
+                self.config.rope_theta,
+                self.config.num_layers,
                 seq_len,
             ) {
                 // Advance KV cache position counter
                 self.kv_cache.advance();
 
                 // Gemma 2: apply final logit soft-cap
-                if config.final_logit_softcap > 0.0 {
-                    let cap = config.final_logit_softcap;
+                if self.config.final_logit_softcap > 0.0 {
+                    let cap = self.config.final_logit_softcap;
                     for l in &mut logits {
                         *l = (*l / cap).tanh() * cap;
                     }
                 }
 
-                return Tensor::from_vec(logits, &[config.vocab_size]).unwrap();
+                return Tensor::from_vec(logits, &[vocab_size]).unwrap();
             }
         }
 
         // --- Fallback: per-operation GPU dispatch or CPU path ---
         //
-        // Uses pre-allocated ForwardBuffers to eliminate ~16 Vec<f32> heap
-        // allocations per layer. For the CPU path (no use_raw, no use_cpu_q8),
-        // calls _into free functions that write directly into buffers. GPU and
-        // quantized paths still use the ComputeBackend trait (those allocations
-        // are unavoidable without changing the trait interface).
+        // Run all transformer layers + final RMSNorm via forward_layers().
+        // The result is left in self.forward_buffers.final_normed.
+        let (_use_raw, use_cpu_q8, use_cpu_q4k) = self.forward_layers(token_id, pos);
+
+        // Output logits: [vocab_size] = output_weight [vocab_size, dim] x normed [dim]
+        // Use quantized path when raw output weight is available (bandwidth reduction).
+        if let Some(ref row) = self.raw_output_weight {
+            if row.format == WeightFormat::Q4K && use_cpu_q4k {
+                matvec_q4k_into(
+                    &row.data,
+                    &self.forward_buffers.final_normed,
+                    row.num_rows,
+                    dim,
+                    &mut self.forward_buffers.logits,
+                );
+            } else if row.format == WeightFormat::Q8_0 && use_cpu_q8 {
+                quantize_input_q8_0_into(
+                    &self.forward_buffers.final_normed,
+                    &mut self.forward_buffers.output_q8,
+                );
+                matvec_q8_0_preq_into(
+                    &row.data,
+                    &self.forward_buffers.output_q8,
+                    row.num_rows,
+                    &mut self.forward_buffers.logits,
+                );
+            } else {
+                matvec_into(
+                    self.weights.output_weight.data(),
+                    &self.forward_buffers.final_normed,
+                    vocab_size,
+                    dim,
+                    &mut self.forward_buffers.logits,
+                );
+            }
+        } else {
+            matvec_into(
+                self.weights.output_weight.data(),
+                &self.forward_buffers.final_normed,
+                vocab_size,
+                dim,
+                &mut self.forward_buffers.logits,
+            );
+        }
+
+        // Gemma 2: apply final logit soft-cap (tanh(x / cap) * cap)
+        if self.config.final_logit_softcap > 0.0 {
+            let cap = self.config.final_logit_softcap;
+            for l in &mut self.forward_buffers.logits {
+                *l = (*l / cap).tanh() * cap;
+            }
+        }
+
+        Tensor::from_vec(self.forward_buffers.logits.clone(), &[vocab_size]).unwrap()
+    }
+
+    /// Greedy forward pass: runs the full transformer but returns only the
+    /// argmax token ID instead of all logits.
+    ///
+    /// The output projection (vocab_size x dim matvec) is the single most
+    /// expensive operation per token. For greedy decoding we only need the
+    /// argmax, not all 128K+ logits. This method fuses the argmax into the
+    /// output matvec, avoiding a 512KB+ write to the logits buffer and the
+    /// subsequent scan. This reduces cache pollution and saves one full pass
+    /// over the logits vector.
+    ///
+    /// Callers should use this when `temperature == 0.0` and no post-processing
+    /// of the logit distribution is needed (e.g. no repeat penalty, no top-p).
+    ///
+    /// Returns `(token_id, logit_value)` for the greedy-best token.
+    pub fn forward_greedy(&mut self, token_id: u32, pos: usize) -> (u32, f32) {
+        // GPU-resident fast path: fall back to full forward + argmax since
+        // the GPU path returns all logits anyway.
+        if self.backend.has_gpu_weights() && self.backend.has_gpu_kv_cache() {
+            let logits_tensor = self.forward(token_id, pos);
+            let logits = logits_tensor.data();
+            let mut best_idx = 0u32;
+            let mut best_val = f32::NEG_INFINITY;
+            for (i, &v) in logits.iter().enumerate() {
+                if v > best_val {
+                    best_val = v;
+                    best_idx = i as u32;
+                }
+            }
+            return (best_idx, best_val);
+        }
+
+        // Run all transformer layers + final RMSNorm, leaving the result in
+        // forward_buffers.final_normed. Shared with forward().
+        let (_use_raw, use_cpu_q8, use_cpu_q4k) = self.forward_layers(token_id, pos);
+
+        let dim = self.config.hidden_dim;
+        let vocab_size = self.config.vocab_size;
+
+        // Fused argmax output projection — no logits buffer allocation.
+        // For Q4K we fall back to full matvec + argmax since there is no
+        // fused Q4K argmax kernel yet.
+        let (best_idx, mut best_val) = if let Some(ref row) = self.raw_output_weight {
+            if row.format == WeightFormat::Q4K && use_cpu_q4k {
+                // No fused Q4K argmax yet — compute full logits then scan.
+                matvec_q4k_into(
+                    &row.data,
+                    &self.forward_buffers.final_normed,
+                    row.num_rows,
+                    dim,
+                    &mut self.forward_buffers.logits,
+                );
+                let mut bi = 0usize;
+                let mut bv = f32::NEG_INFINITY;
+                for (i, &v) in self.forward_buffers.logits.iter().enumerate() {
+                    if v > bv {
+                        bv = v;
+                        bi = i;
+                    }
+                }
+                (bi, bv)
+            } else if row.format == WeightFormat::Q8_0 && use_cpu_q8 {
+                quantize_input_q8_0_into(
+                    &self.forward_buffers.final_normed,
+                    &mut self.forward_buffers.output_q8,
+                );
+                matvec_argmax_q8_0_preq(
+                    &row.data,
+                    &self.forward_buffers.output_q8,
+                    row.num_rows,
+                )
+            } else {
+                matvec_argmax_f32(
+                    self.weights.output_weight.data(),
+                    &self.forward_buffers.final_normed,
+                    vocab_size,
+                    dim,
+                )
+            }
+        } else {
+            matvec_argmax_f32(
+                self.weights.output_weight.data(),
+                &self.forward_buffers.final_normed,
+                vocab_size,
+                dim,
+            )
+        };
+
+        // Gemma 2: apply final logit soft-cap to the winning logit.
+        // Since tanh is monotonic, argmax is preserved; we just adjust the value.
+        if self.config.final_logit_softcap > 0.0 {
+            let cap = self.config.final_logit_softcap;
+            best_val = (best_val / cap).tanh() * cap;
+        }
+
+        (best_idx as u32, best_val)
+    }
+
+    /// Run all transformer layers and final RMSNorm, leaving the result in
+    /// `self.forward_buffers.final_normed`. Does NOT compute the output
+    /// projection (logits). Also advances the KV cache.
+    ///
+    /// This is the shared prefix of `forward()` and `forward_greedy()`,
+    /// extracted to avoid code duplication in the ~400-line layer loop.
+    ///
+    /// Returns `(use_raw, use_cpu_q8, use_cpu_q4k)` so the caller can dispatch
+    /// the correct output projection variant without recomputing the flags.
+    #[allow(clippy::needless_range_loop)]
+    fn forward_layers(&mut self, token_id: u32, pos: usize) -> (bool, bool, bool) {
+        let config = &self.config;
+        let dim = config.hidden_dim;
+        let head_dim = config.head_dim;
+        let num_heads = config.num_heads;
+        let num_kv_heads = config.num_kv_heads;
+        let kv_dim = num_kv_heads * head_dim;
 
         // Token embedding lookup
         let embed_data = self.weights.token_embedding.data();
         let offset = token_id as usize * dim;
         let mut x = Tensor::from_vec(embed_data[offset..offset + dim].to_vec(), &[dim]).unwrap();
 
-        // When raw quantized weights are available and the backend supports fused
-        // dequant+matvec, use that path to avoid dequantizing to f32 for every token.
         let use_raw = self.backend.supports_dequant_matmul() && self.raw_weights.is_some();
-
-        // CPU Q8_0 direct path: compute int8 x int8 dot product directly on quantized
-        // data. The input vector is quantized to Q8_0 on the fly, then we use NEON
-        // widening multiply for int8*int8 dot products. Reads 1 byte/weight + 1 byte/input
-        // instead of 4 bytes each, giving ~4x less memory bandwidth than f32 paths.
-        //
-        // Only beneficial for bandwidth-bound models (dim >= 1024). For small models
-        // where weights fit in L2 cache, Accelerate's cblas_sgemv (AMX) is faster.
         let use_cpu_q8 = !use_raw
             && dim >= 1024
             && self.raw_weights.is_some()
@@ -1043,7 +1199,6 @@ impl Model {
             let layer = &self.weights.layers[layer_idx];
 
             // --- Attention block ---
-            // RMSNorm into pre-allocated buffer
             rmsnorm_into(
                 x.data(),
                 layer.attn_norm.data(),
@@ -1051,8 +1206,6 @@ impl Model {
                 &mut self.forward_buffers.normed,
             );
 
-            // QKV projections — fused into a single matvec where possible.
-            // Reads the input vector once instead of three times.
             let q_dim = num_heads * head_dim;
             if use_raw {
                 let rw = &self.raw_weights.as_ref().unwrap()[layer_idx];
@@ -1200,7 +1353,6 @@ impl Model {
             );
 
             // Write K, V to CPU cache (always) and GPU cache (if initialized).
-            // The GPU write is a host→device queue.write_buffer — no readback.
             self.kv_cache.write(
                 layer_idx,
                 &self.forward_buffers.k_data,
@@ -1222,9 +1374,8 @@ impl Model {
                 &self.forward_buffers.v_data,
             );
 
-            // Grouped-query attention — use GPU-resident cache when available to
-            // avoid re-uploading the full KV cache on every token.
-            let seq_len = self.kv_cache.len() + 1; // include current position
+            // Grouped-query attention
+            let seq_len = self.kv_cache.len() + 1;
             if self.backend.has_gpu_kv_cache() {
                 let attn_tmp = self.backend.grouped_query_attention_from_gpu_cache(
                     &self.forward_buffers.q_data,
@@ -1237,7 +1388,6 @@ impl Model {
                 );
                 self.forward_buffers.attn_output.copy_from_slice(&attn_tmp);
             } else if let Some(ref qkv) = self.quantized_kv_cache {
-                // Use dequantized KV cache for ~8x memory savings.
                 let dequant_keys = qkv.dequant_keys(layer_idx);
                 let dequant_values = qkv.dequant_values(layer_idx);
                 cpu_grouped_query_attention_into(
@@ -1265,7 +1415,7 @@ impl Model {
                 );
             }
 
-            // Output projection
+            // Output projection (wo)
             if use_raw {
                 let rw = &self.raw_weights.as_ref().unwrap()[layer_idx];
                 let tmp = self.backend.batched_dequant_matmul(
@@ -1344,7 +1494,7 @@ impl Model {
                 &mut self.forward_buffers.ffn_normed,
             );
 
-            // Gate and up projections — fused into a single matvec where possible.
+            // Gate and up projections
             let inter_dim = config.intermediate_dim;
             if use_raw {
                 let rw = &self.raw_weights.as_ref().unwrap()[layer_idx];
@@ -1521,7 +1671,7 @@ impl Model {
             qkv.advance();
         }
 
-        // Final RMSNorm
+        // Final RMSNorm — result left in forward_buffers.final_normed
         rmsnorm_into(
             x.data(),
             self.weights.output_norm.data(),
@@ -1529,56 +1679,7 @@ impl Model {
             &mut self.forward_buffers.final_normed,
         );
 
-        // Output logits: [vocab_size] = output_weight [vocab_size, dim] x normed [dim]
-        // Use quantized path when raw output weight is available (bandwidth reduction).
-        if let Some(ref row) = self.raw_output_weight {
-            if row.format == WeightFormat::Q4K && use_cpu_q4k {
-                matvec_q4k_into(
-                    &row.data,
-                    &self.forward_buffers.final_normed,
-                    row.num_rows,
-                    dim,
-                    &mut self.forward_buffers.logits,
-                );
-            } else if row.format == WeightFormat::Q8_0 && use_cpu_q8 {
-                quantize_input_q8_0_into(
-                    &self.forward_buffers.final_normed,
-                    &mut self.forward_buffers.output_q8,
-                );
-                matvec_q8_0_preq_into(
-                    &row.data,
-                    &self.forward_buffers.output_q8,
-                    row.num_rows,
-                    &mut self.forward_buffers.logits,
-                );
-            } else {
-                matvec_into(
-                    self.weights.output_weight.data(),
-                    &self.forward_buffers.final_normed,
-                    config.vocab_size,
-                    dim,
-                    &mut self.forward_buffers.logits,
-                );
-            }
-        } else {
-            matvec_into(
-                self.weights.output_weight.data(),
-                &self.forward_buffers.final_normed,
-                config.vocab_size,
-                dim,
-                &mut self.forward_buffers.logits,
-            );
-        }
-
-        // Gemma 2: apply final logit soft-cap (tanh(x / cap) * cap)
-        if config.final_logit_softcap > 0.0 {
-            let cap = config.final_logit_softcap;
-            for l in &mut self.forward_buffers.logits {
-                *l = (*l / cap).tanh() * cap;
-            }
-        }
-
-        Tensor::from_vec(self.forward_buffers.logits.clone(), &[config.vocab_size]).unwrap()
+        (use_raw, use_cpu_q8, use_cpu_q4k)
     }
 
     /// Batched forward pass for a full prompt sequence.
@@ -4433,6 +4534,157 @@ pub fn matvec_q8_0_preq_into(
     }
 }
 
+/// Compute the argmax of a Q8_0 matrix-vector product without materializing
+/// the full output vector.
+///
+/// This is functionally equivalent to `matvec_q8_0_preq_into` followed by
+/// `sample_greedy`, but avoids writing 128K+ floats to a logits buffer.
+/// For greedy decoding this eliminates ~512KB of cache-polluting writes and
+/// the separate argmax scan.
+///
+/// Returns `(argmax_index, max_logit_value)`.
+pub fn matvec_argmax_q8_0_preq(
+    weight_data: &[u8],
+    preq: &QuantizedInput,
+    rows: usize,
+) -> (usize, f32) {
+    let blocks_per_row = preq.blocks_per_row;
+    let bytes_per_row = blocks_per_row * Q8_0_BLOCK_BYTES;
+
+    #[cfg(target_arch = "aarch64")]
+    {
+        let total_work = rows * (blocks_per_row * Q8_0_BLOCK_SIZE);
+        if total_work >= 2_000_000 {
+            use rayon::prelude::*;
+            const CHUNK_ROWS: usize = 64;
+            let num_chunks = (rows + CHUNK_ROWS - 1) / CHUNK_ROWS;
+            (0..num_chunks)
+                .into_par_iter()
+                .map(|chunk_idx| {
+                    let start_row = chunk_idx * CHUNK_ROWS;
+                    let end_row = (start_row + CHUNK_ROWS).min(rows);
+                    let mut local_best_idx = start_row;
+                    let mut local_best_val = f32::NEG_INFINITY;
+                    for row in start_row..end_row {
+                        let start = row * bytes_per_row;
+                        let row_bytes = &weight_data[start..start + bytes_per_row];
+                        let val = unsafe {
+                            dot_q8_0_q8_0_neon(
+                                row_bytes,
+                                &preq.scales,
+                                &preq.quants,
+                                blocks_per_row,
+                            )
+                        };
+                        if val > local_best_val {
+                            local_best_val = val;
+                            local_best_idx = row;
+                        }
+                    }
+                    (local_best_idx, local_best_val)
+                })
+                .reduce(
+                    || (0, f32::NEG_INFINITY),
+                    |(ai, av), (bi, bv)| {
+                        if bv > av {
+                            (bi, bv)
+                        } else {
+                            (ai, av)
+                        }
+                    },
+                )
+        } else {
+            let mut best_idx = 0usize;
+            let mut best_val = f32::NEG_INFINITY;
+            for row in 0..rows {
+                let start = row * bytes_per_row;
+                let row_bytes = &weight_data[start..start + bytes_per_row];
+                let val = unsafe {
+                    dot_q8_0_q8_0_neon(row_bytes, &preq.scales, &preq.quants, blocks_per_row)
+                };
+                if val > best_val {
+                    best_val = val;
+                    best_idx = row;
+                }
+            }
+            (best_idx, best_val)
+        }
+    }
+
+    #[cfg(not(target_arch = "aarch64"))]
+    {
+        let mut best_idx = 0usize;
+        let mut best_val = f32::NEG_INFINITY;
+        for row in 0..rows {
+            let row_start = row * bytes_per_row;
+            let row_bytes = &weight_data[row_start..row_start + bytes_per_row];
+            let mut sum = 0.0f32;
+            for block in 0..blocks_per_row {
+                let block_start = block * Q8_0_BLOCK_BYTES;
+                let w_scale = f16_to_f32_inline(u16::from_le_bytes([
+                    row_bytes[block_start],
+                    row_bytes[block_start + 1],
+                ]));
+                let w_quants = &row_bytes[block_start + 2..block_start + Q8_0_BLOCK_BYTES];
+                let input_offset = block * Q8_0_BLOCK_SIZE;
+                let combined_scale = w_scale * preq.scales[block];
+
+                let mut s0 = 0i32;
+                let mut s1 = 0i32;
+                let mut s2 = 0i32;
+                let mut s3 = 0i32;
+                let mut j = 0;
+                while j < 32 {
+                    s0 += (w_quants[j] as i8) as i32 * preq.quants[input_offset + j] as i32;
+                    s1 += (w_quants[j + 1] as i8) as i32
+                        * preq.quants[input_offset + j + 1] as i32;
+                    s2 += (w_quants[j + 2] as i8) as i32
+                        * preq.quants[input_offset + j + 2] as i32;
+                    s3 += (w_quants[j + 3] as i8) as i32
+                        * preq.quants[input_offset + j + 3] as i32;
+                    j += 4;
+                }
+                sum += combined_scale * (s0 + s1 + s2 + s3) as f32;
+            }
+            if sum > best_val {
+                best_val = sum;
+                best_idx = row;
+            }
+        }
+        (best_idx, best_val)
+    }
+}
+
+/// Compute the argmax of an f32 matrix-vector product without materializing
+/// the full output vector.
+///
+/// Functionally equivalent to `matvec_into` + argmax scan, but avoids writing
+/// the full logits buffer. Used for greedy decoding on the f32 output path.
+///
+/// Returns `(argmax_index, max_logit_value)`.
+pub fn matvec_argmax_f32(mat: &[f32], vec: &[f32], rows: usize, cols: usize) -> (usize, f32) {
+    debug_assert_eq!(mat.len(), rows * cols);
+    debug_assert!(vec.len() >= cols);
+
+    // For the f32 path we still need to compute all dot products. We just avoid
+    // storing them by tracking the running max inline.
+    let mut best_idx = 0usize;
+    let mut best_val = f32::NEG_INFINITY;
+    for row in 0..rows {
+        let row_start = row * cols;
+        let row_data = &mat[row_start..row_start + cols];
+        let mut sum = 0.0f32;
+        for j in 0..cols {
+            sum += row_data[j] * vec[j];
+        }
+        if sum > best_val {
+            best_val = sum;
+            best_idx = row;
+        }
+    }
+    (best_idx, best_val)
+}
+
 // ---------------------------------------------------------------------------
 // Q4_K direct quantized matvec
 // ---------------------------------------------------------------------------
@@ -6573,6 +6825,41 @@ mod tests {
         }
     }
 
+    #[test]
+    fn test_matvec_argmax_f32_matches_full_matvec() {
+        let rows = 64;
+        let cols = 128;
+        let mat: Vec<f32> = (0..rows * cols)
+            .map(|i| ((i * 37 + 13) % 500) as f32 / 500.0 - 0.5)
+            .collect();
+        let vec: Vec<f32> = (0..cols)
+            .map(|i| ((i * 11 + 7) % 200) as f32 / 200.0 - 0.5)
+            .collect();
+
+        // Full matvec + argmax
+        let full_output = matvec_scalar(&mat, &vec, rows, cols);
+        let mut expected_idx = 0;
+        let mut expected_val = f32::NEG_INFINITY;
+        for (i, &v) in full_output.iter().enumerate() {
+            if v > expected_val {
+                expected_val = v;
+                expected_idx = i;
+            }
+        }
+
+        // Fused argmax
+        let (got_idx, got_val) = matvec_argmax_f32(&mat, &vec, rows, cols);
+
+        assert_eq!(
+            got_idx, expected_idx,
+            "argmax index mismatch: got {got_idx}, expected {expected_idx}"
+        );
+        assert!(
+            (got_val - expected_val).abs() < 1e-5,
+            "argmax value mismatch: got {got_val}, expected {expected_val}"
+        );
+    }
+
     // ---- Q4_K matvec tests ----
 
     /// Build a Q4_K block from f32 values (simple quantization for testing).
@@ -6711,6 +6998,45 @@ mod tests {
         assert!(
             diff < 0.01,
             "expected={expected}, result={result}, diff={diff}"
+        );
+    }
+
+    #[test]
+    fn test_matvec_argmax_q8_0_preq_matches_full_matvec() {
+        let rows = 32;
+        let cols = 64;
+        let weights: Vec<f32> = (0..rows * cols)
+            .map(|i| ((i * 31 + 11) % 256) as f32 / 256.0 - 0.5)
+            .collect();
+        let input: Vec<f32> = (0..cols)
+            .map(|i| ((i * 7 + 3) % 100) as f32 / 100.0 - 0.5)
+            .collect();
+
+        let q8_data = quantize_f32_to_q8_0(&weights, rows, cols);
+        let preq = quantize_input_q8_0(&input);
+
+        // Full matvec + argmax
+        let mut full_output = vec![0.0f32; rows];
+        matvec_q8_0_preq_into(&q8_data, &preq, rows, &mut full_output);
+        let mut expected_idx = 0;
+        let mut expected_val = f32::NEG_INFINITY;
+        for (i, &v) in full_output.iter().enumerate() {
+            if v > expected_val {
+                expected_val = v;
+                expected_idx = i;
+            }
+        }
+
+        // Fused argmax
+        let (got_idx, got_val) = matvec_argmax_q8_0_preq(&q8_data, &preq, rows);
+
+        assert_eq!(
+            got_idx, expected_idx,
+            "Q8_0 argmax index mismatch: got {got_idx}, expected {expected_idx}"
+        );
+        assert!(
+            (got_val - expected_val).abs() < 1e-5,
+            "Q8_0 argmax value mismatch: got {got_val}, expected {expected_val}"
         );
     }
 
