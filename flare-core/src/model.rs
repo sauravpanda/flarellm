@@ -940,6 +940,79 @@ impl Model {
         }
     }
 
+    /// Merge a LoRA adapter into the model weights (f32 path).
+    ///
+    /// Applies `W_new = W + (alpha / rank) * B @ A` for every adapted projection
+    /// in every layer.  After merging, the adapter's effect is permanent until
+    /// the base weights are reloaded.
+    ///
+    /// This invalidates any fused weight caches (Q8_0 fused weights and f32 fused
+    /// QKV/gate-up buffers are cleared and must be rebuilt if needed).
+    ///
+    /// # Errors
+    ///
+    /// Returns `LoraError` if dimensions are inconsistent or a layer index is
+    /// out of range.
+    pub fn merge_lora(
+        &mut self,
+        adapter: &crate::lora::LoraAdapter,
+    ) -> Result<(), crate::lora::LoraError> {
+        use crate::lora::{apply_lora_delta, LoraError};
+
+        if adapter.layers.is_empty() {
+            return Err(LoraError::EmptyAdapter);
+        }
+
+        let scale = adapter.alpha / adapter.rank as f32;
+        let rank = adapter.rank;
+
+        for (layer_idx, lora_layer) in adapter.layers.iter().enumerate() {
+            if layer_idx >= self.weights.layers.len() {
+                return Err(LoraError::LayerIndexOutOfRange {
+                    index: layer_idx,
+                    count: self.weights.layers.len(),
+                });
+            }
+
+            let layer = &mut self.weights.layers[layer_idx];
+
+            // Helper macro to apply a LoRA pair to a weight tensor
+            macro_rules! merge_pair {
+                ($a:expr, $b:expr, $w:expr) => {
+                    if let (Some(a), Some(b)) = ($a, $b) {
+                        apply_lora_delta($w.data_mut(), a, b, rank, scale)?;
+                    }
+                };
+            }
+
+            // Attention projections
+            merge_pair!(&lora_layer.wq_a, &lora_layer.wq_b, &mut layer.wq);
+            merge_pair!(&lora_layer.wk_a, &lora_layer.wk_b, &mut layer.wk);
+            merge_pair!(&lora_layer.wv_a, &lora_layer.wv_b, &mut layer.wv);
+            merge_pair!(&lora_layer.wo_a, &lora_layer.wo_b, &mut layer.wo);
+
+            // FFN projections
+            merge_pair!(
+                &lora_layer.w_gate_a,
+                &lora_layer.w_gate_b,
+                &mut layer.w_gate
+            );
+            merge_pair!(&lora_layer.w_up_a, &lora_layer.w_up_b, &mut layer.w_up);
+            merge_pair!(
+                &lora_layer.w_down_a,
+                &lora_layer.w_down_b,
+                &mut layer.w_down
+            );
+        }
+
+        // Invalidate fused weight caches — they embed the old weight values.
+        self.fused_weights = None;
+        self.fused_f32_qkv = None;
+        self.fused_f32_gate_up = None;
+
+        Ok(())
+    }
+
     /// Run a single forward pass for one token position.
     /// Returns logits over the vocabulary `[vocab_size]`.
     ///

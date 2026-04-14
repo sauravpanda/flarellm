@@ -1993,6 +1993,46 @@ impl FlareEngine {
             self.tokens_per_second(),
         )
     }
+
+    /// Merge a LoRA adapter (SafeTensors format) into the model weights.
+    ///
+    /// Pass the raw bytes of a `.safetensors` file containing LoRA A/B matrices.
+    /// After merging, the adapter's effect is permanent for this engine instance;
+    /// call `FlareEngine.load()` again to restore the base model.
+    ///
+    /// ```javascript
+    /// const resp = await fetch('lora-adapter.safetensors');
+    /// const bytes = new Uint8Array(await resp.arrayBuffer());
+    /// engine.merge_lora(bytes);
+    /// ```
+    #[wasm_bindgen]
+    pub fn merge_lora(&mut self, adapter_bytes: &[u8]) -> Result<(), JsError> {
+        let adapter = flare_loader::load_lora_from_safetensors(adapter_bytes)
+            .map_err(|e| JsError::new(&format!("LoRA load error: {e}")))?;
+        self.model
+            .merge_lora(&adapter)
+            .map_err(|e| JsError::new(&format!("LoRA merge error: {e}")))?;
+        Ok(())
+    }
+
+    /// Merge a LoRA adapter with a custom alpha scaling factor.
+    ///
+    /// Same as `merge_lora` but overrides the alpha value embedded in the
+    /// adapter file.  The effective scaling is `alpha / rank`.
+    #[wasm_bindgen]
+    pub fn merge_lora_with_alpha(
+        &mut self,
+        adapter_bytes: &[u8],
+        alpha: f32,
+    ) -> Result<(), JsError> {
+        let mut adapter = flare_loader::load_lora_from_safetensors(adapter_bytes)
+            .map_err(|e| JsError::new(&format!("LoRA load error: {e}")))?;
+        adapter.alpha = alpha;
+        self.model
+            .merge_lora(&adapter)
+            .map_err(|e| JsError::new(&format!("LoRA merge error: {e}")))?;
+        Ok(())
+    }
 }
 
 /// Progressive loader that fetches a GGUF model from a URL with streaming

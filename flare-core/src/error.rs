@@ -14,6 +14,9 @@ pub enum FlareError {
     #[error("tensor error: {0}")]
     Tensor(#[from] crate::tensor::TensorError),
 
+    #[error("LoRA error: {0}")]
+    Lora(#[from] crate::lora::LoraError),
+
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
 }
