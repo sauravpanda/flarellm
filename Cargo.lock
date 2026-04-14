@@ -406,6 +406,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "flarellm-edge"
+version = "0.1.0"
+dependencies = [
+ "flarellm-core",
+ "flarellm-loader",
+ "log",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "flarellm-gpu"
 version = "0.1.0"
 dependencies = [

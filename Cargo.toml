@@ -7,6 +7,7 @@ members = [
     "flare-simd",
     "flare-web",
     "flare-server",
+    "flare-edge",
 ]
 resolver = "2"
 

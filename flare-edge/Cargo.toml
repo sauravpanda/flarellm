@@ -1,0 +1,21 @@
+[package]
+name = "flarellm-edge"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Serverless LLM inference for edge runtimes (Cloudflare Workers, Fermyon Spin, Deno)"
+keywords = ["llm", "edge", "serverless", "wasm", "inference"]
+categories = ["web-programming", "science"]
+readme = "../README.md"
+
+[lib]
+name = "flare_edge"
+
+[dependencies]
+flare-core = { package = "flarellm-core", path = "../flare-core", version = "0.1.0" }
+flare-loader = { package = "flarellm-loader", path = "../flare-loader", version = "0.1.0" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+log = { workspace = true }
