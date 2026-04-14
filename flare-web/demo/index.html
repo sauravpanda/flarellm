@@ -676,6 +676,11 @@
       <button id="stop" class="danger" disabled>Stop</button>
       <button id="clear" disabled>Clear</button>
       <button id="quick-test" disabled title="Quick test using embedded GGUF tokenizer">Quick test</button>
+      <button id="voice" disabled title="Voice mode: speak to the model and hear the reply (Web Speech API)">Voice</button>
+      <label style="display:flex;align-items:center;gap:0.35rem;font-size:0.82rem;color:var(--fg-faint);">
+        <input type="checkbox" id="voice-speak" checked>
+        Speak replies
+      </label>
       <span style="flex:1;"></span>
       <span class="stats" id="gen-stats"></span>
     </div>
@@ -690,6 +695,7 @@
     import init, {
       FlareEngine, FlareProgressiveLoader, FlareTokenizer,
       webgpu_available, supports_webnn, supports_webtransport, init_thread_pool,
+      supports_speech_recognition, supports_speech_synthesis,
       is_model_cached, cache_model, load_cached_model,
       delete_cached_model, list_cached_models, storage_estimate
     } from '../pkg/flare_web.js';
@@ -722,6 +728,8 @@
     const $stop        = $('stop');
     const $clear       = $('clear');
     const $quickTest   = $('quick-test');
+    const $voice       = $('voice');
+    const $voiceSpeak  = $('voice-speak');
     const $maxTokens   = $('max-tokens');
     const $chat        = $('chat');
     const $genStats    = $('gen-stats');
@@ -1166,6 +1174,10 @@
       $systemIn.disabled = false;
       $clear.disabled = false;
       $quickTest.disabled = false;
+      // Voice button is only useful once both a model and tokenizer are ready
+      // and the browser exposes SpeechRecognition. The actual enable check is
+      // performed in refreshVoiceButton() (called from onTokenizerLoaded too).
+      refreshVoiceButton();
       $tmplBadge.textContent = tmplName;
       $tmplBadge.style.display = '';
       hideProgress();
@@ -1218,6 +1230,85 @@
         `Vocab: ${tok.vocab_size}  |  ` +
         `BOS: ${tok.bos_token_id ?? 'none'}  |  ` +
         `EOS: ${tok.eos_token_id ?? 'none'}`;
+      refreshVoiceButton();
+    }
+
+    // ---------- Voice mode (Web Speech API) ----------
+    //
+    // Foundation for the voice pipeline (issue #395). For now we rely on the
+    // browser-provided Web Speech API: SpeechRecognition for STT and
+    // SpeechSynthesis for TTS. These run entirely in the browser (Chrome
+    // routes STT through a cloud service, Safari uses on-device), so this is
+    // a pragmatic bootstrap rather than a fully offline pipeline.
+    //
+    // NEXT STEP (true offline voice): integrate a Whisper-tiny model for
+    // speech-to-text and a small neural TTS (e.g. Piper/VITS) for synthesis,
+    // capturing microphone audio through an AudioWorklet so the main thread
+    // stays responsive. That work replaces this class while keeping the same
+    // listen()/speak() interface.
+    class VoiceMode {
+      constructor() {
+        const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+        if (SR) {
+          this.recognition = new SR();
+          this.recognition.continuous = false;
+          this.recognition.interimResults = false;
+          this.recognition.lang = navigator.language || 'en-US';
+        }
+        this.synth = window.speechSynthesis || null;
+      }
+
+      get supported() {
+        return !!this.recognition;
+      }
+
+      listen() {
+        return new Promise((resolve, reject) => {
+          if (!this.recognition) {
+            reject(new Error('SpeechRecognition not supported in this browser'));
+            return;
+          }
+          let settled = false;
+          this.recognition.onresult = (event) => {
+            settled = true;
+            const text = event.results[0][0].transcript;
+            resolve(text);
+          };
+          this.recognition.onerror = (event) => {
+            if (!settled) reject(event.error || new Error('recognition error'));
+          };
+          this.recognition.onend = () => {
+            if (!settled) reject(new Error('no speech detected'));
+          };
+          try {
+            this.recognition.start();
+          } catch (err) {
+            reject(err);
+          }
+        });
+      }
+
+      speak(text) {
+        if (!this.synth || !text) return;
+        try {
+          // Cancel any previous utterance so replies don't queue up.
+          this.synth.cancel();
+          const utterance = new SpeechSynthesisUtterance(text);
+          utterance.lang = navigator.language || 'en-US';
+          this.synth.speak(utterance);
+        } catch (_) { /* best effort */ }
+      }
+    }
+
+    const voiceMode = new VoiceMode();
+
+    function refreshVoiceButton() {
+      if (!$voice) return;
+      const ready = engine && tokenizer && voiceMode.supported && !streaming;
+      $voice.disabled = !ready;
+      if (!voiceMode.supported) {
+        $voice.title = 'Voice mode unavailable: this browser does not expose SpeechRecognition';
+      }
     }
 
     // ---------- WASM init ----------
@@ -1420,6 +1511,41 @@
       } finally { $tokUrlLoad.disabled = false; }
     });
 
+    // ---------- Voice mode ----------
+    // When true, the next completed generation will be spoken aloud through
+    // window.speechSynthesis. Set by the Voice button click handler and
+    // cleared in finishStream().
+    let voiceAutoSpeak = false;
+
+    $voice.addEventListener('click', async () => {
+      if (!engine || streaming) return;
+      if (!voiceMode.supported) {
+        $genStats.textContent = 'Voice mode unavailable in this browser.';
+        return;
+      }
+      const prevLabel = $voice.textContent;
+      $voice.disabled = true;
+      $voice.textContent = 'Listening...';
+      $genStats.textContent = 'Listening for speech...';
+      try {
+        const text = await voiceMode.listen();
+        if (!text) {
+          $genStats.textContent = 'No speech detected.';
+          return;
+        }
+        $promptIn.value = text;
+        voiceAutoSpeak = $voiceSpeak.checked && supports_speech_synthesis();
+        // Trigger the normal generate path so voice uses the same sampling,
+        // chat template, history, and streaming UI as typed messages.
+        $generate.click();
+      } catch (err) {
+        $genStats.textContent = 'Voice error: ' + (err && err.message ? err.message : err);
+      } finally {
+        $voice.textContent = prevLabel;
+        refreshVoiceButton();
+      }
+    });
+
     // ---------- Clear conversation ----------
     $clear.addEventListener('click', () => clearChat());
 
@@ -1504,6 +1630,7 @@
       $tokenCounter.textContent = '';
       $genStats.textContent = 'Generating...';
       tpsWindow = [];
+      refreshVoiceButton();
       await new Promise(r => setTimeout(r, 10));
 
       const maxToks    = parseInt($maxTokens.value, 10) || 128;
@@ -1593,6 +1720,14 @@
 
           $generate.disabled = false;
           $stop.disabled = true;
+
+          // If the user initiated this generation via the Voice button,
+          // speak the assistant reply back through Web Speech synthesis.
+          if (voiceAutoSpeak && finalText) {
+            voiceMode.speak(finalText);
+          }
+          voiceAutoSpeak = false;
+          refreshVoiceButton();
         }
 
         requestAnimationFrame(tick);
@@ -1601,6 +1736,8 @@
         streaming = false;
         $generate.disabled = false;
         $stop.disabled = true;
+        voiceAutoSpeak = false;
+        refreshVoiceButton();
       }
     });
 
