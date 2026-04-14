@@ -160,6 +160,9 @@ fn main() {
     eprintln!("Loaded in {:.2}s ({model_info})", load_time.as_secs_f64());
     eprintln!("Backend: {backend_label}");
 
+    // Warmup: run a dummy forward pass to page in weights and warm caches.
+    model.warmup();
+
     // --- Speculative decoding A/B comparison ---
     if speculative_mode {
         run_speculative_bench(&mut model, &backend_label, json_mode);

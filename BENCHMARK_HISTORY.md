@@ -884,3 +884,29 @@ Baseline model: SmolLM2-135M-Instruct Q8_0 (138MB, 30 layers, dim=576).
 | Decode (256 tok) | 193.9 |
 | Sustained (512 tok) | **176.2** |
 
+### 2026-04-14 16:48 — `7a69d04 Fix rustfmt after hybrid Q8_0/f32 PR`
+
+**Hardware:** Apple M5 Pro, ARM64 (NEON SIMD)  
+**Model:** Llama, ~1498M params, 16 layers, dim=2048  
+**Load time:** 0.97s
+
+| Metric | tok/s |
+|---|---|
+| Decode (16 tok) | 44.5 |
+| Decode (64 tok) | 43.4 |
+| Decode (256 tok) | 40.5 |
+| Sustained (512 tok) | **38.0** |
+
+### 2026-04-14 16:48 — `7a69d04 Fix rustfmt after hybrid Q8_0/f32 PR`
+
+**Hardware:** Apple M5 Pro, ARM64 (NEON SIMD)  
+**Model:** Llama, ~162M params, 30 layers, dim=576  
+**Load time:** 0.12s
+
+| Metric | tok/s |
+|---|---|
+| Decode (16 tok) | 225.1 |
+| Decode (64 tok) | 202.8 |
+| Decode (256 tok) | 176.4 |
+| Sustained (512 tok) | **171.1** |
+
