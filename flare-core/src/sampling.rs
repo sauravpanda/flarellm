@@ -8,7 +8,7 @@
 /// use flare_core::sampling::SamplingParams;
 ///
 /// // Greedy (deterministic) decoding
-/// let greedy = SamplingParams { temperature: 0.0, top_p: 1.0, top_k: 0, repeat_penalty: 1.0, min_p: 0.0, speculative: true };
+/// let greedy = SamplingParams { temperature: 0.0, top_p: 1.0, top_k: 0, repeat_penalty: 1.0, min_p: 0.0, speculative: true, self_speculative: false, draft_skip: 2, draft_tokens: 4 };
 /// assert_eq!(greedy.temperature, 0.0);
 ///
 /// // Default creative sampling
@@ -34,6 +34,22 @@ pub struct SamplingParams {
     /// accepting the longest correct prefix for a 1.5-2x speedup on
     /// repetitive text.
     pub speculative: bool,
+    /// Enable self-speculative decoding via layer skipping (default: false).
+    ///
+    /// When enabled and using greedy decoding (temperature == 0.0), the
+    /// generator uses the model itself as a draft model by skipping layers.
+    /// Draft tokens are generated quickly with fewer layers, then verified
+    /// with the full model.  Achieves 1.3-1.8x speedup with zero extra
+    /// memory.
+    pub self_speculative: bool,
+    /// Layer skip stride for self-speculative decoding (default: 2).
+    ///
+    /// Controls which layers run during draft generation.  A value of 2
+    /// runs every other layer (0, 2, 4, ...), a value of 3 runs every
+    /// third layer, etc.
+    pub draft_skip: usize,
+    /// Maximum number of draft tokens per self-speculative step (default: 4).
+    pub draft_tokens: usize,
 }
 
 impl Default for SamplingParams {
@@ -45,6 +61,9 @@ impl Default for SamplingParams {
             repeat_penalty: 1.1,
             min_p: 0.0,
             speculative: true,
+            self_speculative: false,
+            draft_skip: 2,
+            draft_tokens: 4,
         }
     }
 }

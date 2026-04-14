@@ -123,9 +123,14 @@ impl<'a> Generator<'a> {
         }
     }
 
-    /// Returns whether speculative decoding is active for the current params.
+    /// Returns whether n-gram speculative decoding is active for the current params.
     fn is_speculative(&self) -> bool {
         self.params.speculative && self.params.temperature == 0.0
+    }
+
+    /// Returns whether self-speculative (layer-skipping) decoding is active.
+    fn is_self_speculative(&self) -> bool {
+        self.params.self_speculative && self.params.temperature == 0.0
     }
 
     /// Prefill: process the prompt as a batch, returning logits for the last token.
@@ -300,6 +305,107 @@ impl<'a> Generator<'a> {
         accepted
     }
 
+    /// Attempt self-speculative decoding: generate draft tokens using a
+    /// layer-skipping forward pass, then verify each with the full model.
+    ///
+    /// Returns all accepted tokens (at least one — the verified token at
+    /// the first position).  Returns an empty vec if the model has fewer
+    /// than 2 layers (layer skipping would be pointless).
+    fn self_speculative_step(&mut self) -> Vec<GenerationStep> {
+        let num_layers = self.model.config().num_layers;
+        if num_layers < 2 {
+            return Vec::new();
+        }
+
+        let draft_skip = self.params.draft_skip.max(2);
+        let max_drafts = self.params.draft_tokens.max(1);
+
+        // Build the set of layer indices to use for drafting (skip layers).
+        let draft_layers: Vec<usize> = (0..num_layers).step_by(draft_skip).collect();
+
+        // Save KV cache state so we can roll back after drafting.
+        let saved_kv_len = self.model.kv_cache().len();
+        let saved_position = self.position;
+
+        // --- Draft phase: generate tokens with the reduced model ---
+        let mut draft_tokens = Vec::with_capacity(max_drafts);
+        let mut draft_last_token = *self.tokens.last().unwrap_or(&0);
+
+        for _ in 0..max_drafts {
+            let logits_tensor = self.model.forward_skip_layers(
+                draft_last_token,
+                self.position,
+                &draft_layers,
+            );
+            let draft_token = sampling::sample_greedy(logits_tensor.data());
+            draft_tokens.push(draft_token);
+            draft_last_token = draft_token;
+            self.position += 1;
+        }
+
+        // --- Roll back KV cache and position to pre-draft state ---
+        self.model.truncate_kv_cache(saved_kv_len);
+        self.position = saved_position;
+
+        // --- Verify phase: run full forward pass for each draft position ---
+        self.speculative_stats.attempts += 1;
+        self.speculative_stats.drafted += draft_tokens.len();
+
+        let mut accepted = Vec::new();
+
+        for &draft_token in &draft_tokens {
+            let last_token = *self.tokens.last().unwrap_or(&0);
+
+            let (verified_token, logits) = if self.params.repeat_penalty == 1.0 {
+                let (tid, _val) = self.model.forward_greedy(last_token, self.position);
+                (tid, Vec::new())
+            } else {
+                let logits_tensor = self.model.forward(last_token, self.position);
+                let mut logits = logits_tensor.data().to_vec();
+                sampling::apply_repeat_penalty(
+                    &mut logits,
+                    &self.tokens,
+                    self.params.repeat_penalty,
+                );
+                let tid = sampling::sample_greedy(&logits);
+                (tid, logits)
+            };
+
+            if verified_token == draft_token {
+                // Draft matches — accept it.
+                self.tokens.push(verified_token);
+                self.position += 1;
+                self.speculative_stats.accepted += 1;
+
+                if self.is_speculative() {
+                    self.ngram_cache.record(&self.tokens);
+                }
+
+                accepted.push(GenerationStep {
+                    token_id: verified_token,
+                    logits,
+                });
+            } else {
+                // Mismatch — accept the verified token (correct output for
+                // this position) and stop.
+                self.tokens.push(verified_token);
+                self.position += 1;
+
+                if self.is_speculative() {
+                    self.ngram_cache.record(&self.tokens);
+                }
+
+                accepted.push(GenerationStep {
+                    token_id: verified_token,
+                    logits,
+                });
+                break;
+            }
+        }
+
+        accepted
+    }
+
     /// Generate up to `max_tokens` tokens, calling the callback for each.
     /// Returns the full list of generated token IDs.
     /// The callback receives (token_id, step_number) and returns true to continue.
@@ -320,8 +426,43 @@ impl<'a> Generator<'a> {
         let mut generated = Vec::new();
         let mut step = 0;
         let use_speculation = self.is_speculative();
+        let use_self_speculation = self.is_self_speculative();
 
         while step < max_tokens {
+            // Self-speculative decoding (layer-skipping draft + full verify)
+            if use_self_speculation && step > 0 {
+                let spec_results = self.self_speculative_step();
+                if !spec_results.is_empty() {
+                    let mut should_break = false;
+                    for result in spec_results {
+                        generated.push(result.token_id);
+
+                        if let Some(eos) = eos_token {
+                            if result.token_id == eos {
+                                should_break = true;
+                                break;
+                            }
+                        }
+
+                        if !on_token(result.token_id, step) {
+                            should_break = true;
+                            break;
+                        }
+
+                        step += 1;
+                        if step >= max_tokens {
+                            should_break = true;
+                            break;
+                        }
+                    }
+                    if should_break {
+                        break;
+                    }
+                    continue;
+                }
+            }
+
+            // N-gram speculative decoding
             if use_speculation && step > 0 {
                 // Try speculative decoding first.
                 let spec_results = self.speculative_step();
@@ -939,6 +1080,206 @@ mod tests {
             drafts,
             vec![42],
             "should prefer longer n-gram match, got {drafts:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Self-speculative decoding tests
+    // -----------------------------------------------------------------------
+
+    /// Build a tiny model with multiple layers for self-speculative tests.
+    fn tiny_model_multi_layer() -> Model {
+        let config = ModelConfig {
+            vocab_size: 8,
+            hidden_dim: 4,
+            intermediate_dim: 8,
+            num_layers: 4,
+            num_heads: 2,
+            num_kv_heads: 2,
+            head_dim: 2,
+            max_seq_len: 32,
+            rope_theta: 10000.0,
+            rms_norm_eps: 1e-5,
+            ..Default::default()
+        };
+
+        let dim = config.hidden_dim;
+        let vocab = config.vocab_size;
+        let inter = config.intermediate_dim;
+        let nh = config.num_heads;
+        let nkvh = config.num_kv_heads;
+        let hd = config.head_dim;
+
+        let make_tensor = |size: usize| -> Tensor {
+            let data: Vec<f32> = (0..size).map(|i| (i as f32 * 0.1).sin() * 0.1).collect();
+            Tensor::from_vec(data, &[size]).unwrap()
+        };
+
+        let make_layer = || LayerWeights {
+            attn_norm: Tensor::from_vec(vec![1.0; dim], &[dim]).unwrap(),
+            wq: make_tensor(nh * hd * dim),
+            wk: make_tensor(nkvh * hd * dim),
+            wv: make_tensor(nkvh * hd * dim),
+            wo: make_tensor(dim * nh * hd),
+            ffn_norm: Tensor::from_vec(vec![1.0; dim], &[dim]).unwrap(),
+            w_gate: make_tensor(inter * dim),
+            w_up: make_tensor(inter * dim),
+            w_down: make_tensor(dim * inter),
+            attn_q_bias: None,
+            attn_k_bias: None,
+            attn_v_bias: None,
+            post_attn_norm: None,
+            post_ffn_norm: None,
+        };
+
+        let weights = ModelWeights {
+            token_embedding: make_tensor(vocab * dim),
+            layers: (0..config.num_layers).map(|_| make_layer()).collect(),
+            output_norm: Tensor::from_vec(vec![1.0; dim], &[dim]).unwrap(),
+            output_weight: make_tensor(vocab * dim),
+        };
+
+        Model::new(config, weights)
+    }
+
+    #[test]
+    fn test_self_speculative_output_matches_greedy() {
+        // Self-speculative decoding must produce the exact same output
+        // as non-speculative greedy decoding.
+        let prompt = vec![1u32, 2, 3];
+        let max = 8;
+
+        // Run without self-speculation.
+        let baseline = {
+            let mut model = tiny_model_multi_layer();
+            let params = SamplingParams {
+                temperature: 0.0,
+                speculative: false,
+                self_speculative: false,
+                ..Default::default()
+            };
+            let mut gen = Generator::new(&mut model, params);
+            gen.generate(&prompt, max, None, || 0.5, |_, _| true)
+        };
+
+        // Run with self-speculation.
+        let self_spec = {
+            let mut model = tiny_model_multi_layer();
+            let params = SamplingParams {
+                temperature: 0.0,
+                speculative: false,
+                self_speculative: true,
+                draft_skip: 2,
+                draft_tokens: 4,
+                ..Default::default()
+            };
+            let mut gen = Generator::new(&mut model, params);
+            gen.generate(&prompt, max, None, || 0.5, |_, _| true)
+        };
+
+        assert_eq!(
+            baseline, self_spec,
+            "self-speculative output must match greedy baseline: baseline={baseline:?} vs self_spec={self_spec:?}"
+        );
+    }
+
+    #[test]
+    fn test_self_speculative_disabled_with_temperature() {
+        let mut model = tiny_model_multi_layer();
+        let params = SamplingParams {
+            temperature: 0.7,
+            self_speculative: true,
+            ..Default::default()
+        };
+        let gen = Generator::new(&mut model, params);
+        assert!(
+            !gen.is_self_speculative(),
+            "self-speculation should be disabled with temperature > 0"
+        );
+    }
+
+    #[test]
+    fn test_self_speculative_disabled_by_flag() {
+        let mut model = tiny_model_multi_layer();
+        let params = SamplingParams {
+            temperature: 0.0,
+            self_speculative: false,
+            ..Default::default()
+        };
+        let gen = Generator::new(&mut model, params);
+        assert!(
+            !gen.is_self_speculative(),
+            "self-speculation should be disabled when flag is false"
+        );
+    }
+
+    #[test]
+    fn test_self_speculative_stats_populated() {
+        let mut model = tiny_model_multi_layer();
+        let params = SamplingParams {
+            temperature: 0.0,
+            speculative: false,
+            self_speculative: true,
+            draft_skip: 2,
+            draft_tokens: 3,
+            ..Default::default()
+        };
+        let mut gen = Generator::new(&mut model, params);
+        let prompt = vec![1u32, 2];
+        let _generated = gen.generate(&prompt, 10, None, || 0.5, |_, _| true);
+
+        let stats = gen.speculative_stats();
+        // With 10 max_tokens and step>0 trigger, we should have attempts
+        assert!(
+            stats.attempts > 0,
+            "self-speculation should have at least one attempt"
+        );
+        assert!(
+            stats.drafted > 0,
+            "self-speculation should have drafted tokens"
+        );
+        assert!(
+            stats.accepted <= stats.drafted,
+            "accepted ({}) must not exceed drafted ({})",
+            stats.accepted,
+            stats.drafted
+        );
+    }
+
+    #[test]
+    fn test_self_speculative_single_layer_model_noop() {
+        // With only 1 layer, self-speculative step should return empty
+        // and fall through to normal generation.
+        let prompt = vec![1u32, 2];
+        let max = 4;
+
+        let baseline = {
+            let mut model = tiny_model(); // 1 layer
+            let params = SamplingParams {
+                temperature: 0.0,
+                speculative: false,
+                self_speculative: false,
+                ..Default::default()
+            };
+            let mut gen = Generator::new(&mut model, params);
+            gen.generate(&prompt, max, None, || 0.5, |_, _| true)
+        };
+
+        let self_spec = {
+            let mut model = tiny_model(); // 1 layer
+            let params = SamplingParams {
+                temperature: 0.0,
+                speculative: false,
+                self_speculative: true,
+                ..Default::default()
+            };
+            let mut gen = Generator::new(&mut model, params);
+            gen.generate(&prompt, max, None, || 0.5, |_, _| true)
+        };
+
+        assert_eq!(
+            baseline, self_spec,
+            "single-layer model should produce same output with self-spec enabled"
         );
     }
 }

@@ -249,6 +249,24 @@ impl QuantizedKvCache {
         out
     }
 
+    /// Roll back the cache to `target_len` valid entries.
+    ///
+    /// Used by self-speculative decoding to undo draft token KV entries
+    /// before re-verifying with the full model.  Only valid when
+    /// `target_len <= self.length` and the cache has not wrapped around
+    /// (i.e. `self.length < self.max_seq_len`).
+    pub fn truncate_to(&mut self, target_len: usize) {
+        debug_assert!(target_len <= self.length);
+        if target_len >= self.length {
+            return;
+        }
+        // Only simple (non-wrapped) rollback is supported.
+        if self.length < self.max_seq_len {
+            self.position = target_len;
+            self.length = target_len;
+        }
+    }
+
     /// Reset the cache.
     pub fn clear(&mut self) {
         self.position = 0;
@@ -492,6 +510,24 @@ impl KvCache {
     /// Current write position in the ring buffer.
     pub fn position(&self) -> usize {
         self.position
+    }
+
+    /// Roll back the cache to `target_len` valid entries.
+    ///
+    /// Used by self-speculative decoding to undo draft token KV entries
+    /// before re-verifying with the full model.  Only valid when
+    /// `target_len <= self.length` and the cache has not wrapped around
+    /// (i.e. `self.length < self.max_seq_len`).
+    pub fn truncate_to(&mut self, target_len: usize) {
+        debug_assert!(target_len <= self.length);
+        if target_len >= self.length {
+            return;
+        }
+        // Only simple (non-wrapped) rollback is supported.
+        if self.length < self.max_seq_len {
+            self.position = target_len;
+            self.length = target_len;
+        }
     }
 
     /// Reset the cache (e.g., for a new conversation).
