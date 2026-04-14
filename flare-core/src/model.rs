@@ -29,6 +29,9 @@ pub enum WeightFormat {
     IQ3XXS,
     IQ2S,
     IQ1S,
+    /// BitNet b1.58 ternary weights: each weight is {-1, 0, +1}.
+    /// Packed 4 weights per byte using 2-bit encoding: 00=0, 01=+1, 10=-1, 11=unused.
+    Ternary,
 }
 
 impl WeightFormat {
@@ -55,6 +58,8 @@ impl WeightFormat {
             | WeightFormat::Q8_1
             | WeightFormat::IQ4NL => 32,
             WeightFormat::BF16 | WeightFormat::F16 => 1,
+            // Ternary: 4 weights per byte, so 1 "block" = 4 weights
+            WeightFormat::Ternary => 4,
         }
     }
 }
@@ -99,6 +104,20 @@ pub trait ComputeBackend: Send + Sync {
     /// with a more efficient kernel.
     fn matvec(&self, mat: &[f32], vec: &[f32], rows: usize, cols: usize) -> Vec<f32> {
         matvec(mat, vec, rows, cols)
+    }
+
+    /// Ternary (BitNet b1.58) matrix-vector multiply.
+    ///
+    /// `packed_weights` contains 2-bit ternary-packed weights (4 per byte).
+    /// No floating-point multiplications — pure add/sub based on {-1, 0, +1}.
+    fn matvec_ternary(
+        &self,
+        packed_weights: &[u8],
+        input: &[f32],
+        rows: usize,
+        cols: usize,
+    ) -> Vec<f32> {
+        matvec_ternary(packed_weights, input, rows, cols)
     }
 
     /// RMSNorm on raw slices, returning a new Vec.
@@ -1994,6 +2013,207 @@ pub fn matvec_scalar(mat: &[f32], vec: &[f32], rows: usize, cols: usize) -> Vec<
     output
 }
 
+// ---------------------------------------------------------------------------
+// BitNet b1.58 ternary weight support
+// ---------------------------------------------------------------------------
+
+/// Ternary weight encoding (2 bits per weight, 4 weights per byte):
+///   00 = 0, 01 = +1, 10 = -1, 11 = unused/reserved
+///
+/// Weights are packed LSB-first: bits [1:0] = weight 0, bits [3:2] = weight 1, etc.
+
+/// Pack an f32 weight slice into ternary 2-bit encoding (4 weights per byte).
+///
+/// Each weight is quantized by sign: positive -> +1, negative -> -1, zero -> 0.
+/// The number of output bytes is `ceil(weights.len() / 4)`.
+pub fn quantize_to_ternary(weights: &[f32]) -> Vec<u8> {
+    let num_bytes = (weights.len() + 3) / 4;
+    let mut packed = vec![0u8; num_bytes];
+    for (i, &w) in weights.iter().enumerate() {
+        let trit: u8 = if w > 0.0 {
+            0b01 // +1
+        } else if w < 0.0 {
+            0b10 // -1
+        } else {
+            0b00 // 0
+        };
+        let byte_idx = i / 4;
+        let bit_shift = (i % 4) * 2;
+        packed[byte_idx] |= trit << bit_shift;
+    }
+    packed
+}
+
+/// Unpack a single ternary weight from packed bytes.
+/// Returns -1, 0, or +1.
+#[inline(always)]
+fn unpack_ternary(packed: &[u8], index: usize) -> i8 {
+    let byte_idx = index / 4;
+    let bit_shift = (index % 4) * 2;
+    let bits = (packed[byte_idx] >> bit_shift) & 0b11;
+    match bits {
+        0b01 => 1,
+        0b10 => -1,
+        _ => 0, // 00 = zero, 11 = unused (treated as zero)
+    }
+}
+
+/// Scalar ternary matvec: `output[row]` = sum of `input[j]` * ternary_weight[row, j]`.
+///
+/// No floating-point multiplications — only addition and subtraction based on
+/// the ternary weight value {-1, 0, +1}.
+///
+/// `packed_weights`: row-major ternary-packed bytes, each row uses `ceil(cols/4)` bytes.
+pub fn matvec_ternary_scalar(
+    packed_weights: &[u8],
+    input: &[f32],
+    rows: usize,
+    cols: usize,
+) -> Vec<f32> {
+    let bytes_per_row = (cols + 3) / 4;
+    let mut output = vec![0.0f32; rows];
+
+    for (row_idx, out) in output.iter_mut().enumerate() {
+        let row_bytes = &packed_weights[row_idx * bytes_per_row..(row_idx + 1) * bytes_per_row];
+        let mut sum = 0.0f32;
+
+        // Process 4 weights at a time (one full byte)
+        let full_bytes = cols / 4;
+        for byte_idx in 0..full_bytes {
+            let byte_val = row_bytes[byte_idx];
+            let base_col = byte_idx * 4;
+
+            // Unpack 4 weights from this byte
+            for shift in 0..4 {
+                let bits = (byte_val >> (shift * 2)) & 0b11;
+                let col = base_col + shift;
+                match bits {
+                    0b01 => sum += input[col],
+                    0b10 => sum -= input[col],
+                    _ => {} // 0 or unused: skip
+                }
+            }
+        }
+
+        // Handle remaining weights (< 4)
+        let remaining_start = full_bytes * 4;
+        for col in remaining_start..cols {
+            let trit = unpack_ternary(row_bytes, col);
+            match trit {
+                1 => sum += input[col],
+                -1 => sum -= input[col],
+                _ => {}
+            }
+        }
+
+        *out = sum;
+    }
+    output
+}
+
+/// SIMD-accelerated ternary matvec for aarch64 (ARM NEON).
+///
+/// Processes 4 floats at a time using NEON intrinsics with branchless
+/// conditional add/sub based on ternary weight sign bits.
+#[cfg(target_arch = "aarch64")]
+pub fn matvec_ternary_neon(
+    packed_weights: &[u8],
+    input: &[f32],
+    rows: usize,
+    cols: usize,
+) -> Vec<f32> {
+    let bytes_per_row = (cols + 3) / 4;
+    let mut output = vec![0.0f32; rows];
+
+    for (row_idx, out) in output.iter_mut().enumerate() {
+        let row_bytes = &packed_weights[row_idx * bytes_per_row..(row_idx + 1) * bytes_per_row];
+        // SAFETY: NEON is always available on aarch64. Pointers are valid for the
+        // slice lengths checked above.
+        *out = unsafe { matvec_ternary_neon_row(row_bytes, input, cols) };
+    }
+    output
+}
+
+/// Process a single row of ternary matvec using NEON.
+///
+/// # Safety
+/// Caller must ensure `row_bytes` has at least `ceil(cols/4)` bytes and
+/// `input` has at least `cols` elements. NEON must be available (always true on aarch64).
+#[cfg(target_arch = "aarch64")]
+#[inline(always)]
+unsafe fn matvec_ternary_neon_row(row_bytes: &[u8], input: &[f32], cols: usize) -> f32 {
+    use std::arch::aarch64::*;
+
+    let mut acc = vdupq_n_f32(0.0);
+    let zero = vdupq_n_f32(0.0);
+
+    // Process 4 weights at a time (one byte = 4 ternary weights = 4 floats = one NEON lane)
+    let full_bytes = cols / 4;
+    for byte_idx in 0..full_bytes {
+        let byte_val = row_bytes[byte_idx];
+        let base_col = byte_idx * 4;
+        let inp = vld1q_f32(input.as_ptr().add(base_col));
+
+        // Decode 4 ternary weights into sign masks
+        // For each 2-bit field: 01 -> +1, 10 -> -1, 00/11 -> 0
+        let mut pos_mask_arr = [0u32; 4];
+        let mut neg_mask_arr = [0u32; 4];
+        for shift in 0..4 {
+            let bits = (byte_val >> (shift * 2)) & 0b11;
+            if bits == 0b01 {
+                pos_mask_arr[shift] = 0xFFFFFFFF;
+            } else if bits == 0b10 {
+                neg_mask_arr[shift] = 0xFFFFFFFF;
+            }
+        }
+        let pos_mask: uint32x4_t = vld1q_u32(pos_mask_arr.as_ptr());
+        let neg_mask: uint32x4_t = vld1q_u32(neg_mask_arr.as_ptr());
+
+        // Branchless via bitselect: where pos_mask is set, add inp; where neg_mask, subtract
+        let to_add = vbslq_f32(pos_mask, inp, zero);
+        let to_sub = vbslq_f32(neg_mask, inp, zero);
+        acc = vaddq_f32(acc, to_add);
+        acc = vsubq_f32(acc, to_sub);
+    }
+
+    // Horizontal sum of acc
+    let sum = vaddvq_f32(acc);
+
+    // Handle remaining elements
+    let remaining_start = full_bytes * 4;
+    let mut tail_sum = 0.0f32;
+    for col in remaining_start..cols {
+        let trit = unpack_ternary(row_bytes, col);
+        match trit {
+            1 => tail_sum += input[col],
+            -1 => tail_sum -= input[col],
+            _ => {}
+        }
+    }
+
+    sum + tail_sum
+}
+
+/// Dispatch ternary matvec to the best available implementation.
+///
+/// On aarch64: uses NEON SIMD.
+/// On other targets: uses the scalar fallback.
+pub fn matvec_ternary(
+    packed_weights: &[u8],
+    input: &[f32],
+    rows: usize,
+    cols: usize,
+) -> Vec<f32> {
+    #[cfg(target_arch = "aarch64")]
+    {
+        matvec_ternary_neon(packed_weights, input, rows, cols)
+    }
+    #[cfg(not(target_arch = "aarch64"))]
+    {
+        matvec_ternary_scalar(packed_weights, input, rows, cols)
+    }
+}
+
 /// SiLU(gate) * up on raw slices, returning a new Vec (CPU implementation).
 pub fn silu_mul_cpu(gate: &[f32], up: &[f32]) -> Vec<f32> {
     gate.iter()
@@ -2671,6 +2891,184 @@ mod tests {
         }
     }
 
+    // ---------------------------------------------------------------
+    // BitNet b1.58 ternary weight tests
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn test_ternary_pack_unpack_roundtrip() {
+        // Positive, negative, and zero weights
+        let weights = vec![1.0, -1.0, 0.0, 0.5, -0.3, 0.0, 0.0, -2.0, 1.5];
+        let packed = quantize_to_ternary(&weights);
+
+        // Verify each unpacked value matches the expected sign
+        let expected: Vec<i8> = weights
+            .iter()
+            .map(|&w| if w > 0.0 { 1 } else if w < 0.0 { -1 } else { 0 })
+            .collect();
+
+        for (i, &exp) in expected.iter().enumerate() {
+            let got = unpack_ternary(&packed, i);
+            assert_eq!(got, exp, "ternary roundtrip mismatch at index {i}: got {got}, expected {exp}");
+        }
+    }
+
+    #[test]
+    fn test_ternary_pack_4_per_byte() {
+        // Exactly 4 weights → 1 byte
+        let packed = quantize_to_ternary(&[1.0, -1.0, 0.0, 1.0]);
+        assert_eq!(packed.len(), 1);
+        // bits: weight0=01, weight1=10, weight2=00, weight3=01
+        // byte = 0b01_00_10_01 = 0x49
+        assert_eq!(packed[0], 0b01_00_10_01);
+    }
+
+    #[test]
+    fn test_ternary_pack_padding() {
+        // 5 weights → 2 bytes (last byte has 3 unused slots)
+        let packed = quantize_to_ternary(&[1.0, -1.0, 0.0, 1.0, -1.0]);
+        assert_eq!(packed.len(), 2);
+        assert_eq!(unpack_ternary(&packed, 4), -1);
+    }
+
+    #[test]
+    fn test_matvec_ternary_scalar_simple() {
+        // 2x3 matrix with known ternary weights:
+        // Row 0: [+1, -1,  0]   → output[0] = input[0] - input[1]
+        // Row 1: [ 0, +1, +1]   → output[1] = input[1] + input[2]
+        let weights_row0 = vec![1.0, -1.0, 0.0];
+        let weights_row1 = vec![0.0, 1.0, 1.0];
+
+        // Pack rows contiguously
+        let mut all_weights = Vec::new();
+        all_weights.extend_from_slice(&weights_row0);
+        all_weights.extend_from_slice(&weights_row1);
+
+        // Pack row by row (each row padded to ceil(cols/4) bytes)
+        let packed_row0 = quantize_to_ternary(&weights_row0);
+        let packed_row1 = quantize_to_ternary(&weights_row1);
+        let mut packed = Vec::new();
+        packed.extend_from_slice(&packed_row0);
+        packed.extend_from_slice(&packed_row1);
+
+        let input = vec![3.0, 5.0, 7.0];
+        let result = matvec_ternary_scalar(&packed, &input, 2, 3);
+
+        assert_eq!(result.len(), 2);
+        assert!((result[0] - (3.0 - 5.0)).abs() < 1e-5, "row0: got {}", result[0]);
+        assert!((result[1] - (5.0 + 7.0)).abs() < 1e-5, "row1: got {}", result[1]);
+    }
+
+    #[test]
+    fn test_matvec_ternary_all_zero_weights() {
+        let packed = quantize_to_ternary(&[0.0; 16]);
+        let input = vec![1.0; 4];
+        let result = matvec_ternary_scalar(&packed, &input, 4, 4);
+        for (i, &v) in result.iter().enumerate() {
+            assert!(v.abs() < 1e-5, "all-zero weights row {i}: got {v}");
+        }
+    }
+
+    #[test]
+    fn test_matvec_ternary_all_positive() {
+        // All +1 weights → output = sum of input per row
+        let cols = 8;
+        let rows = 2;
+        let weights = vec![1.0; rows * cols];
+        let packed_row = quantize_to_ternary(&weights[..cols]);
+        let mut packed = Vec::new();
+        for _ in 0..rows {
+            packed.extend_from_slice(&packed_row);
+        }
+        let input: Vec<f32> = (1..=cols).map(|i| i as f32).collect();
+        let expected_sum: f32 = input.iter().sum();
+
+        let result = matvec_ternary_scalar(&packed, &input, rows, cols);
+        for (i, &v) in result.iter().enumerate() {
+            assert!(
+                (v - expected_sum).abs() < 1e-5,
+                "all-positive row {i}: got {v}, expected {expected_sum}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_matvec_ternary_dispatch_matches_scalar() {
+        // Verify that matvec_ternary (dispatch) matches the scalar reference
+        let rows = 16;
+        let cols = 33; // odd size to test remainder handling
+        let weights: Vec<f32> = (0..rows * cols)
+            .map(|i| ((i % 5) as f32 - 2.0) * 0.3) // mix of positive, negative, ~zero
+            .collect();
+
+        // Pack row by row
+        let bytes_per_row = (cols + 3) / 4;
+        let mut packed = vec![0u8; rows * bytes_per_row];
+        for r in 0..rows {
+            let row_packed = quantize_to_ternary(&weights[r * cols..(r + 1) * cols]);
+            packed[r * bytes_per_row..(r * bytes_per_row + row_packed.len())]
+                .copy_from_slice(&row_packed);
+        }
+
+        let input: Vec<f32> = (0..cols).map(|i| (i as f32 * 0.1).sin()).collect();
+
+        let result_dispatch = matvec_ternary(&packed, &input, rows, cols);
+        let result_scalar = matvec_ternary_scalar(&packed, &input, rows, cols);
+
+        for i in 0..rows {
+            let diff = (result_dispatch[i] - result_scalar[i]).abs();
+            assert!(
+                diff < 1e-4,
+                "ternary dispatch vs scalar mismatch at row {i}: dispatch={} scalar={} diff={}",
+                result_dispatch[i],
+                result_scalar[i],
+                diff,
+            );
+        }
+    }
+
+    #[test]
+    fn test_matvec_ternary_vs_f32_reference() {
+        // Verify ternary matvec produces the same result as standard matvec
+        // when the f32 matrix contains only {-1, 0, +1} values.
+        let rows = 8;
+        let cols = 16;
+
+        // Create a matrix with only ternary values
+        let f32_weights: Vec<f32> = (0..rows * cols)
+            .map(|i| match i % 3 {
+                0 => 1.0,
+                1 => -1.0,
+                _ => 0.0,
+            })
+            .collect();
+
+        // Pack row by row
+        let bytes_per_row = (cols + 3) / 4;
+        let mut packed = vec![0u8; rows * bytes_per_row];
+        for r in 0..rows {
+            let row_packed = quantize_to_ternary(&f32_weights[r * cols..(r + 1) * cols]);
+            packed[r * bytes_per_row..(r * bytes_per_row + row_packed.len())]
+                .copy_from_slice(&row_packed);
+        }
+
+        let input: Vec<f32> = (0..cols).map(|i| (i as f32 + 1.0) * 0.5).collect();
+
+        let result_ternary = matvec_ternary(&packed, &input, rows, cols);
+        let result_f32 = matvec_scalar(&f32_weights, &input, rows, cols);
+
+        for i in 0..rows {
+            let diff = (result_ternary[i] - result_f32[i]).abs();
+            assert!(
+                diff < 1e-4,
+                "ternary vs f32 mismatch at row {i}: ternary={} f32={} diff={}",
+                result_ternary[i],
+                result_f32[i],
+                diff,
+            );
+        }
+    }
+
     // ------------------------------------------------------------------
     // Progressive inference tests
     // ------------------------------------------------------------------
@@ -2764,6 +3162,11 @@ mod tests {
                 "forward_partial(all layers) should match forward(): logit[{i}] = {a} vs {b}"
             );
         }
+    }
+
+    #[test]
+    fn test_weight_format_ternary_weights_per_block() {
+        assert_eq!(WeightFormat::Ternary.weights_per_block(), 4);
     }
 
     #[test]

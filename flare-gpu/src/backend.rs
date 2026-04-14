@@ -50,6 +50,8 @@ const DEQUANT_MATVEC_IQ2XS_SHADER: &str = include_str!("../shaders/dequant_matve
 const DEQUANT_MATVEC_IQ3XXS_SHADER: &str = include_str!("../shaders/dequant_matvec_iq3xxs.wgsl");
 const DEQUANT_MATVEC_IQ2S_SHADER: &str = include_str!("../shaders/dequant_matvec_iq2s.wgsl");
 const DEQUANT_MATVEC_IQ1S_SHADER: &str = include_str!("../shaders/dequant_matvec_iq1s.wgsl");
+const DEQUANT_MATVEC_TERNARY_SHADER: &str =
+    include_str!("../shaders/dequant_matvec_ternary.wgsl");
 const DEQUANT_Q5K_SHADER: &str = include_str!("../shaders/dequant_q5k.wgsl");
 const DEQUANT_Q6K_SHADER: &str = include_str!("../shaders/dequant_q6k.wgsl");
 const PREFILL_ATTENTION_SHADER: &str = include_str!("../shaders/prefill_attention.wgsl");
@@ -2575,6 +2577,7 @@ impl WebGpuBackend {
             WeightFormat::IQ3XXS => "dequant_matvec_iq3xxs",
             WeightFormat::IQ2S => "dequant_matvec_iq2s",
             WeightFormat::IQ1S => "dequant_matvec_iq1s",
+            WeightFormat::Ternary => "dequant_matvec_ternary",
         }
     }
 
@@ -2602,6 +2605,7 @@ impl WebGpuBackend {
             WeightFormat::IQ3XXS => DEQUANT_MATVEC_IQ3XXS_SHADER,
             WeightFormat::IQ2S => DEQUANT_MATVEC_IQ2S_SHADER,
             WeightFormat::IQ1S => DEQUANT_MATVEC_IQ1S_SHADER,
+            WeightFormat::Ternary => DEQUANT_MATVEC_TERNARY_SHADER,
         }
     }
 
@@ -4587,6 +4591,14 @@ impl ComputeBackend for WebGpuBackend {
                 weight.blocks_per_row,
                 batch,
             ),
+            WeightFormat::Ternary => {
+                // Ternary weights on the GPU path: fall back to CPU matvec_ternary
+                // for now. The WGSL shader (dequant_matvec_ternary.wgsl) is ready
+                // but full GPU dispatch plumbing will be added when BitNet models
+                // are common enough to warrant the integration effort.
+                let cols = weight.blocks_per_row * 4;
+                flare_core::model::matvec_ternary(&weight.data, input, num_rows, cols)
+            }
         }
     }
 
