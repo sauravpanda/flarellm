@@ -599,6 +599,8 @@ pub struct ForwardBuffers {
     pub normed_q8: QuantizedInput,
     /// Pre-quantized Q8_0 buffer for FFN normed input (reused across gate/up projections)
     pub ffn_normed_q8: QuantizedInput,
+    /// Pre-quantized Q8_0 buffer for final normed output (used for Q8_0 logits projection)
+    pub output_q8: QuantizedInput,
 }
 
 impl ForwardBuffers {
@@ -634,6 +636,11 @@ impl ForwardBuffers {
                 quants: vec![0; dim],
                 blocks_per_row: dim / Q8_0_BLOCK_SIZE,
             },
+            output_q8: QuantizedInput {
+                scales: vec![0.0; dim / Q8_0_BLOCK_SIZE],
+                quants: vec![0; dim],
+                blocks_per_row: dim / Q8_0_BLOCK_SIZE,
+            },
         }
     }
 }
@@ -660,6 +667,11 @@ pub struct Model {
     /// reducing memory bandwidth.  The f32 weights are still kept to support
     /// the single-token `forward` path and CPU fallback.
     raw_weights: Option<Vec<RawLayerWeights>>,
+    /// Optional raw (quantized) output projection weight for Q8_0 logits path.
+    ///
+    /// When set, the final logits matvec uses `matvec_q8_0_preq_into` instead
+    /// of the f32 `output_weight`, reducing memory bandwidth by ~4x.
+    raw_output_weight: Option<RawWeight>,
     kv_cache: KvCache,
     /// Optional 2-bit quantized KV cache (KIVI).  When `Some`, writes go to
     /// both the full-precision cache (for GPU path compatibility) and the
@@ -699,6 +711,7 @@ impl Model {
             config,
             weights,
             raw_weights: None,
+            raw_output_weight: None,
             kv_cache,
             quantized_kv_cache,
             backend: Box::new(CpuBackend),
@@ -714,6 +727,20 @@ impl Model {
     /// matrices, saving memory bandwidth.
     pub fn set_raw_weights(&mut self, raw: Vec<RawLayerWeights>) {
         self.raw_weights = Some(raw);
+    }
+
+    /// Attach a raw quantized output projection weight for Q8_0 logits path.
+    ///
+    /// When set, the final logits matvec in `forward()` uses
+    /// `matvec_q8_0_preq_into` instead of f32, reducing memory bandwidth by ~4x
+    /// for the output projection (often the largest single matvec).
+    pub fn set_raw_output_weight(&mut self, rw: RawWeight) {
+        self.raw_output_weight = Some(rw);
+    }
+
+    /// Returns `true` if a raw quantized output weight has been set.
+    pub fn has_raw_output_weight(&self) -> bool {
+        self.raw_output_weight.is_some()
     }
 
     /// Upload all model weights to persistent GPU buffers.
@@ -1279,13 +1306,37 @@ impl Model {
         );
 
         // Output logits: [vocab_size] = output_weight [vocab_size, dim] x normed [dim]
-        matvec_into(
-            self.weights.output_weight.data(),
-            &self.forward_buffers.final_normed,
-            config.vocab_size,
-            dim,
-            &mut self.forward_buffers.logits,
-        );
+        // Use Q8_0 path when raw output weight is available (4x bandwidth reduction).
+        if let Some(ref row) = self.raw_output_weight {
+            if row.format == WeightFormat::Q8_0 && use_cpu_q8 {
+                quantize_input_q8_0_into(
+                    &self.forward_buffers.final_normed,
+                    &mut self.forward_buffers.output_q8,
+                );
+                matvec_q8_0_preq_into(
+                    &row.data,
+                    &self.forward_buffers.output_q8,
+                    row.num_rows,
+                    &mut self.forward_buffers.logits,
+                );
+            } else {
+                matvec_into(
+                    self.weights.output_weight.data(),
+                    &self.forward_buffers.final_normed,
+                    config.vocab_size,
+                    dim,
+                    &mut self.forward_buffers.logits,
+                );
+            }
+        } else {
+            matvec_into(
+                self.weights.output_weight.data(),
+                &self.forward_buffers.final_normed,
+                config.vocab_size,
+                dim,
+                &mut self.forward_buffers.logits,
+            );
+        }
 
         // Gemma 2: apply final logit soft-cap (tanh(x / cap) * cap)
         if config.final_logit_softcap > 0.0 {
@@ -1615,12 +1666,25 @@ impl Model {
         // Use the CPU SIMD matvec directly for the output projection.
         // The output weight matrix can exceed GPU buffer limits for large vocabs
         // (e.g. 128K vocab × 2048 dim × 4 bytes > 1GB), so bypass the backend.
-        let mut logits = matvec(
-            self.weights.output_weight.data(),
-            &normed_final,
-            config.vocab_size,
-            dim,
-        );
+        // When raw Q8_0 output weight is available, use Q8_0 path for ~4x bandwidth
+        // reduction on the largest single matvec in the model.
+        let use_output_q8 = self.raw_output_weight.as_ref().is_some_and(|rw| {
+            rw.format == WeightFormat::Q8_0 && dim >= 1024
+        });
+        let mut logits = if use_output_q8 {
+            let row = self.raw_output_weight.as_ref().unwrap();
+            let preq = quantize_input_q8_0(&normed_final);
+            let mut out = vec![0.0f32; config.vocab_size];
+            matvec_q8_0_preq_into(&row.data, &preq, row.num_rows, &mut out);
+            out
+        } else {
+            matvec(
+                self.weights.output_weight.data(),
+                &normed_final,
+                config.vocab_size,
+                dim,
+            )
+        };
 
         if config.final_logit_softcap > 0.0 {
             let cap = config.final_logit_softcap;
@@ -2089,7 +2153,7 @@ impl Model {
             qkv.advance();
         }
 
-        // Final RMSNorm + output projection (always uses full weights)
+        // Final RMSNorm + output projection
         rmsnorm_into(
             x.data(),
             self.weights.output_norm.data(),
@@ -2097,13 +2161,36 @@ impl Model {
             &mut self.forward_buffers.final_normed,
         );
 
-        matvec_into(
-            self.weights.output_weight.data(),
-            &self.forward_buffers.final_normed,
-            config.vocab_size,
-            dim,
-            &mut self.forward_buffers.logits,
-        );
+        if let Some(ref row) = self.raw_output_weight {
+            if row.format == WeightFormat::Q8_0 && use_cpu_q8 {
+                quantize_input_q8_0_into(
+                    &self.forward_buffers.final_normed,
+                    &mut self.forward_buffers.output_q8,
+                );
+                matvec_q8_0_preq_into(
+                    &row.data,
+                    &self.forward_buffers.output_q8,
+                    row.num_rows,
+                    &mut self.forward_buffers.logits,
+                );
+            } else {
+                matvec_into(
+                    self.weights.output_weight.data(),
+                    &self.forward_buffers.final_normed,
+                    config.vocab_size,
+                    dim,
+                    &mut self.forward_buffers.logits,
+                );
+            }
+        } else {
+            matvec_into(
+                self.weights.output_weight.data(),
+                &self.forward_buffers.final_normed,
+                config.vocab_size,
+                dim,
+                &mut self.forward_buffers.logits,
+            );
+        }
 
         if config.final_logit_softcap > 0.0 {
             let cap = config.final_logit_softcap;

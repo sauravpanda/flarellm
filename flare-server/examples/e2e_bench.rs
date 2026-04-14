@@ -100,6 +100,20 @@ fn main() {
         if raw_layers.len() == num_layers {
             model.set_raw_weights(raw_layers);
             eprintln!("Raw quantized weights loaded");
+
+            // Also load raw output projection weight for Q8_0 logits path
+            match gguf2
+                .read_raw_weight(&mut reader2, "output.weight")
+                .or_else(|_| gguf2.read_raw_weight(&mut reader2, "lm_head.weight"))
+            {
+                Ok(Some(rw)) => {
+                    eprintln!("Raw output weight loaded ({:?})", rw.format);
+                    model.set_raw_output_weight(rw);
+                }
+                _ => {
+                    eprintln!("Warning: could not load raw output weight, using f32 path");
+                }
+            }
         } else if !all_ok {
             eprintln!("Warning: could not load raw weights, using f32 path");
         }
