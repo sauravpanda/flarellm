@@ -84,6 +84,25 @@ pub fn supports_webnn() -> bool {
         .is_some_and(|ml| !ml.is_undefined() && !ml.is_null())
 }
 
+/// Check if WebTransport is available in the current browser.
+///
+/// WebTransport (`window.WebTransport`) is a modern transport API built on
+/// HTTP/3 QUIC streams. It allows opening multiple parallel bidirectional
+/// streams to the same origin with lower head-of-line blocking than fetch().
+/// Useful for progressive model loading where different byte ranges of the
+/// GGUF file can be downloaded concurrently.
+///
+/// Note: actually using WebTransport for parallel range downloads requires
+/// server-side support (HTTP/3 endpoint that accepts byte-range requests
+/// on streams). This check only reports browser capability — the JS loader
+/// will fall back to `fetch()` when the server does not cooperate.
+#[wasm_bindgen]
+pub fn supports_webtransport() -> bool {
+    web_sys::window()
+        .and_then(|w| js_sys::Reflect::get(&w, &"WebTransport".into()).ok())
+        .is_some_and(|wt| !wt.is_undefined() && !wt.is_null())
+}
+
 /// Check if this WASM build was compiled with relaxed SIMD support.
 ///
 /// Relaxed SIMD provides hardware-specific faster operations like fused
