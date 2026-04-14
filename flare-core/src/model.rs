@@ -2861,7 +2861,8 @@ unsafe fn quantize_f32_to_q8_0_block(src: &[f32]) -> (f32, [i8; 32]) {
 /// and only convert to f32 once per block. This reads 1 byte/weight + 1 byte/input
 /// instead of 1 byte/weight + 4 bytes/input, giving ~4x less memory bandwidth.
 ///
-/// Processes 2 blocks per iteration for better instruction-level parallelism.
+/// Processes 4 blocks per iteration for better instruction-level parallelism,
+/// with prefetch hints for the next group of blocks.
 ///
 /// # Safety
 /// Requires aarch64 NEON. `row_bytes` must have `blocks_per_row * 34` bytes.
@@ -2879,71 +2880,99 @@ unsafe fn dot_q8_0_q8_0_neon(
 
     let mut sumv0 = vdupq_n_f32(0.0);
     let mut sumv1 = vdupq_n_f32(0.0);
+    let mut sumv2 = vdupq_n_f32(0.0);
+    let mut sumv3 = vdupq_n_f32(0.0);
 
-    let pairs = blocks_per_row / 2;
-    for i in 0..pairs {
-        let ib0 = i * 2;
-        let ib1 = i * 2 + 1;
+    let row_ptr = row_bytes.as_ptr();
+    let iq_ptr = input_q8_quants.as_ptr();
+
+    let quads = blocks_per_row / 4;
+    for i in 0..quads {
+        let ib0 = i * 4;
+        let ib1 = ib0 + 1;
+        let ib2 = ib0 + 2;
+        let ib3 = ib0 + 3;
+
+        // Prefetch next quad's weight data
+        if i + 1 < quads {
+            let next_offset = (ib0 + 4) * Q8_0_BLOCK_BYTES;
+            core::arch::asm!(
+                "prfm pldl1strm, [{addr}]",
+                addr = in(reg) row_ptr.add(next_offset),
+                options(nostack, preserves_flags),
+            );
+        }
 
         // --- Block 0 ---
-        let w_ptr0 = row_bytes.as_ptr().add(ib0 * Q8_0_BLOCK_BYTES);
+        let w_ptr0 = row_ptr.add(ib0 * Q8_0_BLOCK_BYTES);
         let w_scale0 = f16_to_f32_inline(u16::from_le_bytes([*w_ptr0, *w_ptr0.add(1)]));
         let w_qs0 = w_ptr0.add(2) as *const i8;
-        let i_qs0 = input_q8_quants.as_ptr().add(ib0 * Q8_0_BLOCK_SIZE);
-        let combined_scale0 = w_scale0 * input_q8_scales[ib0];
-
-        let wx0_lo = vld1q_s8(w_qs0);
-        let wx0_hi = vld1q_s8(w_qs0.add(16));
-        let ix0_lo = vld1q_s8(i_qs0);
-        let ix0_hi = vld1q_s8(i_qs0.add(16));
+        let i_qs0 = iq_ptr.add(ib0 * Q8_0_BLOCK_SIZE);
+        let combined_scale0 = w_scale0 * *input_q8_scales.get_unchecked(ib0);
 
         let sum0 = vaddq_s32(
-            ggml_vdotq_s32(vdupq_n_s32(0), wx0_lo, ix0_lo),
-            ggml_vdotq_s32(vdupq_n_s32(0), wx0_hi, ix0_hi),
+            ggml_vdotq_s32(vdupq_n_s32(0), vld1q_s8(w_qs0), vld1q_s8(i_qs0)),
+            ggml_vdotq_s32(vdupq_n_s32(0), vld1q_s8(w_qs0.add(16)), vld1q_s8(i_qs0.add(16))),
         );
         sumv0 = vmlaq_n_f32(sumv0, vcvtq_f32_s32(sum0), combined_scale0);
 
         // --- Block 1 ---
-        let w_ptr1 = row_bytes.as_ptr().add(ib1 * Q8_0_BLOCK_BYTES);
+        let w_ptr1 = row_ptr.add(ib1 * Q8_0_BLOCK_BYTES);
         let w_scale1 = f16_to_f32_inline(u16::from_le_bytes([*w_ptr1, *w_ptr1.add(1)]));
         let w_qs1 = w_ptr1.add(2) as *const i8;
-        let i_qs1 = input_q8_quants.as_ptr().add(ib1 * Q8_0_BLOCK_SIZE);
-        let combined_scale1 = w_scale1 * input_q8_scales[ib1];
-
-        let wx1_lo = vld1q_s8(w_qs1);
-        let wx1_hi = vld1q_s8(w_qs1.add(16));
-        let ix1_lo = vld1q_s8(i_qs1);
-        let ix1_hi = vld1q_s8(i_qs1.add(16));
+        let i_qs1 = iq_ptr.add(ib1 * Q8_0_BLOCK_SIZE);
+        let combined_scale1 = w_scale1 * *input_q8_scales.get_unchecked(ib1);
 
         let sum1 = vaddq_s32(
-            ggml_vdotq_s32(vdupq_n_s32(0), wx1_lo, ix1_lo),
-            ggml_vdotq_s32(vdupq_n_s32(0), wx1_hi, ix1_hi),
+            ggml_vdotq_s32(vdupq_n_s32(0), vld1q_s8(w_qs1), vld1q_s8(i_qs1)),
+            ggml_vdotq_s32(vdupq_n_s32(0), vld1q_s8(w_qs1.add(16)), vld1q_s8(i_qs1.add(16))),
         );
         sumv1 = vmlaq_n_f32(sumv1, vcvtq_f32_s32(sum1), combined_scale1);
+
+        // --- Block 2 ---
+        let w_ptr2 = row_ptr.add(ib2 * Q8_0_BLOCK_BYTES);
+        let w_scale2 = f16_to_f32_inline(u16::from_le_bytes([*w_ptr2, *w_ptr2.add(1)]));
+        let w_qs2 = w_ptr2.add(2) as *const i8;
+        let i_qs2 = iq_ptr.add(ib2 * Q8_0_BLOCK_SIZE);
+        let combined_scale2 = w_scale2 * *input_q8_scales.get_unchecked(ib2);
+
+        let sum2 = vaddq_s32(
+            ggml_vdotq_s32(vdupq_n_s32(0), vld1q_s8(w_qs2), vld1q_s8(i_qs2)),
+            ggml_vdotq_s32(vdupq_n_s32(0), vld1q_s8(w_qs2.add(16)), vld1q_s8(i_qs2.add(16))),
+        );
+        sumv2 = vmlaq_n_f32(sumv2, vcvtq_f32_s32(sum2), combined_scale2);
+
+        // --- Block 3 ---
+        let w_ptr3 = row_ptr.add(ib3 * Q8_0_BLOCK_BYTES);
+        let w_scale3 = f16_to_f32_inline(u16::from_le_bytes([*w_ptr3, *w_ptr3.add(1)]));
+        let w_qs3 = w_ptr3.add(2) as *const i8;
+        let i_qs3 = iq_ptr.add(ib3 * Q8_0_BLOCK_SIZE);
+        let combined_scale3 = w_scale3 * *input_q8_scales.get_unchecked(ib3);
+
+        let sum3 = vaddq_s32(
+            ggml_vdotq_s32(vdupq_n_s32(0), vld1q_s8(w_qs3), vld1q_s8(i_qs3)),
+            ggml_vdotq_s32(vdupq_n_s32(0), vld1q_s8(w_qs3.add(16)), vld1q_s8(i_qs3.add(16))),
+        );
+        sumv3 = vmlaq_n_f32(sumv3, vcvtq_f32_s32(sum3), combined_scale3);
     }
 
-    // Handle odd remaining block
-    if blocks_per_row & 1 != 0 {
-        let ib = blocks_per_row - 1;
-        let w_ptr = row_bytes.as_ptr().add(ib * Q8_0_BLOCK_BYTES);
+    // Handle remaining 0-3 blocks
+    let remainder_start = quads * 4;
+    for ib in remainder_start..blocks_per_row {
+        let w_ptr = row_ptr.add(ib * Q8_0_BLOCK_BYTES);
         let w_scale = f16_to_f32_inline(u16::from_le_bytes([*w_ptr, *w_ptr.add(1)]));
         let w_qs = w_ptr.add(2) as *const i8;
-        let i_qs = input_q8_quants.as_ptr().add(ib * Q8_0_BLOCK_SIZE);
-        let combined_scale = w_scale * input_q8_scales[ib];
-
-        let wx_lo = vld1q_s8(w_qs);
-        let wx_hi = vld1q_s8(w_qs.add(16));
-        let ix_lo = vld1q_s8(i_qs);
-        let ix_hi = vld1q_s8(i_qs.add(16));
+        let i_qs = iq_ptr.add(ib * Q8_0_BLOCK_SIZE);
+        let combined_scale = w_scale * *input_q8_scales.get_unchecked(ib);
 
         let sum = vaddq_s32(
-            ggml_vdotq_s32(vdupq_n_s32(0), wx_lo, ix_lo),
-            ggml_vdotq_s32(vdupq_n_s32(0), wx_hi, ix_hi),
+            ggml_vdotq_s32(vdupq_n_s32(0), vld1q_s8(w_qs), vld1q_s8(i_qs)),
+            ggml_vdotq_s32(vdupq_n_s32(0), vld1q_s8(w_qs.add(16)), vld1q_s8(i_qs.add(16))),
         );
         sumv0 = vmlaq_n_f32(sumv0, vcvtq_f32_s32(sum), combined_scale);
     }
 
-    vaddvq_f32(vaddq_f32(sumv0, sumv1))
+    vaddvq_f32(vaddq_f32(vaddq_f32(sumv0, sumv1), vaddq_f32(sumv2, sumv3)))
 }
 
 /// ARM NEON Q8_0 x Q8_0 integer dot product matvec with rayon parallelism.
@@ -2969,7 +2998,7 @@ fn matvec_q8_0_neon(weight_data: &[u8], input: &[f32], rows: usize, cols: usize)
 
     // Step 2: Compute int8 x int8 dot product for each row
     const PARALLEL_THRESHOLD: usize = 5_000_000;
-    const CHUNK_ROWS: usize = 32;
+    const CHUNK_ROWS: usize = 64;
     let total_work = rows * cols;
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -3839,12 +3868,13 @@ pub fn matvec_q8_0_preq_into(
         let total_work = rows * (blocks_per_row * Q8_0_BLOCK_SIZE);
         if total_work >= 2_000_000 {
             use rayon::prelude::*;
-            output
-                .par_chunks_mut(32)
+            const CHUNK_ROWS: usize = 64;
+        output
+                .par_chunks_mut(CHUNK_ROWS)
                 .enumerate()
                 .for_each(|(chunk_idx, chunk)| {
                     for (local_idx, out) in chunk.iter_mut().enumerate() {
-                        let row = chunk_idx * 32 + local_idx;
+                        let row = chunk_idx * CHUNK_ROWS + local_idx;
                         let start = row * bytes_per_row;
                         let row_bytes = &weight_data[start..start + bytes_per_row];
                         *out = unsafe {
