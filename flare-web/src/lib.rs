@@ -2393,14 +2393,11 @@ pub async fn load_cached_model(model_name: &str) -> Result<JsValue, JsValue> {
             Err(_) => return Ok(JsValue::NULL),
         };
 
-    let file: web_sys::File =
-        wasm_bindgen_futures::JsFuture::from(file_handle.get_file())
-            .await?
-            .unchecked_into();
+    let file: web_sys::File = wasm_bindgen_futures::JsFuture::from(file_handle.get_file())
+        .await?
+        .unchecked_into();
 
-    let array_buffer =
-        wasm_bindgen_futures::JsFuture::from(file.array_buffer())
-            .await?;
+    let array_buffer = wasm_bindgen_futures::JsFuture::from(file.array_buffer()).await?;
 
     let uint8_array = js_sys::Uint8Array::new(&array_buffer);
     Ok(uint8_array.into())
@@ -2440,10 +2437,9 @@ pub async fn list_cached_models() -> Result<JsValue, JsValue> {
         let pair = js_sys::Array::from(&value);
         let name: String = pair.get(0).as_string().unwrap_or_default();
         let handle: web_sys::FileSystemFileHandle = pair.get(1).unchecked_into();
-        let file: web_sys::File =
-            wasm_bindgen_futures::JsFuture::from(handle.get_file())
-                .await?
-                .unchecked_into();
+        let file: web_sys::File = wasm_bindgen_futures::JsFuture::from(handle.get_file())
+            .await?
+            .unchecked_into();
         let size = file.size();
         let escaped_name = name.replace('\\', "\\\\").replace('"', "\\\"");
         models.push(format!(r#"{{"name":"{}","size":{}}}"#, escaped_name, size));
@@ -2463,13 +2459,12 @@ pub async fn storage_estimate() -> Result<JsValue, JsValue> {
         None => return Ok(JsValue::from_str("{}")),
     };
     let storage = window.navigator().storage();
-    let estimate: web_sys::StorageEstimate =
-        match storage.estimate() {
-            Ok(promise) => wasm_bindgen_futures::JsFuture::from(promise)
-                .await?
-                .unchecked_into(),
-            Err(_) => return Ok(JsValue::from_str("{}")),
-        };
+    let estimate: web_sys::StorageEstimate = match storage.estimate() {
+        Ok(promise) => wasm_bindgen_futures::JsFuture::from(promise)
+            .await?
+            .unchecked_into(),
+        Err(_) => return Ok(JsValue::from_str("{}")),
+    };
     let usage = estimate.get_usage().unwrap_or(0.0);
     let quota = estimate.get_quota().unwrap_or(0.0);
     Ok(JsValue::from_str(&format!(

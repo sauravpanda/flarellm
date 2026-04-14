@@ -48,10 +48,7 @@ pub fn load_lora_from_safetensors_reader<R: Read + Seek>(
         .map_err(|e| LoraError::ParseError(format!("SafeTensors parse error: {e}")))?;
 
     // Try to read alpha from metadata
-    let alpha_override: Option<f32> = st
-        .metadata
-        .get("lora_alpha")
-        .and_then(|s| s.parse().ok());
+    let alpha_override: Option<f32> = st.metadata.get("lora_alpha").and_then(|s| s.parse().ok());
 
     // Collect all tensor names and classify them
     let mut entries: HashMap<(usize, &str, bool), &str> = HashMap::new();
@@ -83,8 +80,8 @@ pub fn load_lora_from_safetensors_reader<R: Read + Seek>(
         }
     }
 
-    let rank = inferred_rank
-        .ok_or_else(|| LoraError::ParseError("no LoRA A matrices found".into()))?;
+    let rank =
+        inferred_rank.ok_or_else(|| LoraError::ParseError("no LoRA A matrices found".into()))?;
 
     if rank == 0 {
         return Err(LoraError::ParseError("rank is 0".into()));
@@ -116,6 +113,7 @@ pub fn load_lora_from_safetensors_reader<R: Read + Seek>(
     ];
 
     for &(proj_name, field_name) in &projections {
+        #[allow(clippy::needless_range_loop)]
         for layer_idx in 0..=max_layer {
             let a_key = (layer_idx, proj_name, false);
             let b_key = (layer_idx, proj_name, true);

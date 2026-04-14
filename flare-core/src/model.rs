@@ -4418,7 +4418,13 @@ fn matvec_simd_into(mat: &[f32], vec: &[f32], rows: usize, cols: usize, output: 
 /// Caller must ensure AVX2 + FMA are available.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2,fma")]
-unsafe fn matvec_avx2_into(mat: &[f32], vec: &[f32], _rows: usize, cols: usize, output: &mut [f32]) {
+unsafe fn matvec_avx2_into(
+    mat: &[f32],
+    vec: &[f32],
+    _rows: usize,
+    cols: usize,
+    output: &mut [f32],
+) {
     for (i, out) in output.iter_mut().enumerate() {
         let row = &mat[i * cols..i * cols + cols];
         *out = matvec_avx2_row(row, vec, cols);

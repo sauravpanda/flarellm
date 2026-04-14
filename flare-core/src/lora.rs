@@ -94,7 +94,13 @@ pub struct LoraLayerWeights {
 /// This is a simple O(out_dim * in_dim * rank) matmul used for LoRA merging.
 /// Performance is not critical since merging happens once at load time.
 #[allow(dead_code)]
-pub(crate) fn matmul_ba(b: &[f32], a: &[f32], out_dim: usize, rank: usize, in_dim: usize) -> Vec<f32> {
+pub(crate) fn matmul_ba(
+    b: &[f32],
+    a: &[f32],
+    out_dim: usize,
+    rank: usize,
+    in_dim: usize,
+) -> Vec<f32> {
     debug_assert_eq!(b.len(), out_dim * rank);
     debug_assert_eq!(a.len(), rank * in_dim);
 
@@ -132,16 +138,10 @@ pub(crate) fn apply_lora_delta(
     let out_dim = b.len() / rank;
 
     if a.len() != rank * in_dim {
-        return Err(LoraError::RankMismatch {
-            rank,
-            got: a.len(),
-        });
+        return Err(LoraError::RankMismatch { rank, got: a.len() });
     }
     if b.len() != out_dim * rank {
-        return Err(LoraError::RankMismatch {
-            rank,
-            got: b.len(),
-        });
+        return Err(LoraError::RankMismatch { rank, got: b.len() });
     }
     if total != out_dim * in_dim {
         return Err(LoraError::DimensionMismatch {
@@ -233,7 +233,7 @@ mod tests {
         let mut w = vec![0.0; 6]; // 2x3
         let a = vec![1.0, 0.0]; // rank=1, in_dim=2
         let b = vec![1.0, 1.0]; // out_dim=2, rank=1
-        // w is 2x3=6, but B@A produces 2x2=4 -> mismatch
+                                // w is 2x3=6, but B@A produces 2x2=4 -> mismatch
         let result = apply_lora_delta(&mut w, &a, &b, 1, 1.0);
         assert!(result.is_err());
     }
