@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::io::{Read, Seek};
 
 use flare_core::config::{Architecture, ModelConfig};
-use flare_core::model::{LayerWeights, ModelWeights};
+use flare_core::model::{ExpertWeights, LayerWeights, MoeLayerWeights, ModelWeights};
 use flare_core::tensor::Tensor;
 
 use crate::gguf::{GgufError, GgufFile};
@@ -52,7 +52,7 @@ where
     let total = config.num_layers;
     let mut layers = Vec::with_capacity(total);
     for i in 0..total {
-        let layer = load_layer_weights(&tensors, i)?;
+        let layer = load_layer_weights(&tensors, i, &config)?;
         layers.push(layer);
         on_layer(i + 1, total);
     }
@@ -68,6 +68,7 @@ where
 fn load_layer_weights(
     tensors: &HashMap<String, Tensor>,
     layer_idx: usize,
+    config: &ModelConfig,
 ) -> Result<LayerWeights, GgufError> {
     let i = layer_idx;
 
@@ -187,6 +188,60 @@ fn load_layer_weights(
     )
     .ok();
 
+    // Load MoE expert weights if this is an MoE model.
+    // Expert weight names follow the GGUF convention:
+    //   blk.{layer}.ffn_gate.{expert}.weight  (gate_proj per expert)
+    //   blk.{layer}.ffn_up.{expert}.weight    (up_proj per expert)
+    //   blk.{layer}.ffn_down.{expert}.weight  (down_proj per expert)
+    //   blk.{layer}.ffn_gate_inp.weight       (router / gating network)
+    let moe = if config.moe && config.num_experts > 0 {
+        let router = find_tensor(
+            tensors,
+            &[
+                &format!("blk.{i}.ffn_gate_inp.weight"),
+                &format!("model.layers.{i}.block_sparse_moe.gate.weight"),
+            ],
+        );
+        match router {
+            Ok(gate) => {
+                let mut experts = Vec::with_capacity(config.num_experts);
+                for e in 0..config.num_experts {
+                    let expert_gate = find_tensor(
+                        tensors,
+                        &[
+                            &format!("blk.{i}.ffn_gate.{e}.weight"),
+                            &format!("model.layers.{i}.block_sparse_moe.experts.{e}.w1.weight"),
+                        ],
+                    )?;
+                    let expert_up = find_tensor(
+                        tensors,
+                        &[
+                            &format!("blk.{i}.ffn_up.{e}.weight"),
+                            &format!("model.layers.{i}.block_sparse_moe.experts.{e}.w3.weight"),
+                        ],
+                    )?;
+                    let expert_down = find_tensor(
+                        tensors,
+                        &[
+                            &format!("blk.{i}.ffn_down.{e}.weight"),
+                            &format!("model.layers.{i}.block_sparse_moe.experts.{e}.w2.weight"),
+                        ],
+                    )?;
+                    experts.push(ExpertWeights {
+                        w_gate: expert_gate,
+                        w_up: expert_up,
+                        w_down: expert_down,
+                        loaded: true,
+                    });
+                }
+                Some(MoeLayerWeights { gate, experts })
+            }
+            Err(_) => None, // No router found; fall back to dense FFN
+        }
+    } else {
+        None
+    };
+
     Ok(LayerWeights {
         attn_norm,
         wq,
@@ -202,6 +257,7 @@ fn load_layer_weights(
         attn_v_bias,
         post_attn_norm,
         post_ffn_norm,
+        moe,
     })
 }
 
@@ -298,6 +354,9 @@ pub fn infer_model_config_from_safetensors(
         attn_logit_softcap: 0.0,
         final_logit_softcap: 0.0,
         kv_cache_bits: 32,
+        moe: false,
+        num_experts: 0,
+        num_experts_per_token: 0,
     })
 }
 
@@ -388,6 +447,7 @@ fn load_st_layer_weights(
     )
     .ok();
 
+    // SafeTensors path does not load MoE experts yet (would require config.json parsing).
     Ok(LayerWeights {
         attn_norm,
         wq,
@@ -403,6 +463,7 @@ fn load_st_layer_weights(
         attn_v_bias,
         post_attn_norm,
         post_ffn_norm,
+        moe: None,
     })
 }
 
@@ -507,7 +568,7 @@ mod tests {
     #[test]
     fn test_load_layer_gguf_names() {
         let tensors = build_gguf_tensors(1);
-        let layer = load_layer_weights(&tensors, 0).unwrap();
+        let layer = load_layer_weights(&tensors, 0, &ModelConfig::default()).unwrap();
         assert_eq!(layer.attn_norm.numel(), 4);
         assert_eq!(layer.wq.numel(), 16); // 2 * 2 * 4
         assert_eq!(layer.wk.numel(), 8); // 1 * 2 * 4
@@ -556,7 +617,7 @@ mod tests {
             small_tensor(dim * inter),
         );
 
-        let layer = load_layer_weights(&m, 0).unwrap();
+        let layer = load_layer_weights(&m, 0, &ModelConfig::default()).unwrap();
         assert_eq!(layer.wq.numel(), 16);
         assert_eq!(layer.w_down.numel(), 32);
     }
@@ -583,7 +644,7 @@ mod tests {
     fn test_load_multiple_layers() {
         let tensors = build_gguf_tensors(3);
         for i in 0..3 {
-            let layer = load_layer_weights(&tensors, i).unwrap();
+            let layer = load_layer_weights(&tensors, i, &ModelConfig::default()).unwrap();
             assert_eq!(layer.attn_norm.numel(), 4);
         }
     }
@@ -592,7 +653,7 @@ mod tests {
     fn test_missing_layer_tensor_errors() {
         let tensors = build_gguf_tensors(1);
         // Layer 5 doesn't exist
-        let result = load_layer_weights(&tensors, 5);
+        let result = load_layer_weights(&tensors, 5, &ModelConfig::default());
         assert!(result.is_err());
     }
 
@@ -730,7 +791,7 @@ mod tests {
     fn test_load_layer_optional_bias_absent() {
         // When no bias tensors are present, attn_q_bias / k_bias / v_bias must be None
         let tensors = build_gguf_tensors(1);
-        let layer = load_layer_weights(&tensors, 0).unwrap();
+        let layer = load_layer_weights(&tensors, 0, &ModelConfig::default()).unwrap();
         assert!(layer.attn_q_bias.is_none(), "no q_bias in gguf tensors");
         assert!(layer.attn_k_bias.is_none(), "no k_bias in gguf tensors");
         assert!(layer.attn_v_bias.is_none(), "no v_bias in gguf tensors");
@@ -743,7 +804,7 @@ mod tests {
         tensors.insert("blk.0.attn_q.bias".into(), small_tensor(4));
         tensors.insert("blk.0.attn_k.bias".into(), small_tensor(4));
         tensors.insert("blk.0.attn_v.bias".into(), small_tensor(4));
-        let layer = load_layer_weights(&tensors, 0).unwrap();
+        let layer = load_layer_weights(&tensors, 0, &ModelConfig::default()).unwrap();
         assert!(layer.attn_q_bias.is_some(), "q_bias should be loaded");
         assert!(layer.attn_k_bias.is_some(), "k_bias should be loaded");
         assert!(layer.attn_v_bias.is_some(), "v_bias should be loaded");

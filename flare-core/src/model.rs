@@ -558,6 +558,30 @@ impl ComputeBackend for CpuBackend {
     }
 }
 
+/// Weights for a single expert in a Mixture-of-Experts (MoE) layer.
+///
+/// Each expert is a standard SwiGLU FFN: gate_proj -> silu -> up_proj -> down_proj.
+pub struct ExpertWeights {
+    pub w_gate: Tensor, // (intermediate_dim, hidden_dim)
+    pub w_up: Tensor,   // (intermediate_dim, hidden_dim)
+    pub w_down: Tensor, // (hidden_dim, intermediate_dim)
+    /// Whether this expert's weights are currently loaded in memory.
+    /// For on-demand loading, unloaded experts have empty tensors and `loaded = false`.
+    pub loaded: bool,
+}
+
+/// Weights for a Mixture-of-Experts (MoE) layer.
+///
+/// Contains the router/gate that selects which experts to activate,
+/// plus the per-expert FFN weights.
+pub struct MoeLayerWeights {
+    /// Router weight matrix: (hidden_dim, num_experts).
+    /// Computes expert scores from the hidden state.
+    pub gate: Tensor,
+    /// Per-expert FFN weights, indexed by expert ID.
+    pub experts: Vec<ExpertWeights>,
+}
+
 /// Weights for a single transformer layer.
 pub struct LayerWeights {
     pub attn_norm: Tensor,
@@ -576,6 +600,9 @@ pub struct LayerWeights {
     // Post-norms for Gemma 2 (applied after attention output / FFN output)
     pub post_attn_norm: Option<Tensor>,
     pub post_ffn_norm: Option<Tensor>,
+    /// Optional MoE weights. When present, the FFN block uses router-selected
+    /// experts instead of the shared w_gate/w_up/w_down above.
+    pub moe: Option<MoeLayerWeights>,
 }
 
 /// Pre-allocated buffers for the forward() hot path.
@@ -1543,6 +1570,34 @@ impl Model {
 
             // --- FFN block ---
 
+            rmsnorm_into(
+                x.data(),
+                layer.ffn_norm.data(),
+                config.rms_norm_eps,
+                &mut self.forward_buffers.ffn_normed,
+            );
+
+            // MoE path: route through top-k experts instead of the dense FFN.
+            if config.moe {
+                if let Some(ref moe_weights) = layer.moe {
+                    moe_forward_into(
+                        &self.forward_buffers.ffn_normed,
+                        moe_weights,
+                        dim,
+                        config.intermediate_dim,
+                        config.num_experts_per_token,
+                        &mut self.forward_buffers.ffn_out,
+                    );
+                } else {
+                    // Fallback: MoE config is set but this layer has no MoE weights.
+                    // Should not happen with valid models, but handle gracefully.
+                    for o in self.forward_buffers.ffn_out.iter_mut() {
+                        *o = 0.0;
+                    }
+                }
+            } else {
+            // Dense FFN path (non-MoE)
+
             // Prefetch FFN gate/up weights while computing FFN RMSNorm.
             // The norm is lightweight (~dim FLOPs) and doesn't touch weight
             // memory, so issuing prefetch hints here lets the memory subsystem
@@ -1555,13 +1610,6 @@ impl Model {
             } else {
                 prefetch_weight_f32(layer.w_gate.data());
             }
-
-            rmsnorm_into(
-                x.data(),
-                layer.ffn_norm.data(),
-                config.rms_norm_eps,
-                &mut self.forward_buffers.ffn_normed,
-            );
 
             // Gate and up projections
             let inter_dim = config.intermediate_dim;
@@ -1712,6 +1760,8 @@ impl Model {
                     &mut self.forward_buffers.ffn_out,
                 );
             }
+
+            } // end dense FFN path
 
             // Gemma 2: apply post-FFN RMSNorm before the residual add
             if let Some(ref post_norm) = layer.post_ffn_norm {
@@ -1975,6 +2025,28 @@ impl Model {
                     .as_ref()
                     .map(|t| t.data().to_vec());
 
+                // MoE path: per-token routing through top-k experts.
+                let down_batch = if config.moe {
+                    if let Some(ref moe_weights) = self.weights.layers[layer_idx].moe {
+                        let mut result = vec![0.0f32; seq_len * dim];
+                        for t in 0..seq_len {
+                            let x_t = &normed_batch2[t * dim..(t + 1) * dim];
+                            let out = moe_forward(
+                                x_t,
+                                moe_weights,
+                                dim,
+                                inter,
+                                config.num_experts_per_token,
+                            );
+                            result[t * dim..(t + 1) * dim].copy_from_slice(&out);
+                        }
+                        result
+                    } else {
+                        vec![0.0f32; seq_len * dim]
+                    }
+                } else {
+                // Dense FFN path (non-MoE)
+
                 // Single batched dispatch for gate and up projections.
                 let gate_batch = if use_raw {
                     let rw = &self.raw_weights.as_ref().unwrap()[layer_idx];
@@ -2009,7 +2081,7 @@ impl Model {
                     .collect();
 
                 // Single batched dispatch for the down projection.
-                let down_batch = if use_raw {
+                if use_raw {
                     let rw = &self.raw_weights.as_ref().unwrap()[layer_idx];
                     self.backend
                         .batched_dequant_matmul(&rw.w_down, &ffn_hidden_batch, seq_len)
@@ -2017,7 +2089,9 @@ impl Model {
                     let w_down: Vec<f32> = self.weights.layers[layer_idx].w_down.data().to_vec();
                     self.backend
                         .batched_matmul(&w_down, &ffn_hidden_batch, dim, inter, seq_len)
-                };
+                }
+
+                }; // end dense FFN / MoE branch
 
                 for t in 0..seq_len {
                     let down = down_batch[t * dim..(t + 1) * dim].to_vec();
@@ -4591,6 +4665,122 @@ pub fn matvec_ternary(packed_weights: &[u8], input: &[f32], rows: usize, cols: u
     }
 }
 
+// ---------------------------------------------------------------------------
+// Mixture-of-Experts (MoE) helpers
+// ---------------------------------------------------------------------------
+
+/// Select the top-k experts from router logits and return their indices
+/// and softmax-normalized weights.
+///
+/// The softmax is computed only over the top-k values (not all experts),
+/// matching the standard MoE routing convention used by Mixtral and similar.
+pub fn top_k_softmax(logits: &[f32], k: usize) -> (Vec<usize>, Vec<f32>) {
+    // Build (index, score) pairs and partial-sort to find the top-k.
+    let mut indexed: Vec<(usize, f32)> = logits.iter().copied().enumerate().collect();
+    indexed.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    let top: Vec<(usize, f32)> = indexed.into_iter().take(k).collect();
+
+    // Softmax over the top-k scores for numerically stable normalization.
+    let max_val = top[0].1;
+    let exps: Vec<f32> = top.iter().map(|(_, v)| (v - max_val).exp()).collect();
+    let sum: f32 = exps.iter().sum();
+
+    let indices: Vec<usize> = top.iter().map(|(i, _)| *i).collect();
+    let weights: Vec<f32> = exps.iter().map(|e| e / sum).collect();
+    (indices, weights)
+}
+
+/// Run the MoE FFN block for a single token: route through top-k experts
+/// and return the weighted combination of their outputs.
+///
+/// This is the f32 CPU path. Each selected expert runs a standard SwiGLU FFN:
+///   gate_out = gate_proj(x)
+///   up_out   = up_proj(x)
+///   hidden   = silu(gate_out) * up_out
+///   expert_out = down_proj(hidden)
+///
+/// The final output is `sum_i(weight_i * expert_i_out)`.
+pub fn moe_forward(
+    x: &[f32],
+    moe_weights: &MoeLayerWeights,
+    hidden_dim: usize,
+    intermediate_dim: usize,
+    num_experts_per_token: usize,
+) -> Vec<f32> {
+    let num_experts = moe_weights.experts.len();
+
+    // Router: compute expert scores = gate_weight * x
+    let gate_logits = matvec(moe_weights.gate.data(), x, num_experts, hidden_dim);
+
+    // Top-K selection with softmax normalization
+    let (top_indices, top_weights) = top_k_softmax(&gate_logits, num_experts_per_token);
+
+    // Run selected experts and combine with weighted sum
+    let mut output = vec![0.0f32; hidden_dim];
+    for (&expert_idx, &weight) in top_indices.iter().zip(top_weights.iter()) {
+        let expert = &moe_weights.experts[expert_idx];
+        debug_assert!(expert.loaded, "expert {expert_idx} not loaded");
+
+        // Standard SwiGLU FFN
+        let gate_out = matvec(expert.w_gate.data(), x, intermediate_dim, hidden_dim);
+        let up_out = matvec(expert.w_up.data(), x, intermediate_dim, hidden_dim);
+        let hidden = silu_mul_cpu(&gate_out, &up_out);
+        let expert_out = matvec(expert.w_down.data(), &hidden, hidden_dim, intermediate_dim);
+
+        // Weighted accumulation
+        for (o, &e) in output.iter_mut().zip(expert_out.iter()) {
+            *o += weight * e;
+        }
+    }
+    output
+}
+
+/// In-place variant of `moe_forward` that writes the result into an existing buffer.
+pub fn moe_forward_into(
+    x: &[f32],
+    moe_weights: &MoeLayerWeights,
+    hidden_dim: usize,
+    intermediate_dim: usize,
+    num_experts_per_token: usize,
+    output: &mut [f32],
+) {
+    let num_experts = moe_weights.experts.len();
+
+    // Router: compute expert scores = gate_weight * x
+    let gate_logits = matvec(moe_weights.gate.data(), x, num_experts, hidden_dim);
+
+    // Top-K selection with softmax normalization
+    let (top_indices, top_weights) = top_k_softmax(&gate_logits, num_experts_per_token);
+
+    // Zero out the output buffer
+    for o in output.iter_mut() {
+        *o = 0.0;
+    }
+
+    // Run selected experts and combine with weighted sum
+    for (&expert_idx, &weight) in top_indices.iter().zip(top_weights.iter()) {
+        let expert = &moe_weights.experts[expert_idx];
+        debug_assert!(expert.loaded, "expert {expert_idx} not loaded");
+
+        // Standard SwiGLU FFN
+        let gate_out = matvec(expert.w_gate.data(), x, intermediate_dim, hidden_dim);
+        let up_out = matvec(expert.w_up.data(), x, intermediate_dim, hidden_dim);
+        let hidden = silu_mul_cpu(&gate_out, &up_out);
+        let expert_out = matvec(expert.w_down.data(), &hidden, hidden_dim, intermediate_dim);
+
+        // Weighted accumulation
+        for (o, &e) in output.iter_mut().zip(expert_out.iter()) {
+            *o += weight * e;
+        }
+    }
+}
+
+// TODO: For on-demand loading, experts could be stored in OPFS (Origin Private
+// File System) and loaded when the router predicts they'll be needed.
+// See OD-MoE (arxiv.org/abs/2512.03927) for expert prediction strategies.
+// The `ExpertWeights::loaded` flag enables this: unloaded experts have empty
+// tensors and are fetched from storage before the matvec.
+
 /// SiLU(gate) * up on raw slices, returning a new Vec (CPU implementation).
 ///
 /// On aarch64 this uses NEON intrinsics with a fast polynomial sigmoid
@@ -6551,6 +6741,9 @@ mod tests {
             attn_logit_softcap: 0.0,
             final_logit_softcap: 0.0,
             kv_cache_bits: 32,
+            moe: false,
+            num_experts: 0,
+            num_experts_per_token: 0,
         };
 
         // Deterministic weight init: w[i] = (i % 7 - 3) * 0.1
@@ -6579,6 +6772,7 @@ mod tests {
             attn_v_bias: None,
             post_attn_norm: None,
             post_ffn_norm: None,
+            moe: None,
         };
 
         let weights = ModelWeights {
@@ -6652,6 +6846,9 @@ mod tests {
             attn_logit_softcap: 0.0,
             final_logit_softcap: 0.0,
             kv_cache_bits: 32,
+            moe: false,
+            num_experts: 0,
+            num_experts_per_token: 0,
         };
 
         let make_weights =
@@ -6679,6 +6876,7 @@ mod tests {
             attn_v_bias: None,
             post_attn_norm: None,
             post_ffn_norm: None,
+            moe: None,
         };
 
         let weights = ModelWeights {
@@ -6712,6 +6910,7 @@ mod tests {
                 attn_v_bias: None,
                 post_attn_norm: None,
                 post_ffn_norm: None,
+                moe: None,
             };
             let weights2 = ModelWeights {
                 token_embedding: Tensor::from_vec(make_weights2(vocab * dim), &[vocab * dim])
@@ -6753,6 +6952,9 @@ mod tests {
             attn_logit_softcap: 0.0,
             final_logit_softcap: 0.0,
             kv_cache_bits: 32,
+            moe: false,
+            num_experts: 0,
+            num_experts_per_token: 0,
         };
 
         let dim = 4;
@@ -6773,6 +6975,7 @@ mod tests {
             attn_v_bias: None,
             post_attn_norm: None,
             post_ffn_norm: None,
+            moe: None,
         };
 
         // Embedding: token 0 = [1, 2, 3, 4]
@@ -6832,6 +7035,9 @@ mod tests {
             attn_logit_softcap: 0.0,
             final_logit_softcap: 0.0,
             kv_cache_bits: 32,
+            moe: false,
+            num_experts: 0,
+            num_experts_per_token: 0,
         };
 
         let make_w =
@@ -6858,6 +7064,7 @@ mod tests {
             attn_v_bias: None,
             post_attn_norm: None,
             post_ffn_norm: None,
+            moe: None,
         };
 
         let weights = ModelWeights {
@@ -6913,6 +7120,7 @@ mod tests {
             attn_v_bias: None,
             post_attn_norm: None,
             post_ffn_norm: None,
+            moe: None,
         };
 
         let weights = ModelWeights {
@@ -7240,6 +7448,9 @@ mod tests {
             attn_logit_softcap: 0.0,
             final_logit_softcap: 0.0,
             kv_cache_bits: 32,
+            moe: false,
+            num_experts: 0,
+            num_experts_per_token: 0,
         };
 
         // Deterministic pseudo-random weights
@@ -7288,6 +7499,7 @@ mod tests {
                 attn_v_bias: None,
                 post_attn_norm: None,
                 post_ffn_norm: None,
+                moe: None,
             })
             .collect();
 
@@ -7410,6 +7622,9 @@ mod tests {
             attn_logit_softcap: 0.0,
             final_logit_softcap: 0.0,
             kv_cache_bits: 32,
+            moe: false,
+            num_experts: 0,
+            num_experts_per_token: 0,
         };
 
         // Start with placeholder (zero) weights for all layers
@@ -7438,6 +7653,7 @@ mod tests {
             attn_v_bias: None,
             post_attn_norm: None,
             post_ffn_norm: None,
+            moe: None,
         };
 
         let weights = ModelWeights {
@@ -8030,6 +8246,116 @@ mod tests {
                 expected[i],
                 output[i],
                 diff
+            );
+        }
+    }
+
+    #[test]
+    fn test_top_k_softmax_basic() {
+        let logits = vec![1.0, 3.0, 2.0, 0.5, 4.0];
+        let (indices, weights) = top_k_softmax(&logits, 2);
+        // Top-2 should be indices 4 (score 4.0) and 1 (score 3.0)
+        assert_eq!(indices, vec![4, 1]);
+        assert_eq!(weights.len(), 2);
+        // Weights should sum to 1.0
+        let sum: f32 = weights.iter().sum();
+        assert!((sum - 1.0).abs() < 1e-5, "weights should sum to 1, got {sum}");
+        // First weight should be larger (higher logit)
+        assert!(weights[0] > weights[1]);
+    }
+
+    #[test]
+    fn test_top_k_softmax_k_equals_n() {
+        let logits = vec![1.0, 2.0, 3.0];
+        let (indices, weights) = top_k_softmax(&logits, 3);
+        assert_eq!(indices, vec![2, 1, 0]);
+        let sum: f32 = weights.iter().sum();
+        assert!((sum - 1.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_moe_forward_deterministic() {
+        let dim = 4;
+        let inter = 8;
+        let num_experts = 3;
+        let num_active = 2;
+
+        // Build router: (num_experts, dim)
+        let gate_data: Vec<f32> = (0..num_experts * dim)
+            .map(|i| ((i * 7 + 3) % 20) as f32 / 20.0 - 0.25)
+            .collect();
+        let gate = Tensor::from_vec(gate_data, &[num_experts * dim]).unwrap();
+
+        // Build expert weights
+        let experts: Vec<ExpertWeights> = (0..num_experts)
+            .map(|e| {
+                let seed = e * 100;
+                let make_w = |n: usize| -> Tensor {
+                    let data: Vec<f32> = (0..n)
+                        .map(|i| ((seed + i * 13 + 5) % 50) as f32 / 100.0 - 0.25)
+                        .collect();
+                    Tensor::from_vec(data, &[n]).unwrap()
+                };
+                ExpertWeights {
+                    w_gate: make_w(inter * dim),
+                    w_up: make_w(inter * dim),
+                    w_down: make_w(dim * inter),
+                    loaded: true,
+                }
+            })
+            .collect();
+
+        let moe_weights = MoeLayerWeights { gate, experts };
+
+        let x: Vec<f32> = vec![0.1, -0.2, 0.3, -0.1];
+        let out1 = moe_forward(&x, &moe_weights, dim, inter, num_active);
+        let out2 = moe_forward(&x, &moe_weights, dim, inter, num_active);
+
+        // Must be deterministic
+        assert_eq!(out1.len(), dim);
+        assert_eq!(out1, out2);
+    }
+
+    #[test]
+    fn test_moe_forward_into_matches() {
+        let dim = 4;
+        let inter = 8;
+        let num_experts = 2;
+        let num_active = 1;
+
+        let gate_data: Vec<f32> = (0..num_experts * dim)
+            .map(|i| (i as f32) * 0.1)
+            .collect();
+        let gate = Tensor::from_vec(gate_data, &[num_experts * dim]).unwrap();
+
+        let experts: Vec<ExpertWeights> = (0..num_experts)
+            .map(|e| {
+                let make_w = |n: usize| -> Tensor {
+                    let data: Vec<f32> = (0..n)
+                        .map(|i| ((e + i * 11 + 7) % 30) as f32 / 60.0 - 0.25)
+                        .collect();
+                    Tensor::from_vec(data, &[n]).unwrap()
+                };
+                ExpertWeights {
+                    w_gate: make_w(inter * dim),
+                    w_up: make_w(inter * dim),
+                    w_down: make_w(dim * inter),
+                    loaded: true,
+                }
+            })
+            .collect();
+
+        let moe_weights = MoeLayerWeights { gate, experts };
+        let x: Vec<f32> = vec![0.5, -0.3, 0.2, 0.1];
+
+        let out_alloc = moe_forward(&x, &moe_weights, dim, inter, num_active);
+        let mut out_into = vec![0.0f32; dim];
+        moe_forward_into(&x, &moe_weights, dim, inter, num_active, &mut out_into);
+
+        for (a, b) in out_alloc.iter().zip(out_into.iter()) {
+            assert!(
+                (a - b).abs() < 1e-6,
+                "moe_forward vs moe_forward_into mismatch: {a} vs {b}"
             );
         }
     }

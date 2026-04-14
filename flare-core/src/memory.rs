@@ -195,6 +195,9 @@ mod tests {
             attn_logit_softcap: 0.0,
             final_logit_softcap: 0.0,
             kv_cache_bits: 32,
+            moe: false,
+            num_experts: 0,
+            num_experts_per_token: 0,
         }
     }
 

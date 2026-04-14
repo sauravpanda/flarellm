@@ -27,6 +27,9 @@ fn make_model() -> Model {
         attn_logit_softcap: 0.0,
         final_logit_softcap: 0.0,
         kv_cache_bits: 32,
+        moe: false,
+        num_experts: 0,
+        num_experts_per_token: 0,
     };
 
     let w = |n: usize| -> Vec<f32> { (0..n).map(|i| ((i % 7) as f32 - 3.0) * 0.1).collect() };
@@ -53,6 +56,7 @@ fn make_model() -> Model {
         attn_v_bias: None,
         post_attn_norm: None,
         post_ffn_norm: None,
+        moe: None,
     };
 
     let weights = ModelWeights {
