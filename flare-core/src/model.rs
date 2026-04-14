@@ -595,6 +595,10 @@ pub struct ForwardBuffers {
     pub final_normed: Vec<f32>,
     /// Output logits `[vocab_size]`
     pub logits: Vec<f32>,
+    /// Pre-quantized Q8_0 buffer for normed input (reused across Q/K/V projections)
+    pub normed_q8: QuantizedInput,
+    /// Pre-quantized Q8_0 buffer for FFN normed input (reused across gate/up projections)
+    pub ffn_normed_q8: QuantizedInput,
 }
 
 impl ForwardBuffers {
@@ -620,6 +624,16 @@ impl ForwardBuffers {
             ffn_out: vec![0.0; dim],
             final_normed: vec![0.0; dim],
             logits: vec![0.0; vocab_size],
+            normed_q8: QuantizedInput {
+                scales: vec![0.0; dim / Q8_0_BLOCK_SIZE],
+                quants: vec![0; dim],
+                blocks_per_row: dim / Q8_0_BLOCK_SIZE,
+            },
+            ffn_normed_q8: QuantizedInput {
+                scales: vec![0.0; dim / Q8_0_BLOCK_SIZE],
+                quants: vec![0; dim],
+                blocks_per_row: dim / Q8_0_BLOCK_SIZE,
+            },
         }
     }
 }
@@ -922,25 +936,26 @@ impl Model {
                 self.forward_buffers.v_data.copy_from_slice(&v_tmp);
             } else if use_cpu_q8 {
                 let rw = &self.raw_weights.as_ref().unwrap()[layer_idx];
-                matvec_q8_0_into(
-                    &rw.wq.data,
+                quantize_input_q8_0_into(
                     &self.forward_buffers.normed,
+                    &mut self.forward_buffers.normed_q8,
+                );
+                matvec_q8_0_preq_into(
+                    &rw.wq.data,
+                    &self.forward_buffers.normed_q8,
                     rw.wq.num_rows,
-                    dim,
                     &mut self.forward_buffers.q_data,
                 );
-                matvec_q8_0_into(
+                matvec_q8_0_preq_into(
                     &rw.wk.data,
-                    &self.forward_buffers.normed,
+                    &self.forward_buffers.normed_q8,
                     rw.wk.num_rows,
-                    dim,
                     &mut self.forward_buffers.k_data,
                 );
-                matvec_q8_0_into(
+                matvec_q8_0_preq_into(
                     &rw.wv.data,
-                    &self.forward_buffers.normed,
+                    &self.forward_buffers.normed_q8,
                     rw.wv.num_rows,
-                    dim,
                     &mut self.forward_buffers.v_data,
                 );
             } else {
@@ -1152,18 +1167,20 @@ impl Model {
                 self.forward_buffers.up.copy_from_slice(&up_tmp);
             } else if use_cpu_q8 {
                 let rw = &self.raw_weights.as_ref().unwrap()[layer_idx];
-                matvec_q8_0_into(
-                    &rw.w_gate.data,
+                quantize_input_q8_0_into(
                     &self.forward_buffers.ffn_normed,
+                    &mut self.forward_buffers.ffn_normed_q8,
+                );
+                matvec_q8_0_preq_into(
+                    &rw.w_gate.data,
+                    &self.forward_buffers.ffn_normed_q8,
                     rw.w_gate.num_rows,
-                    dim,
                     &mut self.forward_buffers.gate,
                 );
-                matvec_q8_0_into(
+                matvec_q8_0_preq_into(
                     &rw.w_up.data,
-                    &self.forward_buffers.ffn_normed,
+                    &self.forward_buffers.ffn_normed_q8,
                     rw.w_up.num_rows,
-                    dim,
                     &mut self.forward_buffers.up,
                 );
             } else {
@@ -1751,25 +1768,26 @@ impl Model {
                 self.forward_buffers.v_data.copy_from_slice(&v_tmp);
             } else if use_cpu_q8 {
                 let rw = &self.raw_weights.as_ref().unwrap()[layer_idx];
-                matvec_q8_0_into(
-                    &rw.wq.data,
+                quantize_input_q8_0_into(
                     &self.forward_buffers.normed,
+                    &mut self.forward_buffers.normed_q8,
+                );
+                matvec_q8_0_preq_into(
+                    &rw.wq.data,
+                    &self.forward_buffers.normed_q8,
                     rw.wq.num_rows,
-                    dim,
                     &mut self.forward_buffers.q_data,
                 );
-                matvec_q8_0_into(
+                matvec_q8_0_preq_into(
                     &rw.wk.data,
-                    &self.forward_buffers.normed,
+                    &self.forward_buffers.normed_q8,
                     rw.wk.num_rows,
-                    dim,
                     &mut self.forward_buffers.k_data,
                 );
-                matvec_q8_0_into(
+                matvec_q8_0_preq_into(
                     &rw.wv.data,
-                    &self.forward_buffers.normed,
+                    &self.forward_buffers.normed_q8,
                     rw.wv.num_rows,
-                    dim,
                     &mut self.forward_buffers.v_data,
                 );
             } else {
@@ -1972,18 +1990,20 @@ impl Model {
                 self.forward_buffers.up.copy_from_slice(&up_tmp);
             } else if use_cpu_q8 {
                 let rw = &self.raw_weights.as_ref().unwrap()[layer_idx];
-                matvec_q8_0_into(
-                    &rw.w_gate.data,
+                quantize_input_q8_0_into(
                     &self.forward_buffers.ffn_normed,
+                    &mut self.forward_buffers.ffn_normed_q8,
+                );
+                matvec_q8_0_preq_into(
+                    &rw.w_gate.data,
+                    &self.forward_buffers.ffn_normed_q8,
                     rw.w_gate.num_rows,
-                    dim,
                     &mut self.forward_buffers.gate,
                 );
-                matvec_q8_0_into(
+                matvec_q8_0_preq_into(
                     &rw.w_up.data,
-                    &self.forward_buffers.ffn_normed,
+                    &self.forward_buffers.ffn_normed_q8,
                     rw.w_up.num_rows,
-                    dim,
                     &mut self.forward_buffers.up,
                 );
             } else {
@@ -2580,6 +2600,99 @@ fn f16_to_f32_inline(bits: u16) -> f32 {
 /// Q8_0 block constants.
 const Q8_0_BLOCK_SIZE: usize = 32;
 const Q8_0_BLOCK_BYTES: usize = 34; // 2 (f16 scale) + 32 (int8 quants)
+
+/// Pre-quantized Q8_0 input vector.
+///
+/// Caches the quantized representation of an f32 input vector so that
+/// multiple matvec calls sharing the same input avoid redundant quantization.
+pub struct QuantizedInput {
+    pub scales: Vec<f32>,
+    pub quants: Vec<i8>,
+    pub blocks_per_row: usize,
+}
+
+/// Quantize an f32 input vector to Q8_0 blocks.
+///
+/// Returns a `QuantizedInput` that can be reused across multiple
+/// `matvec_q8_0_preq_into` calls with the same input vector.
+pub fn quantize_input_q8_0(input: &[f32]) -> QuantizedInput {
+    let cols = input.len();
+    debug_assert_eq!(cols % Q8_0_BLOCK_SIZE, 0, "input length must be multiple of 32");
+    let blocks_per_row = cols / Q8_0_BLOCK_SIZE;
+
+    #[cfg(target_arch = "aarch64")]
+    {
+        let mut scales = Vec::with_capacity(blocks_per_row);
+        let mut quants = vec![0i8; cols];
+        for b in 0..blocks_per_row {
+            let start = b * Q8_0_BLOCK_SIZE;
+            // SAFETY: quantize_f32_to_q8_0_block requires aarch64 NEON (always available)
+            // and src must have at least 32 elements (guaranteed by block size).
+            let (scale, block_quants) =
+                unsafe { quantize_f32_to_q8_0_block(&input[start..start + Q8_0_BLOCK_SIZE]) };
+            scales.push(scale);
+            quants[start..start + Q8_0_BLOCK_SIZE].copy_from_slice(&block_quants);
+        }
+        QuantizedInput { scales, quants, blocks_per_row }
+    }
+
+    #[cfg(not(target_arch = "aarch64"))]
+    {
+        let mut scales = Vec::with_capacity(blocks_per_row);
+        let mut quants = vec![0i8; cols];
+        for b in 0..blocks_per_row {
+            let start = b * Q8_0_BLOCK_SIZE;
+            let block = &input[start..start + Q8_0_BLOCK_SIZE];
+            let amax = block.iter().map(|v| v.abs()).fold(0.0f32, f32::max);
+            let d = amax / 127.0;
+            let id = if d != 0.0 { 127.0 / amax } else { 0.0 };
+            scales.push(d);
+            for j in 0..Q8_0_BLOCK_SIZE {
+                quants[start + j] = (block[j] * id).round() as i8;
+            }
+        }
+        QuantizedInput { scales, quants, blocks_per_row }
+    }
+}
+
+/// Quantize an f32 input vector into pre-allocated `QuantizedInput` buffers.
+///
+/// Same as `quantize_input_q8_0` but reuses existing `scales` and `quants`
+/// Vecs to avoid heap allocation on the hot path.
+pub fn quantize_input_q8_0_into(input: &[f32], preq: &mut QuantizedInput) {
+    let cols = input.len();
+    debug_assert_eq!(cols % Q8_0_BLOCK_SIZE, 0, "input length must be multiple of 32");
+    let blocks_per_row = cols / Q8_0_BLOCK_SIZE;
+    preq.blocks_per_row = blocks_per_row;
+    preq.scales.resize(blocks_per_row, 0.0);
+    preq.quants.resize(cols, 0);
+
+    #[cfg(target_arch = "aarch64")]
+    {
+        for b in 0..blocks_per_row {
+            let start = b * Q8_0_BLOCK_SIZE;
+            let (scale, block_quants) =
+                unsafe { quantize_f32_to_q8_0_block(&input[start..start + Q8_0_BLOCK_SIZE]) };
+            preq.scales[b] = scale;
+            preq.quants[start..start + Q8_0_BLOCK_SIZE].copy_from_slice(&block_quants);
+        }
+    }
+
+    #[cfg(not(target_arch = "aarch64"))]
+    {
+        for b in 0..blocks_per_row {
+            let start = b * Q8_0_BLOCK_SIZE;
+            let block = &input[start..start + Q8_0_BLOCK_SIZE];
+            let amax = block.iter().map(|v| v.abs()).fold(0.0f32, f32::max);
+            let d = amax / 127.0;
+            let id = if d != 0.0 { 127.0 / amax } else { 0.0 };
+            preq.scales[b] = d;
+            for j in 0..Q8_0_BLOCK_SIZE {
+                preq.quants[start + j] = (block[j] * id).round() as i8;
+            }
+        }
+    }
+}
 
 /// Compute one row of Q8_0 direct dot product (scalar).
 #[inline]
@@ -3701,6 +3814,91 @@ fn matvec_q8_0_neon_into(
             *out = unsafe {
                 dot_q8_0_q8_0_neon(row_bytes, &input_scales, &input_quants, blocks_per_row)
             };
+        }
+    }
+}
+
+/// Q8_0 matvec using a pre-quantized input vector.
+///
+/// Skips the per-call quantization of the input by accepting a `QuantizedInput`
+/// that was prepared via `quantize_input_q8_0` or `quantize_input_q8_0_into`.
+/// This saves significant work when the same input is multiplied by multiple
+/// weight matrices (e.g. Q/K/V projections sharing the same normed input).
+pub fn matvec_q8_0_preq_into(
+    weight_data: &[u8],
+    preq: &QuantizedInput,
+    rows: usize,
+    output: &mut [f32],
+) {
+    debug_assert_eq!(output.len(), rows);
+    let blocks_per_row = preq.blocks_per_row;
+    let bytes_per_row = blocks_per_row * Q8_0_BLOCK_BYTES;
+
+    #[cfg(target_arch = "aarch64")]
+    {
+        let total_work = rows * (blocks_per_row * Q8_0_BLOCK_SIZE);
+        if total_work >= 2_000_000 {
+            use rayon::prelude::*;
+            output
+                .par_chunks_mut(32)
+                .enumerate()
+                .for_each(|(chunk_idx, chunk)| {
+                    for (local_idx, out) in chunk.iter_mut().enumerate() {
+                        let row = chunk_idx * 32 + local_idx;
+                        let start = row * bytes_per_row;
+                        let row_bytes = &weight_data[start..start + bytes_per_row];
+                        *out = unsafe {
+                            dot_q8_0_q8_0_neon(
+                                row_bytes,
+                                &preq.scales,
+                                &preq.quants,
+                                blocks_per_row,
+                            )
+                        };
+                    }
+                });
+        } else {
+            for (i, out) in output.iter_mut().enumerate() {
+                let start = i * bytes_per_row;
+                let row_bytes = &weight_data[start..start + bytes_per_row];
+                *out = unsafe {
+                    dot_q8_0_q8_0_neon(row_bytes, &preq.scales, &preq.quants, blocks_per_row)
+                };
+            }
+        }
+    }
+
+    #[cfg(not(target_arch = "aarch64"))]
+    {
+        for (i, out) in output.iter_mut().enumerate() {
+            let row_start = i * bytes_per_row;
+            let row_bytes = &weight_data[row_start..row_start + bytes_per_row];
+            let mut sum = 0.0f32;
+            for block in 0..blocks_per_row {
+                let block_start = block * Q8_0_BLOCK_BYTES;
+                let w_scale = f16_to_f32_inline(u16::from_le_bytes([
+                    row_bytes[block_start],
+                    row_bytes[block_start + 1],
+                ]));
+                let w_quants = &row_bytes[block_start + 2..block_start + Q8_0_BLOCK_BYTES];
+                let input_offset = block * Q8_0_BLOCK_SIZE;
+                let combined_scale = w_scale * preq.scales[block];
+
+                let mut s0 = 0i32;
+                let mut s1 = 0i32;
+                let mut s2 = 0i32;
+                let mut s3 = 0i32;
+                let mut j = 0;
+                while j < 32 {
+                    s0 += (w_quants[j] as i8) as i32 * preq.quants[input_offset + j] as i32;
+                    s1 += (w_quants[j + 1] as i8) as i32 * preq.quants[input_offset + j + 1] as i32;
+                    s2 += (w_quants[j + 2] as i8) as i32 * preq.quants[input_offset + j + 2] as i32;
+                    s3 += (w_quants[j + 3] as i8) as i32 * preq.quants[input_offset + j + 3] as i32;
+                    j += 4;
+                }
+                sum += combined_scale * (s0 + s1 + s2 + s3) as f32;
+            }
+            *out = sum;
         }
     }
 }
