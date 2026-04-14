@@ -6049,8 +6049,7 @@ pub fn matvec_q4k_into(
                         let row_bytes = &weight_data[start..start + bytes_per_row];
                         #[cfg(target_arch = "aarch64")]
                         {
-                            *out =
-                                unsafe { dot_q4k_f32_neon(row_bytes, input, blocks_per_row) };
+                            *out = unsafe { dot_q4k_f32_neon(row_bytes, input, blocks_per_row) };
                         }
                         #[cfg(not(target_arch = "aarch64"))]
                         {
