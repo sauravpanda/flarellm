@@ -3607,6 +3607,8 @@ fn attn_dot_scores_neon(
 
 /// CPU implementation of grouped-query attention for a single token position.
 /// Exported so GPU backends can delegate to it for unsupported cases (e.g. soft-cap).
+///
+/// Allocating wrapper around `cpu_grouped_query_attention_into`.
 #[allow(clippy::too_many_arguments)]
 pub fn cpu_grouped_query_attention(
     q: &[f32],       // [num_heads * head_dim]
@@ -3618,88 +3620,11 @@ pub fn cpu_grouped_query_attention(
     seq_len: usize,    // number of valid KV entries
     attn_softcap: f32, // 0.0 = no capping (Llama etc); non-zero for Gemma 2
 ) -> Vec<f32> {
-    let heads_per_kv = num_heads / num_kv_heads;
     let mut output = vec![0.0f32; num_heads * head_dim];
-
-    let kv_stride = num_kv_heads * head_dim;
-    let scale = 1.0 / (head_dim as f32).sqrt();
-
-    // Pre-allocate scores buffer once, reused across all heads.
-    let mut scores = vec![0.0f32; seq_len];
-
-    for h in 0..num_heads {
-        let kv_head = h / heads_per_kv;
-        let q_offset = h * head_dim;
-
-        // Compute attention scores for this head
-        #[cfg(target_arch = "aarch64")]
-        {
-            attn_dot_scores_neon(
-                q,
-                k_cache,
-                &mut scores,
-                q_offset,
-                kv_head,
-                head_dim,
-                kv_stride,
-                seq_len,
-                scale,
-            );
-        }
-        #[cfg(not(target_arch = "aarch64"))]
-        {
-            for t in 0..seq_len {
-                let k_offset = t * kv_stride + kv_head * head_dim;
-                let mut dot = 0.0f32;
-                for d in 0..head_dim {
-                    dot += q[q_offset + d] * k_cache[k_offset + d];
-                }
-                scores[t] = dot * scale;
-            }
-        }
-
-        // Gemma 2: tanh soft-cap on attention logits before softmax
-        if attn_softcap > 0.0 {
-            for s in &mut scores[..seq_len] {
-                *s = (*s / attn_softcap).tanh() * attn_softcap;
-            }
-        }
-
-        // Softmax
-        let max_score = scores[..seq_len]
-            .iter()
-            .cloned()
-            .fold(f32::NEG_INFINITY, f32::max);
-        let mut sum = 0.0f32;
-        for s in &mut scores[..seq_len] {
-            *s = (*s - max_score).exp();
-            sum += *s;
-        }
-        let inv_sum = 1.0 / sum;
-        for s in &mut scores[..seq_len] {
-            *s *= inv_sum;
-        }
-
-        // Weighted sum of values
-        let out_offset = h * head_dim;
-        #[allow(clippy::needless_range_loop)]
-        for t in 0..seq_len {
-            let weight = scores[t];
-            if weight < 1e-8 {
-                continue; // Skip near-zero weights
-            }
-            let v_offset = t * kv_stride + kv_head * head_dim;
-            for d in 0..head_dim {
-                output[out_offset + d] += weight * v_cache[v_offset + d];
-            }
-        }
-
-        // Zero scores for next head (only up to seq_len)
-        for s in &mut scores[..seq_len] {
-            *s = 0.0;
-        }
-    }
-
+    cpu_grouped_query_attention_into(
+        q, k_cache, v_cache, num_heads, num_kv_heads, head_dim, seq_len,
+        attn_softcap, &mut output,
+    );
     output
 }
 
@@ -3709,6 +3634,7 @@ pub fn cpu_grouped_query_attention(
 // ---------------------------------------------------------------------------
 
 /// RMSNorm writing into a pre-allocated output slice.
+#[inline]
 pub fn rmsnorm_into(x: &[f32], weight: &[f32], eps: f32, output: &mut [f32]) {
     #[cfg(target_arch = "aarch64")]
     {
@@ -3801,6 +3727,7 @@ unsafe fn rmsnorm_neon_into(x: &[f32], weight: &[f32], eps: f32, output: &mut [f
 /// Matrix-vector multiply writing into a pre-allocated output slice.
 ///
 /// Dispatches to the same platform-specific implementations as `matvec()`.
+#[inline]
 pub fn matvec_into(mat: &[f32], vec: &[f32], rows: usize, cols: usize, output: &mut [f32]) {
     debug_assert_eq!(output.len(), rows);
     #[cfg(target_os = "macos")]
@@ -3880,6 +3807,7 @@ unsafe fn matvec_avx2_into(mat: &[f32], vec: &[f32], rows: usize, cols: usize, o
 }
 
 /// Q8_0 direct quantized matvec writing into a pre-allocated output slice.
+#[inline]
 pub fn matvec_q8_0_into(
     weight_data: &[u8],
     input: &[f32],
@@ -4058,6 +3986,7 @@ pub fn matvec_q8_0_preq_into(
 }
 
 /// SiLU(gate) * up writing into a pre-allocated output slice.
+#[inline]
 pub fn silu_mul_into(gate: &[f32], up: &[f32], output: &mut [f32]) {
     #[cfg(target_arch = "aarch64")]
     {
@@ -4106,6 +4035,7 @@ fn silu_mul_neon_into(gate: &[f32], up: &[f32], output: &mut [f32]) {
 }
 
 /// GELU(gate) * up writing into a pre-allocated output slice.
+#[inline]
 pub fn gelu_mul_into(gate: &[f32], up: &[f32], output: &mut [f32]) {
     for i in 0..gate.len() {
         let g = gate[i];
@@ -4116,8 +4046,274 @@ pub fn gelu_mul_into(gate: &[f32], up: &[f32], output: &mut [f32]) {
 }
 
 /// Grouped-query attention writing into a pre-allocated output slice.
+///
+/// Uses fused online softmax (Flash Attention style) for the common non-softcap
+/// path: scores, softmax, and value accumulation are computed in a single pass
+/// over the KV cache, eliminating the scores buffer and improving cache locality.
+/// Falls back to multi-pass for softcap (Gemma 2).
+#[inline]
 #[allow(clippy::too_many_arguments)]
 pub fn cpu_grouped_query_attention_into(
+    q: &[f32],
+    k_cache: &[f32],
+    v_cache: &[f32],
+    num_heads: usize,
+    num_kv_heads: usize,
+    head_dim: usize,
+    seq_len: usize,
+    attn_softcap: f32,
+    output: &mut [f32],
+) {
+    // Softcap path: multi-pass (online softmax doesn't compose cleanly
+    // with tanh capping since the cap distorts the score distribution).
+    if attn_softcap > 0.0 {
+        cpu_gqa_softcap(
+            q, k_cache, v_cache, num_heads, num_kv_heads, head_dim, seq_len,
+            attn_softcap, output,
+        );
+        return;
+    }
+
+    let heads_per_kv = num_heads / num_kv_heads;
+    let kv_stride = num_kv_heads * head_dim;
+    let scale = 1.0 / (head_dim as f32).sqrt();
+
+    for h in 0..num_heads {
+        let kv_head = h / heads_per_kv;
+        let q_offset = h * head_dim;
+        let out_offset = h * head_dim;
+
+        #[cfg(target_arch = "aarch64")]
+        {
+            // SAFETY: NEON always available on aarch64.
+            // Handles all head_dim sizes: NEON for multiples of 4, scalar tail for remainder.
+            unsafe {
+                fused_attention_head_neon(
+                    q, q_offset, k_cache, v_cache, output, out_offset,
+                    head_dim, seq_len, kv_stride, kv_head, scale,
+                );
+            }
+        }
+        #[cfg(not(target_arch = "aarch64"))]
+        {
+            fused_attention_head_scalar(
+                q, q_offset, k_cache, v_cache, output, out_offset,
+                head_dim, seq_len, kv_stride, kv_head, scale,
+            );
+        }
+    }
+}
+
+/// Fused single-pass attention with online softmax (scalar fallback).
+///
+/// For each KV position: compute QK^T, update running max, rescale accumulated
+/// output, and add new value contribution. No intermediate scores buffer needed.
+#[cfg(not(target_arch = "aarch64"))]
+#[inline(always)]
+#[allow(clippy::too_many_arguments)]
+fn fused_attention_head_scalar(
+    q: &[f32],
+    q_offset: usize,
+    k_cache: &[f32],
+    v_cache: &[f32],
+    output: &mut [f32],
+    out_offset: usize,
+    head_dim: usize,
+    seq_len: usize,
+    kv_stride: usize,
+    kv_head: usize,
+    scale: f32,
+) {
+    // Initialize output to zero
+    for d in 0..head_dim {
+        output[out_offset + d] = 0.0;
+    }
+
+    let mut max_score = f32::NEG_INFINITY;
+    let mut sum_exp = 0.0f32;
+
+    for t in 0..seq_len {
+        // Compute QK^T dot product
+        let k_offset = t * kv_stride + kv_head * head_dim;
+        let mut dot = 0.0f32;
+        for d in 0..head_dim {
+            dot += q[q_offset + d] * k_cache[k_offset + d];
+        }
+        let score = dot * scale;
+
+        // Online softmax update
+        let new_max = max_score.max(score);
+        let old_scale = (max_score - new_max).exp();
+        let new_weight = (score - new_max).exp();
+        sum_exp = sum_exp * old_scale + new_weight;
+
+        // Rescale existing output and add new value contribution
+        let v_offset = t * kv_stride + kv_head * head_dim;
+        for d in 0..head_dim {
+            output[out_offset + d] =
+                output[out_offset + d] * old_scale + new_weight * v_cache[v_offset + d];
+        }
+        max_score = new_max;
+    }
+
+    // Final normalization
+    if sum_exp > 0.0 {
+        let inv_sum = 1.0 / sum_exp;
+        for d in 0..head_dim {
+            output[out_offset + d] *= inv_sum;
+        }
+    }
+}
+
+/// NEON-vectorized fused attention with online softmax.
+///
+/// Vectorizes both the QK^T dot product (4 accumulators for ILP) and the
+/// value rescale+accumulate loop using NEON FMA instructions.
+#[cfg(target_arch = "aarch64")]
+#[inline(always)]
+#[allow(clippy::too_many_arguments)]
+unsafe fn fused_attention_head_neon(
+    q: &[f32],
+    q_offset: usize,
+    k_cache: &[f32],
+    v_cache: &[f32],
+    output: &mut [f32],
+    out_offset: usize,
+    head_dim: usize,
+    seq_len: usize,
+    kv_stride: usize,
+    kv_head: usize,
+    scale: f32,
+) {
+    use std::arch::aarch64::*;
+
+    let dim4 = head_dim & !3;
+    let dim16 = head_dim & !15;
+
+    // Initialize output to zero
+    for d in 0..head_dim {
+        output[out_offset + d] = 0.0;
+    }
+
+    let mut max_score = f32::NEG_INFINITY;
+    let mut sum_exp = 0.0f32;
+
+    for t in 0..seq_len {
+        let k_offset = t * kv_stride + kv_head * head_dim;
+
+        // --- QK^T dot product with 4 NEON accumulators for ILP ---
+        let mut acc0 = vdupq_n_f32(0.0);
+        let mut acc1 = vdupq_n_f32(0.0);
+        let mut acc2 = vdupq_n_f32(0.0);
+        let mut acc3 = vdupq_n_f32(0.0);
+
+        let mut d = 0usize;
+        while d < dim16 {
+            let q0 = vld1q_f32(q.as_ptr().add(q_offset + d));
+            let k0 = vld1q_f32(k_cache.as_ptr().add(k_offset + d));
+            acc0 = vfmaq_f32(acc0, q0, k0);
+            let q1 = vld1q_f32(q.as_ptr().add(q_offset + d + 4));
+            let k1 = vld1q_f32(k_cache.as_ptr().add(k_offset + d + 4));
+            acc1 = vfmaq_f32(acc1, q1, k1);
+            let q2 = vld1q_f32(q.as_ptr().add(q_offset + d + 8));
+            let k2 = vld1q_f32(k_cache.as_ptr().add(k_offset + d + 8));
+            acc2 = vfmaq_f32(acc2, q2, k2);
+            let q3 = vld1q_f32(q.as_ptr().add(q_offset + d + 12));
+            let k3 = vld1q_f32(k_cache.as_ptr().add(k_offset + d + 12));
+            acc3 = vfmaq_f32(acc3, q3, k3);
+            d += 16;
+        }
+        // Handle remaining 4-element chunks
+        while d < dim4 {
+            let qv = vld1q_f32(q.as_ptr().add(q_offset + d));
+            let kv = vld1q_f32(k_cache.as_ptr().add(k_offset + d));
+            acc0 = vfmaq_f32(acc0, qv, kv);
+            d += 4;
+        }
+        let sum_v = vaddq_f32(vaddq_f32(acc0, acc1), vaddq_f32(acc2, acc3));
+        let mut dot = vaddvq_f32(sum_v);
+        // Scalar tail
+        while d < head_dim {
+            dot += q[q_offset + d] * k_cache[k_offset + d];
+            d += 1;
+        }
+        let score = dot * scale;
+
+        // --- Online softmax update ---
+        let new_max = max_score.max(score);
+        let old_scale_f = (max_score - new_max).exp();
+        let new_weight = (score - new_max).exp();
+        sum_exp = sum_exp * old_scale_f + new_weight;
+
+        // --- Rescale existing output + accumulate new value (NEON) ---
+        let v_offset = t * kv_stride + kv_head * head_dim;
+        let old_scale_v = vdupq_n_f32(old_scale_f);
+        let new_weight_v = vdupq_n_f32(new_weight);
+
+        d = 0;
+        while d < dim16 {
+            // Unroll 4x for ILP on rescale + FMA
+            let o0 = vld1q_f32(output.as_ptr().add(out_offset + d));
+            let v0 = vld1q_f32(v_cache.as_ptr().add(v_offset + d));
+            let r0 = vfmaq_f32(vmulq_f32(o0, old_scale_v), new_weight_v, v0);
+            vst1q_f32(output.as_mut_ptr().add(out_offset + d), r0);
+
+            let o1 = vld1q_f32(output.as_ptr().add(out_offset + d + 4));
+            let v1 = vld1q_f32(v_cache.as_ptr().add(v_offset + d + 4));
+            let r1 = vfmaq_f32(vmulq_f32(o1, old_scale_v), new_weight_v, v1);
+            vst1q_f32(output.as_mut_ptr().add(out_offset + d + 4), r1);
+
+            let o2 = vld1q_f32(output.as_ptr().add(out_offset + d + 8));
+            let v2 = vld1q_f32(v_cache.as_ptr().add(v_offset + d + 8));
+            let r2 = vfmaq_f32(vmulq_f32(o2, old_scale_v), new_weight_v, v2);
+            vst1q_f32(output.as_mut_ptr().add(out_offset + d + 8), r2);
+
+            let o3 = vld1q_f32(output.as_ptr().add(out_offset + d + 12));
+            let v3 = vld1q_f32(v_cache.as_ptr().add(v_offset + d + 12));
+            let r3 = vfmaq_f32(vmulq_f32(o3, old_scale_v), new_weight_v, v3);
+            vst1q_f32(output.as_mut_ptr().add(out_offset + d + 12), r3);
+
+            d += 16;
+        }
+        while d < dim4 {
+            let o = vld1q_f32(output.as_ptr().add(out_offset + d));
+            let v = vld1q_f32(v_cache.as_ptr().add(v_offset + d));
+            let r = vfmaq_f32(vmulq_f32(o, old_scale_v), new_weight_v, v);
+            vst1q_f32(output.as_mut_ptr().add(out_offset + d), r);
+            d += 4;
+        }
+        // Scalar tail
+        while d < head_dim {
+            output[out_offset + d] =
+                output[out_offset + d] * old_scale_f + new_weight * v_cache[v_offset + d];
+            d += 1;
+        }
+
+        max_score = new_max;
+    }
+
+    // Final normalization (NEON)
+    if sum_exp > 0.0 {
+        let inv_sum = 1.0 / sum_exp;
+        let inv_sum_v = vdupq_n_f32(inv_sum);
+
+        let mut d = 0usize;
+        while d < dim4 {
+            let o = vld1q_f32(output.as_ptr().add(out_offset + d));
+            vst1q_f32(output.as_mut_ptr().add(out_offset + d), vmulq_f32(o, inv_sum_v));
+            d += 4;
+        }
+        while d < head_dim {
+            output[out_offset + d] *= inv_sum;
+            d += 1;
+        }
+    }
+}
+
+/// Multi-pass attention for models with attention logit soft-capping (Gemma 2).
+/// Softcap applies tanh before softmax which prevents clean online softmax fusion.
+#[allow(clippy::too_many_arguments)]
+fn cpu_gqa_softcap(
     q: &[f32],
     k_cache: &[f32],
     v_cache: &[f32],
@@ -4148,15 +4344,8 @@ pub fn cpu_grouped_query_attention_into(
         #[cfg(target_arch = "aarch64")]
         {
             attn_dot_scores_neon(
-                q,
-                k_cache,
-                &mut scores,
-                q_offset,
-                kv_head,
-                head_dim,
-                kv_stride,
-                seq_len,
-                scale,
+                q, k_cache, &mut scores, q_offset, kv_head, head_dim,
+                kv_stride, seq_len, scale,
             );
         }
         #[cfg(not(target_arch = "aarch64"))]
@@ -4171,10 +4360,9 @@ pub fn cpu_grouped_query_attention_into(
             }
         }
 
-        if attn_softcap > 0.0 {
-            for s in &mut scores[..seq_len] {
-                *s = (*s / attn_softcap).tanh() * attn_softcap;
-            }
+        // Apply tanh soft-cap
+        for s in &mut scores[..seq_len] {
+            *s = (*s / attn_softcap).tanh() * attn_softcap;
         }
 
         // Softmax
@@ -4365,6 +4553,86 @@ mod tests {
         );
     }
 
+    /// Verify fused online-softmax attention matches the reference multi-pass
+    /// implementation for various head_dim and seq_len combinations.
+    #[test]
+    fn test_fused_attention_matches_reference() {
+        // Reference multi-pass implementation (the old code)
+        fn reference_attention(
+            q: &[f32], k_cache: &[f32], v_cache: &[f32],
+            num_heads: usize, num_kv_heads: usize, head_dim: usize,
+            seq_len: usize,
+        ) -> Vec<f32> {
+            let heads_per_kv = num_heads / num_kv_heads;
+            let kv_stride = num_kv_heads * head_dim;
+            let scale = 1.0 / (head_dim as f32).sqrt();
+            let mut output = vec![0.0f32; num_heads * head_dim];
+            let mut scores = vec![0.0f32; seq_len];
+
+            for h in 0..num_heads {
+                let kv_head = h / heads_per_kv;
+                let q_offset = h * head_dim;
+                for t in 0..seq_len {
+                    let k_offset = t * kv_stride + kv_head * head_dim;
+                    let mut dot = 0.0f32;
+                    for d in 0..head_dim {
+                        dot += q[q_offset + d] * k_cache[k_offset + d];
+                    }
+                    scores[t] = dot * scale;
+                }
+                let max_s = scores[..seq_len].iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+                let mut sum = 0.0f32;
+                for s in &mut scores[..seq_len] {
+                    *s = (*s - max_s).exp();
+                    sum += *s;
+                }
+                let inv = 1.0 / sum;
+                for s in &mut scores[..seq_len] { *s *= inv; }
+                let out_off = h * head_dim;
+                for t in 0..seq_len {
+                    let w = scores[t];
+                    let v_off = t * kv_stride + kv_head * head_dim;
+                    for d in 0..head_dim {
+                        output[out_off + d] += w * v_cache[v_off + d];
+                    }
+                }
+                for s in &mut scores[..seq_len] { *s = 0.0; }
+            }
+            output
+        }
+
+        let test_cases = [
+            // (num_heads, num_kv_heads, head_dim, seq_len)
+            (2, 2, 2, 1),
+            (2, 2, 2, 6),
+            (4, 2, 4, 10),
+            (32, 8, 64, 20),
+            (8, 4, 64, 1),
+            (1, 1, 3, 5),   // odd head_dim
+        ];
+
+        for &(nh, nkv, hd, sl) in &test_cases {
+            let q: Vec<f32> = (0..nh*hd).map(|i| ((i*7+3) as f32 * 0.1).sin()).collect();
+            let kv_stride = nkv * hd;
+            let k: Vec<f32> = (0..sl*kv_stride).map(|i| ((i*11+5) as f32 * 0.05).cos()).collect();
+            let v: Vec<f32> = (0..sl*kv_stride).map(|i| ((i*13+7) as f32 * 0.08).sin()).collect();
+
+            let reference = reference_attention(&q, &k, &v, nh, nkv, hd, sl);
+            let mut fused = vec![0.0f32; nh * hd];
+            cpu_grouped_query_attention_into(&q, &k, &v, nh, nkv, hd, sl, 0.0, &mut fused);
+
+            for i in 0..nh*hd {
+                let diff = (reference[i] - fused[i]).abs();
+                let tol = (reference[i].abs() * 1e-4).max(1e-5);
+                assert!(
+                    diff <= tol,
+                    "attention mismatch at [{i}] for nh={nh} nkv={nkv} hd={hd} sl={sl}: ref={} fused={} diff={}",
+                    reference[i], fused[i], diff,
+                );
+            }
+        }
+    }
+
     // ---------------------------------------------------------------
     // Integration tests: full forward pass
     // ---------------------------------------------------------------
@@ -4472,12 +4740,92 @@ mod tests {
 
     #[test]
     fn test_forward_position_affects_output() {
-        // RoPE should make the same token at different positions produce different logits
-        let mut model = tiny_test_model();
+        // RoPE should make the same token at different positions produce different logits.
+        // Use a larger model (head_dim=4) so the RoPE rotation has a measurable effect
+        // on the logits even after attention + residual with tiny weight magnitudes.
+        let config = ModelConfig {
+            architecture: Architecture::Llama,
+            vocab_size: 8,
+            hidden_dim: 8,
+            intermediate_dim: 16,
+            num_layers: 1,
+            num_heads: 2,
+            num_kv_heads: 2,
+            head_dim: 4,
+            max_seq_len: 16,
+            rope_theta: 10000.0,
+            rms_norm_eps: 1e-5,
+            attn_logit_softcap: 0.0,
+            final_logit_softcap: 0.0,
+            kv_cache_bits: 32,
+        };
+
+        let make_weights =
+            |size: usize| -> Vec<f32> { (0..size).map(|i| ((i % 7) as f32 - 3.0) * 0.1).collect() };
+
+        let dim = config.hidden_dim;
+        let nh = config.num_heads;
+        let nkvh = config.num_kv_heads;
+        let hd = config.head_dim;
+        let inter = config.intermediate_dim;
+        let vocab = config.vocab_size;
+
+        let layer = LayerWeights {
+            attn_norm: Tensor::from_vec(vec![1.0; dim], &[dim]).unwrap(),
+            wq: Tensor::from_vec(make_weights(nh * hd * dim), &[nh * hd * dim]).unwrap(),
+            wk: Tensor::from_vec(make_weights(nkvh * hd * dim), &[nkvh * hd * dim]).unwrap(),
+            wv: Tensor::from_vec(make_weights(nkvh * hd * dim), &[nkvh * hd * dim]).unwrap(),
+            wo: Tensor::from_vec(make_weights(dim * nh * hd), &[dim * nh * hd]).unwrap(),
+            ffn_norm: Tensor::from_vec(vec![1.0; dim], &[dim]).unwrap(),
+            w_gate: Tensor::from_vec(make_weights(inter * dim), &[inter * dim]).unwrap(),
+            w_up: Tensor::from_vec(make_weights(inter * dim), &[inter * dim]).unwrap(),
+            w_down: Tensor::from_vec(make_weights(dim * inter), &[dim * inter]).unwrap(),
+            attn_q_bias: None,
+            attn_k_bias: None,
+            attn_v_bias: None,
+            post_attn_norm: None,
+            post_ffn_norm: None,
+        };
+
+        let weights = ModelWeights {
+            token_embedding: Tensor::from_vec(make_weights(vocab * dim), &[vocab * dim]).unwrap(),
+            layers: vec![layer],
+            output_norm: Tensor::from_vec(vec![1.0; dim], &[dim]).unwrap(),
+            output_weight: Tensor::from_vec(make_weights(vocab * dim), &[vocab * dim]).unwrap(),
+        };
+
+        let mut model = Model::new(config, weights);
         let logits_pos0 = model.forward(0, 0).data().to_vec();
         // Don't reset — KV cache state will differ, which is fine.
         // The point is the logits should differ from a fresh model at pos 5.
-        let mut model2 = tiny_test_model();
+        let mut model2 = {
+            let config2 = model.config().clone();
+            let make_weights2 =
+                |size: usize| -> Vec<f32> { (0..size).map(|i| ((i % 7) as f32 - 3.0) * 0.1).collect() };
+            let layer2 = LayerWeights {
+                attn_norm: Tensor::from_vec(vec![1.0; dim], &[dim]).unwrap(),
+                wq: Tensor::from_vec(make_weights2(nh * hd * dim), &[nh * hd * dim]).unwrap(),
+                wk: Tensor::from_vec(make_weights2(nkvh * hd * dim), &[nkvh * hd * dim]).unwrap(),
+                wv: Tensor::from_vec(make_weights2(nkvh * hd * dim), &[nkvh * hd * dim]).unwrap(),
+                wo: Tensor::from_vec(make_weights2(dim * nh * hd), &[dim * nh * hd]).unwrap(),
+                ffn_norm: Tensor::from_vec(vec![1.0; dim], &[dim]).unwrap(),
+                w_gate: Tensor::from_vec(make_weights2(inter * dim), &[inter * dim]).unwrap(),
+                w_up: Tensor::from_vec(make_weights2(inter * dim), &[inter * dim]).unwrap(),
+                w_down: Tensor::from_vec(make_weights2(dim * inter), &[dim * inter]).unwrap(),
+                attn_q_bias: None,
+                attn_k_bias: None,
+                attn_v_bias: None,
+                post_attn_norm: None,
+                post_ffn_norm: None,
+            };
+            let weights2 = ModelWeights {
+                token_embedding: Tensor::from_vec(make_weights2(vocab * dim), &[vocab * dim]).unwrap(),
+                layers: vec![layer2],
+                output_norm: Tensor::from_vec(vec![1.0; dim], &[dim]).unwrap(),
+                output_weight: Tensor::from_vec(make_weights2(vocab * dim), &[vocab * dim]).unwrap(),
+            };
+            Model::new(config2, weights2)
+        };
         // Feed dummy tokens to advance to position 5
         for i in 0..5 {
             model2.forward(0, i);
