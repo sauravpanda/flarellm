@@ -60,3 +60,7 @@ default = []
 # Enable multi-threaded WASM inference via SharedArrayBuffer.
 # Requires COOP/COEP headers. Build: wasm-pack build flare-web --target web --features wasm_threads
 wasm_threads = ["wasm-bindgen-rayon", "flare-core/wasm_threads"]
+# Enable WASM relaxed SIMD (f32x4_relaxed_madd, hardware FMA) for faster matvec.
+# Requires browser support for the relaxed-simd WASM proposal.
+# Build: wasm-pack build flare-web --target web --features relaxed_simd
+relaxed_simd = ["flare-core/relaxed_simd", "flare-simd/relaxed_simd"]

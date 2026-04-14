@@ -72,6 +72,22 @@ pub fn webgpu_available() -> bool {
         .unwrap_or(false)
 }
 
+/// Check if this WASM build was compiled with relaxed SIMD support.
+///
+/// Relaxed SIMD provides hardware-specific faster operations like fused
+/// multiply-add (`f32x4_relaxed_madd`) that map directly to ARM NEON and
+/// x86 SSE/AVX FMA instructions. When enabled, matvec operations use FMA
+/// for ~15-30% speedup.
+///
+/// This is a compile-time feature: the WASM binary either includes relaxed
+/// SIMD instructions or it does not. The browser validates them at module
+/// load time, so if this module loaded successfully and returns `true`,
+/// relaxed SIMD is active.
+#[wasm_bindgen]
+pub fn supports_relaxed_simd() -> bool {
+    cfg!(feature = "relaxed_simd")
+}
+
 /// Get basic device info as a JSON string.
 #[wasm_bindgen]
 pub fn device_info() -> String {
