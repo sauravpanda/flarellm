@@ -5690,15 +5690,13 @@ pub fn matvec_q8_0_preq_into(
                 let s1 = r1 * bytes_per_row;
                 let rb0 = &weight_data[s0..s0 + bytes_per_row];
                 let rb1 = &weight_data[s1..s1 + bytes_per_row];
-                output[r0] = unsafe {
-                    dot_q8_0_q8_0_neon(rb0, &preq.scales, &preq.quants, blocks_per_row)
-                };
-                output[r1] = unsafe {
-                    dot_q8_0_q8_0_neon(rb1, &preq.scales, &preq.quants, blocks_per_row)
-                };
+                output[r0] =
+                    unsafe { dot_q8_0_q8_0_neon(rb0, &preq.scales, &preq.quants, blocks_per_row) };
+                output[r1] =
+                    unsafe { dot_q8_0_q8_0_neon(rb1, &preq.scales, &preq.quants, blocks_per_row) };
             }
             // Handle odd trailing row
-            if rows % 2 != 0 {
+            if rows & 1 != 0 {
                 let row = rows - 1;
                 let start = row * bytes_per_row;
                 let row_bytes = &weight_data[start..start + bytes_per_row];

@@ -806,3 +806,55 @@ Baseline model: SmolLM2-135M-Instruct Q8_0 (138MB, 30 layers, dim=576).
 | Decode (256 tok) | 35.6 |
 | Sustained (512 tok) | **33.7** |
 
+### 2026-04-14 12:52 — `1d11b8c Fix rustfmt`
+
+**Hardware:** Apple M5 Pro, ARM64 (NEON SIMD)  
+**Model:** Llama, ~162M params, 30 layers, dim=576  
+**Load time:** 0.10s
+
+| Metric | tok/s |
+|---|---|
+| Decode (16 tok) | 232.4 |
+| Decode (64 tok) | 231.6 |
+| Decode (256 tok) | 206.2 |
+| Sustained (512 tok) | **176.0** |
+
+### 2026-04-14 12:52 — `1d11b8c Fix rustfmt`
+
+**Hardware:** Apple M5 Pro, ARM64 (NEON SIMD)  
+**Model:** Llama, ~1498M params, 16 layers, dim=2048  
+**Load time:** 0.88s
+
+| Metric | tok/s |
+|---|---|
+| Decode (16 tok) | 37.2 |
+| Decode (64 tok) | 38.1 |
+| Decode (256 tok) | 33.6 |
+| Sustained (512 tok) | **34.1** |
+
+### 2026-04-14 16:00 — `2d2d415 Merge pull request #434 from sauravpanda/optimize-q8-matv...`
+
+**Hardware:** Apple M5 Pro, ARM64 (NEON SIMD)  
+**Model:** Llama, ~1498M params, 16 layers, dim=2048  
+**Load time:** 0.90s
+
+| Metric | tok/s |
+|---|---|
+| Decode (16 tok) | 28.4 |
+| Decode (64 tok) | 45.1 |
+| Decode (256 tok) | 40.9 |
+| Sustained (512 tok) | **34.3** |
+
+### 2026-04-14 16:00 — `2d2d415 Merge pull request #434 from sauravpanda/optimize-q8-matv...`
+
+**Hardware:** Apple M5 Pro, ARM64 (NEON SIMD)  
+**Model:** Llama, ~162M params, 30 layers, dim=576  
+**Load time:** 0.10s
+
+| Metric | tok/s |
+|---|---|
+| Decode (16 tok) | 222.5 |
+| Decode (64 tok) | 221.4 |
+| Decode (256 tok) | 195.0 |
+| Sustained (512 tok) | **170.4** |
+
