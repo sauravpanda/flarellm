@@ -624,3 +624,55 @@ Baseline model: SmolLM2-135M-Instruct Q8_0 (138MB, 30 layers, dim=576).
 | Decode (256 tok) | 181.5 |
 | Sustained (512 tok) | **156.5** |
 
+### 2026-04-13 19:05 — `8a123d5 Merge pull request #413 from sauravpanda/optimize-q8-matv...`
+
+**Hardware:** Apple M5 Pro, ARM64 (NEON SIMD)  
+**Model:** Llama, ~1498M params, 16 layers, dim=2048  
+**Load time:** 0.88s
+
+| Metric | tok/s |
+|---|---|
+| Decode (16 tok) | 30.8 |
+| Decode (64 tok) | 30.4 |
+| Decode (256 tok) | 29.5 |
+| Sustained (512 tok) | **28.4** |
+
+### 2026-04-13 19:05 — `8a123d5 Merge pull request #413 from sauravpanda/optimize-q8-matv...`
+
+**Hardware:** Apple M5 Pro, ARM64 (NEON SIMD)  
+**Model:** Llama, ~162M params, 30 layers, dim=576  
+**Load time:** 0.11s
+
+| Metric | tok/s |
+|---|---|
+| Decode (16 tok) | 165.9 |
+| Decode (64 tok) | 220.4 |
+| Decode (256 tok) | 185.1 |
+| Sustained (512 tok) | **156.9** |
+
+### 2026-04-13 19:25 — `8b28359 Use Q8_0 for output projection matvec to reduce memory ba...`
+
+**Hardware:** Apple M5 Pro, ARM64 (NEON SIMD)  
+**Model:** Llama, ~1498M params, 16 layers, dim=2048  
+**Load time:** 0.98s
+
+| Metric | tok/s |
+|---|---|
+| Decode (16 tok) | 33.0 |
+| Decode (64 tok) | 32.5 |
+| Decode (256 tok) | 31.3 |
+| Sustained (512 tok) | **28.6** |
+
+### 2026-04-13 19:25 — `8b28359 Use Q8_0 for output projection matvec to reduce memory ba...`
+
+**Hardware:** Apple M5 Pro, ARM64 (NEON SIMD)  
+**Model:** Llama, ~162M params, 30 layers, dim=576  
+**Load time:** 0.11s
+
+| Metric | tok/s |
+|---|---|
+| Decode (16 tok) | 214.0 |
+| Decode (64 tok) | 208.8 |
+| Decode (256 tok) | 186.6 |
+| Sustained (512 tok) | **165.5** |
+

@@ -1668,9 +1668,10 @@ impl Model {
         // (e.g. 128K vocab × 2048 dim × 4 bytes > 1GB), so bypass the backend.
         // When raw Q8_0 output weight is available, use Q8_0 path for ~4x bandwidth
         // reduction on the largest single matvec in the model.
-        let use_output_q8 = self.raw_output_weight.as_ref().is_some_and(|rw| {
-            rw.format == WeightFormat::Q8_0 && dim >= 1024
-        });
+        let use_output_q8 = self
+            .raw_output_weight
+            .as_ref()
+            .is_some_and(|rw| rw.format == WeightFormat::Q8_0 && dim >= 1024);
         let mut logits = if use_output_q8 {
             let row = self.raw_output_weight.as_ref().unwrap();
             let preq = quantize_input_q8_0(&normed_final);
@@ -2704,7 +2705,11 @@ pub struct QuantizedInput {
 /// `matvec_q8_0_preq_into` calls with the same input vector.
 pub fn quantize_input_q8_0(input: &[f32]) -> QuantizedInput {
     let cols = input.len();
-    debug_assert_eq!(cols % Q8_0_BLOCK_SIZE, 0, "input length must be multiple of 32");
+    debug_assert_eq!(
+        cols % Q8_0_BLOCK_SIZE,
+        0,
+        "input length must be multiple of 32"
+    );
     let blocks_per_row = cols / Q8_0_BLOCK_SIZE;
 
     #[cfg(target_arch = "aarch64")]
@@ -2720,7 +2725,11 @@ pub fn quantize_input_q8_0(input: &[f32]) -> QuantizedInput {
             scales.push(scale);
             quants[start..start + Q8_0_BLOCK_SIZE].copy_from_slice(&block_quants);
         }
-        QuantizedInput { scales, quants, blocks_per_row }
+        QuantizedInput {
+            scales,
+            quants,
+            blocks_per_row,
+        }
     }
 
     #[cfg(not(target_arch = "aarch64"))]
@@ -2738,7 +2747,11 @@ pub fn quantize_input_q8_0(input: &[f32]) -> QuantizedInput {
                 quants[start + j] = (block[j] * id).round() as i8;
             }
         }
-        QuantizedInput { scales, quants, blocks_per_row }
+        QuantizedInput {
+            scales,
+            quants,
+            blocks_per_row,
+        }
     }
 }
 
@@ -2748,7 +2761,11 @@ pub fn quantize_input_q8_0(input: &[f32]) -> QuantizedInput {
 /// Vecs to avoid heap allocation on the hot path.
 pub fn quantize_input_q8_0_into(input: &[f32], preq: &mut QuantizedInput) {
     let cols = input.len();
-    debug_assert_eq!(cols % Q8_0_BLOCK_SIZE, 0, "input length must be multiple of 32");
+    debug_assert_eq!(
+        cols % Q8_0_BLOCK_SIZE,
+        0,
+        "input length must be multiple of 32"
+    );
     let blocks_per_row = cols / Q8_0_BLOCK_SIZE;
     preq.blocks_per_row = blocks_per_row;
     preq.scales.resize(blocks_per_row, 0.0);
@@ -2999,7 +3016,11 @@ unsafe fn dot_q8_0_q8_0_neon(
 
         let sum0 = vaddq_s32(
             ggml_vdotq_s32(vdupq_n_s32(0), vld1q_s8(w_qs0), vld1q_s8(i_qs0)),
-            ggml_vdotq_s32(vdupq_n_s32(0), vld1q_s8(w_qs0.add(16)), vld1q_s8(i_qs0.add(16))),
+            ggml_vdotq_s32(
+                vdupq_n_s32(0),
+                vld1q_s8(w_qs0.add(16)),
+                vld1q_s8(i_qs0.add(16)),
+            ),
         );
         sumv0 = vmlaq_n_f32(sumv0, vcvtq_f32_s32(sum0), combined_scale0);
 
@@ -3012,7 +3033,11 @@ unsafe fn dot_q8_0_q8_0_neon(
 
         let sum1 = vaddq_s32(
             ggml_vdotq_s32(vdupq_n_s32(0), vld1q_s8(w_qs1), vld1q_s8(i_qs1)),
-            ggml_vdotq_s32(vdupq_n_s32(0), vld1q_s8(w_qs1.add(16)), vld1q_s8(i_qs1.add(16))),
+            ggml_vdotq_s32(
+                vdupq_n_s32(0),
+                vld1q_s8(w_qs1.add(16)),
+                vld1q_s8(i_qs1.add(16)),
+            ),
         );
         sumv1 = vmlaq_n_f32(sumv1, vcvtq_f32_s32(sum1), combined_scale1);
 
@@ -3025,7 +3050,11 @@ unsafe fn dot_q8_0_q8_0_neon(
 
         let sum2 = vaddq_s32(
             ggml_vdotq_s32(vdupq_n_s32(0), vld1q_s8(w_qs2), vld1q_s8(i_qs2)),
-            ggml_vdotq_s32(vdupq_n_s32(0), vld1q_s8(w_qs2.add(16)), vld1q_s8(i_qs2.add(16))),
+            ggml_vdotq_s32(
+                vdupq_n_s32(0),
+                vld1q_s8(w_qs2.add(16)),
+                vld1q_s8(i_qs2.add(16)),
+            ),
         );
         sumv2 = vmlaq_n_f32(sumv2, vcvtq_f32_s32(sum2), combined_scale2);
 
@@ -3038,7 +3067,11 @@ unsafe fn dot_q8_0_q8_0_neon(
 
         let sum3 = vaddq_s32(
             ggml_vdotq_s32(vdupq_n_s32(0), vld1q_s8(w_qs3), vld1q_s8(i_qs3)),
-            ggml_vdotq_s32(vdupq_n_s32(0), vld1q_s8(w_qs3.add(16)), vld1q_s8(i_qs3.add(16))),
+            ggml_vdotq_s32(
+                vdupq_n_s32(0),
+                vld1q_s8(w_qs3.add(16)),
+                vld1q_s8(i_qs3.add(16)),
+            ),
         );
         sumv3 = vmlaq_n_f32(sumv3, vcvtq_f32_s32(sum3), combined_scale3);
     }
@@ -3054,7 +3087,11 @@ unsafe fn dot_q8_0_q8_0_neon(
 
         let sum = vaddq_s32(
             ggml_vdotq_s32(vdupq_n_s32(0), vld1q_s8(w_qs), vld1q_s8(i_qs)),
-            ggml_vdotq_s32(vdupq_n_s32(0), vld1q_s8(w_qs.add(16)), vld1q_s8(i_qs.add(16))),
+            ggml_vdotq_s32(
+                vdupq_n_s32(0),
+                vld1q_s8(w_qs.add(16)),
+                vld1q_s8(i_qs.add(16)),
+            ),
         );
         sumv0 = vmlaq_n_f32(sumv0, vcvtq_f32_s32(sum), combined_scale);
     }
@@ -3956,7 +3993,7 @@ pub fn matvec_q8_0_preq_into(
         if total_work >= 2_000_000 {
             use rayon::prelude::*;
             const CHUNK_ROWS: usize = 64;
-        output
+            output
                 .par_chunks_mut(CHUNK_ROWS)
                 .enumerate()
                 .for_each(|(chunk_idx, chunk)| {
