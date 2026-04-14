@@ -19,6 +19,15 @@ log = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 
-# Native multi-threading via rayon. Disabled on wasm32 (no threads).
+[features]
+default = []
+# Enable multi-threaded WASM inference via SharedArrayBuffer + wasm-bindgen-rayon.
+# Requires COOP/COEP headers on the serving page. Not all deployments support this.
+wasm_threads = ["rayon"]
+
+# Native multi-threading via rayon. Disabled on wasm32 (no threads) unless wasm_threads is enabled.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 rayon = "1.10"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+rayon = { version = "1.10", optional = true }
