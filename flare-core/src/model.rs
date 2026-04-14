@@ -2017,7 +2017,7 @@ pub fn matvec_scalar(mat: &[f32], vec: &[f32], rows: usize, cols: usize) -> Vec<
 /// Ternary weight encoding (2 bits per weight, 4 weights per byte):
 ///   00 = 0, 01 = +1, 10 = -1, 11 = unused/reserved
 ///
-/// Weights are packed LSB-first: bits [1:0] = weight 0, bits [3:2] = weight 1, etc.
+/// Weights are packed LSB-first: bits \[1:0\] = weight 0, bits \[3:2\] = weight 1, etc.
 ///
 /// Pack an f32 weight slice into ternary 2-bit encoding (4 weights per byte).
 ///
