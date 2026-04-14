@@ -6033,40 +6033,45 @@ pub fn matvec_q4k_into(
     let blocks_per_row = cols / Q4K_BLOCK_VALUES;
     let bytes_per_row = blocks_per_row * Q4K_BLOCK_BYTES;
 
-    let total_work = rows * cols;
-    if total_work >= 2_000_000 {
-        use rayon::prelude::*;
-        const CHUNK_ROWS: usize = 32;
-        output
-            .par_chunks_mut(CHUNK_ROWS)
-            .enumerate()
-            .for_each(|(chunk_idx, chunk)| {
-                for (local_idx, out) in chunk.iter_mut().enumerate() {
-                    let row = chunk_idx * CHUNK_ROWS + local_idx;
-                    let start = row * bytes_per_row;
-                    let row_bytes = &weight_data[start..start + bytes_per_row];
-                    #[cfg(target_arch = "aarch64")]
-                    {
-                        *out = unsafe { dot_q4k_f32_neon(row_bytes, input, blocks_per_row) };
+    let _total_work = rows * cols;
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        if _total_work >= 2_000_000 {
+            use rayon::prelude::*;
+            const CHUNK_ROWS: usize = 32;
+            output
+                .par_chunks_mut(CHUNK_ROWS)
+                .enumerate()
+                .for_each(|(chunk_idx, chunk)| {
+                    for (local_idx, out) in chunk.iter_mut().enumerate() {
+                        let row = chunk_idx * CHUNK_ROWS + local_idx;
+                        let start = row * bytes_per_row;
+                        let row_bytes = &weight_data[start..start + bytes_per_row];
+                        #[cfg(target_arch = "aarch64")]
+                        {
+                            *out =
+                                unsafe { dot_q4k_f32_neon(row_bytes, input, blocks_per_row) };
+                        }
+                        #[cfg(not(target_arch = "aarch64"))]
+                        {
+                            *out = dot_q4k_f32_scalar(row_bytes, input, blocks_per_row);
+                        }
                     }
-                    #[cfg(not(target_arch = "aarch64"))]
-                    {
-                        *out = dot_q4k_f32_scalar(row_bytes, input, blocks_per_row);
-                    }
-                }
-            });
-    } else {
-        for (i, out) in output.iter_mut().enumerate() {
-            let start = i * bytes_per_row;
-            let row_bytes = &weight_data[start..start + bytes_per_row];
-            #[cfg(target_arch = "aarch64")]
-            {
-                *out = unsafe { dot_q4k_f32_neon(row_bytes, input, blocks_per_row) };
-            }
-            #[cfg(not(target_arch = "aarch64"))]
-            {
-                *out = dot_q4k_f32_scalar(row_bytes, input, blocks_per_row);
-            }
+                });
+            return;
+        }
+    }
+    // Sequential fallback (used on wasm32 always, native when below threshold)
+    for (i, out) in output.iter_mut().enumerate() {
+        let start = i * bytes_per_row;
+        let row_bytes = &weight_data[start..start + bytes_per_row];
+        #[cfg(target_arch = "aarch64")]
+        {
+            *out = unsafe { dot_q4k_f32_neon(row_bytes, input, blocks_per_row) };
+        }
+        #[cfg(not(target_arch = "aarch64"))]
+        {
+            *out = dot_q4k_f32_scalar(row_bytes, input, blocks_per_row);
         }
     }
 }
