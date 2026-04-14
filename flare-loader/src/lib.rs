@@ -16,6 +16,7 @@
 //! ```
 
 pub mod gguf;
+pub mod lora;
 pub mod progressive;
 pub mod quantize;
 pub mod safetensors;
@@ -23,6 +24,7 @@ pub mod tokenizer;
 pub mod weights;
 
 pub use gguf::{GgufError, GgufFile};
+pub use lora::load_lora_from_safetensors;
 pub use quantize::QuantFormat;
 pub use safetensors::{SafeTensorsError, SafeTensorsFile};
 pub use weights::{
