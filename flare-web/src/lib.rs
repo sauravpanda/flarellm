@@ -44,6 +44,20 @@ pub fn start() {
     console_error_panic_hook::set_once();
 }
 
+/// Initialize the rayon thread pool for multi-threaded WASM inference.
+///
+/// Call this once after WASM init with the desired number of threads
+/// (typically `navigator.hardwareConcurrency`). Requires the page to be served
+/// with COOP/COEP headers for SharedArrayBuffer access.
+///
+/// Only available when built with `--features wasm_threads`.
+#[cfg(feature = "wasm_threads")]
+#[wasm_bindgen]
+pub fn init_thread_pool(num_threads: usize) -> Result<(), JsValue> {
+    wasm_bindgen_rayon::init_thread_pool(num_threads);
+    Ok(())
+}
+
 /// Check if WebGPU is available in the current browser.
 #[wasm_bindgen]
 pub fn webgpu_available() -> bool {

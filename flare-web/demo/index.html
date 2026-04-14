@@ -3,6 +3,10 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <!-- COOP/COEP headers required for SharedArrayBuffer (multi-threaded WASM).
+       These can also be set via HTTP response headers on the server. -->
+  <meta http-equiv="Cross-Origin-Opener-Policy" content="same-origin">
+  <meta http-equiv="Cross-Origin-Embedder-Policy" content="require-corp">
   <title>Flare LLM Browser Demo</title>
   <style>
     :root {
@@ -172,7 +176,7 @@
   <script type="module">
     import init, {
       FlareEngine, FlareProgressiveLoader, FlareTokenizer,
-      webgpu_available
+      webgpu_available, init_thread_pool
     } from '../pkg/flare_web.js';
 
     const $ = id => document.getElementById(id);
@@ -394,8 +398,22 @@
     async function startWasm() {
       try {
         await init();
+
+        // Initialize rayon thread pool for multi-threaded inference when
+        // built with --features wasm_threads and SharedArrayBuffer is available.
+        let threadsInfo = '';
+        if (typeof init_thread_pool === 'function' && typeof SharedArrayBuffer !== 'undefined') {
+          const numThreads = navigator.hardwareConcurrency || 4;
+          try {
+            await init_thread_pool(numThreads);
+            threadsInfo = ` | Threads: ${numThreads}`;
+          } catch (e) {
+            console.warn('Thread pool init failed (COOP/COEP headers may be missing):', e);
+          }
+        }
+
         $status.textContent = 'WASM module loaded. Ready.';
-        $env.textContent = `WebGPU: ${webgpu_available() ? 'yes' : 'no'}`;
+        $env.textContent = `WebGPU: ${webgpu_available() ? 'yes' : 'no'}${threadsInfo}`;
         [$fileInput, $urlInput, $urlLoad, $tokFileIn, $tokUrlIn, $tokUrlLoad]
           .forEach(el => { el.disabled = false; });
       } catch (err) {

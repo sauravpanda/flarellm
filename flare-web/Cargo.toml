@@ -43,3 +43,10 @@ serde_json = { workspace = true }
 log = { workspace = true }
 thiserror = { workspace = true }
 console_error_panic_hook = "0.1"
+wasm-bindgen-rayon = { version = "1.2", optional = true }
+
+[features]
+default = []
+# Enable multi-threaded WASM inference via SharedArrayBuffer.
+# Requires COOP/COEP headers. Build: wasm-pack build flare-web --target web --features wasm_threads
+wasm_threads = ["wasm-bindgen-rayon", "flare-core/wasm_threads"]
