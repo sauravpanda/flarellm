@@ -32,7 +32,14 @@ impl GpuKvCache {
         num_kv_heads: usize,
         head_dim: usize,
     ) -> Self {
-        Self::new_impl(device, num_layers, max_seq_len, num_kv_heads, head_dim, false)
+        Self::new_impl(
+            device,
+            num_layers,
+            max_seq_len,
+            num_kv_heads,
+            head_dim,
+            false,
+        )
     }
 
     /// Allocate GPU buffers for `num_layers` layers, zeroed, using f16 storage.
@@ -48,7 +55,14 @@ impl GpuKvCache {
         num_kv_heads: usize,
         head_dim: usize,
     ) -> Self {
-        Self::new_impl(device, num_layers, max_seq_len, num_kv_heads, head_dim, true)
+        Self::new_impl(
+            device,
+            num_layers,
+            max_seq_len,
+            num_kv_heads,
+            head_dim,
+            true,
+        )
     }
 
     fn new_impl(
@@ -146,7 +160,11 @@ impl GpuKvCache {
 
     /// Byte size of one KV element (2 for f16, 4 for f32).
     pub fn elem_size(&self) -> usize {
-        if self.use_f16 { 2 } else { 4 }
+        if self.use_f16 {
+            2
+        } else {
+            4
+        }
     }
 
     /// GPU buffer for layer `layer` keys.

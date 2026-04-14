@@ -1596,171 +1596,170 @@ impl Model {
                     }
                 }
             } else {
-            // Dense FFN path (non-MoE)
+                // Dense FFN path (non-MoE)
 
-            // Prefetch FFN gate/up weights while computing FFN RMSNorm.
-            // The norm is lightweight (~dim FLOPs) and doesn't touch weight
-            // memory, so issuing prefetch hints here lets the memory subsystem
-            // start pulling gate/up data into L2 before the matvec needs it.
-            if use_cpu_q8 {
-                let fused = &self.fused_weights.as_ref().unwrap()[layer_idx];
-                prefetch_weight_bytes(&fused.gate_up_data);
-            } else if self.fused_f32_gate_up.is_some() {
-                prefetch_weight_f32(&self.fused_f32_gate_up.as_ref().unwrap()[layer_idx]);
-            } else {
-                prefetch_weight_f32(layer.w_gate.data());
-            }
-
-            // Gate and up projections
-            let inter_dim = config.intermediate_dim;
-            if use_raw {
-                let rw = &self.raw_weights.as_ref().unwrap()[layer_idx];
-                let gate_tmp = self.backend.batched_dequant_matmul(
-                    &rw.w_gate,
-                    &self.forward_buffers.ffn_normed,
-                    1,
-                );
-                self.forward_buffers.gate.copy_from_slice(&gate_tmp);
-                let up_tmp = self.backend.batched_dequant_matmul(
-                    &rw.w_up,
-                    &self.forward_buffers.ffn_normed,
-                    1,
-                );
-                self.forward_buffers.up.copy_from_slice(&up_tmp);
-            } else if use_cpu_q4k {
-                let rw = &self.raw_weights.as_ref().unwrap()[layer_idx];
-                matvec_q4k_into(
-                    &rw.w_gate.data,
-                    &self.forward_buffers.ffn_normed,
-                    rw.w_gate.num_rows,
-                    dim,
-                    &mut self.forward_buffers.gate,
-                );
-                matvec_q4k_into(
-                    &rw.w_up.data,
-                    &self.forward_buffers.ffn_normed,
-                    rw.w_up.num_rows,
-                    dim,
-                    &mut self.forward_buffers.up,
-                );
-            } else if use_cpu_q8 {
-                quantize_input_q8_0_into(
-                    &self.forward_buffers.ffn_normed,
-                    &mut self.forward_buffers.ffn_normed_q8,
-                );
-                let fused = &self.fused_weights.as_ref().unwrap()[layer_idx];
-                matvec_q8_0_preq_into(
-                    &fused.gate_up_data,
-                    &self.forward_buffers.ffn_normed_q8,
-                    fused.gate_up_rows,
-                    &mut self.forward_buffers.gate_up,
-                );
-                self.forward_buffers
-                    .gate
-                    .copy_from_slice(&self.forward_buffers.gate_up[..inter_dim]);
-                self.forward_buffers
-                    .up
-                    .copy_from_slice(&self.forward_buffers.gate_up[inter_dim..]);
-            } else if let Some(ref fused_gu) = self.fused_f32_gate_up {
-                matvec_into(
-                    &fused_gu[layer_idx],
-                    &self.forward_buffers.ffn_normed,
-                    inter_dim * 2,
-                    dim,
-                    &mut self.forward_buffers.gate_up,
-                );
-                self.forward_buffers
-                    .gate
-                    .copy_from_slice(&self.forward_buffers.gate_up[..inter_dim]);
-                self.forward_buffers
-                    .up
-                    .copy_from_slice(&self.forward_buffers.gate_up[inter_dim..]);
-            } else {
-                matvec_into(
-                    layer.w_gate.data(),
-                    &self.forward_buffers.ffn_normed,
-                    inter_dim,
-                    dim,
-                    &mut self.forward_buffers.gate,
-                );
-                matvec_into(
-                    layer.w_up.data(),
-                    &self.forward_buffers.ffn_normed,
-                    inter_dim,
-                    dim,
-                    &mut self.forward_buffers.up,
-                );
-            }
-
-            // Gemma 2 uses GELU activation; Llama / Phi-3 use SiLU
-            if config.architecture == Architecture::Gemma2 {
-                gelu_mul_into(
-                    &self.forward_buffers.gate,
-                    &self.forward_buffers.up,
-                    &mut self.forward_buffers.ffn_hidden,
-                );
-            } else {
-                silu_mul_into(
-                    &self.forward_buffers.gate,
-                    &self.forward_buffers.up,
-                    &mut self.forward_buffers.ffn_hidden,
-                );
-            }
-
-            // Prefetch next layer's attention weights while the down projection
-            // runs. The down projection is the heaviest single matvec in the FFN
-            // block (intermediate_dim x dim), so there is ample time for the
-            // prefetch to complete before the next layer's QKV matvec begins.
-            if layer_idx + 1 < config.num_layers {
-                let next_layer = &self.weights.layers[layer_idx + 1];
-                prefetch_weight_f32(next_layer.attn_norm.data());
+                // Prefetch FFN gate/up weights while computing FFN RMSNorm.
+                // The norm is lightweight (~dim FLOPs) and doesn't touch weight
+                // memory, so issuing prefetch hints here lets the memory subsystem
+                // start pulling gate/up data into L2 before the matvec needs it.
                 if use_cpu_q8 {
-                    let next_fused = &self.fused_weights.as_ref().unwrap()[layer_idx + 1];
-                    prefetch_weight_bytes(&next_fused.qkv_data);
-                } else if self.fused_f32_qkv.is_some() {
-                    prefetch_weight_f32(&self.fused_f32_qkv.as_ref().unwrap()[layer_idx + 1]);
+                    let fused = &self.fused_weights.as_ref().unwrap()[layer_idx];
+                    prefetch_weight_bytes(&fused.gate_up_data);
+                } else if self.fused_f32_gate_up.is_some() {
+                    prefetch_weight_f32(&self.fused_f32_gate_up.as_ref().unwrap()[layer_idx]);
                 } else {
-                    prefetch_weight_f32(next_layer.wq.data());
+                    prefetch_weight_f32(layer.w_gate.data());
                 }
-            }
 
-            // Down projection
-            if use_raw {
-                let rw = &self.raw_weights.as_ref().unwrap()[layer_idx];
-                let tmp = self.backend.batched_dequant_matmul(
-                    &rw.w_down,
-                    &self.forward_buffers.ffn_hidden,
-                    1,
-                );
-                self.forward_buffers.ffn_out.copy_from_slice(&tmp);
-            } else if use_cpu_q4k {
-                let rw = &self.raw_weights.as_ref().unwrap()[layer_idx];
-                matvec_q4k_into(
-                    &rw.w_down.data,
-                    &self.forward_buffers.ffn_hidden,
-                    rw.w_down.num_rows,
-                    config.intermediate_dim,
-                    &mut self.forward_buffers.ffn_out,
-                );
-            } else if use_cpu_q8 {
-                let rw = &self.raw_weights.as_ref().unwrap()[layer_idx];
-                matvec_q8_0_into(
-                    &rw.w_down.data,
-                    &self.forward_buffers.ffn_hidden,
-                    rw.w_down.num_rows,
-                    config.intermediate_dim,
-                    &mut self.forward_buffers.ffn_out,
-                );
-            } else {
-                matvec_into(
-                    layer.w_down.data(),
-                    &self.forward_buffers.ffn_hidden,
-                    dim,
-                    config.intermediate_dim,
-                    &mut self.forward_buffers.ffn_out,
-                );
-            }
+                // Gate and up projections
+                let inter_dim = config.intermediate_dim;
+                if use_raw {
+                    let rw = &self.raw_weights.as_ref().unwrap()[layer_idx];
+                    let gate_tmp = self.backend.batched_dequant_matmul(
+                        &rw.w_gate,
+                        &self.forward_buffers.ffn_normed,
+                        1,
+                    );
+                    self.forward_buffers.gate.copy_from_slice(&gate_tmp);
+                    let up_tmp = self.backend.batched_dequant_matmul(
+                        &rw.w_up,
+                        &self.forward_buffers.ffn_normed,
+                        1,
+                    );
+                    self.forward_buffers.up.copy_from_slice(&up_tmp);
+                } else if use_cpu_q4k {
+                    let rw = &self.raw_weights.as_ref().unwrap()[layer_idx];
+                    matvec_q4k_into(
+                        &rw.w_gate.data,
+                        &self.forward_buffers.ffn_normed,
+                        rw.w_gate.num_rows,
+                        dim,
+                        &mut self.forward_buffers.gate,
+                    );
+                    matvec_q4k_into(
+                        &rw.w_up.data,
+                        &self.forward_buffers.ffn_normed,
+                        rw.w_up.num_rows,
+                        dim,
+                        &mut self.forward_buffers.up,
+                    );
+                } else if use_cpu_q8 {
+                    quantize_input_q8_0_into(
+                        &self.forward_buffers.ffn_normed,
+                        &mut self.forward_buffers.ffn_normed_q8,
+                    );
+                    let fused = &self.fused_weights.as_ref().unwrap()[layer_idx];
+                    matvec_q8_0_preq_into(
+                        &fused.gate_up_data,
+                        &self.forward_buffers.ffn_normed_q8,
+                        fused.gate_up_rows,
+                        &mut self.forward_buffers.gate_up,
+                    );
+                    self.forward_buffers
+                        .gate
+                        .copy_from_slice(&self.forward_buffers.gate_up[..inter_dim]);
+                    self.forward_buffers
+                        .up
+                        .copy_from_slice(&self.forward_buffers.gate_up[inter_dim..]);
+                } else if let Some(ref fused_gu) = self.fused_f32_gate_up {
+                    matvec_into(
+                        &fused_gu[layer_idx],
+                        &self.forward_buffers.ffn_normed,
+                        inter_dim * 2,
+                        dim,
+                        &mut self.forward_buffers.gate_up,
+                    );
+                    self.forward_buffers
+                        .gate
+                        .copy_from_slice(&self.forward_buffers.gate_up[..inter_dim]);
+                    self.forward_buffers
+                        .up
+                        .copy_from_slice(&self.forward_buffers.gate_up[inter_dim..]);
+                } else {
+                    matvec_into(
+                        layer.w_gate.data(),
+                        &self.forward_buffers.ffn_normed,
+                        inter_dim,
+                        dim,
+                        &mut self.forward_buffers.gate,
+                    );
+                    matvec_into(
+                        layer.w_up.data(),
+                        &self.forward_buffers.ffn_normed,
+                        inter_dim,
+                        dim,
+                        &mut self.forward_buffers.up,
+                    );
+                }
 
+                // Gemma 2 uses GELU activation; Llama / Phi-3 use SiLU
+                if config.architecture == Architecture::Gemma2 {
+                    gelu_mul_into(
+                        &self.forward_buffers.gate,
+                        &self.forward_buffers.up,
+                        &mut self.forward_buffers.ffn_hidden,
+                    );
+                } else {
+                    silu_mul_into(
+                        &self.forward_buffers.gate,
+                        &self.forward_buffers.up,
+                        &mut self.forward_buffers.ffn_hidden,
+                    );
+                }
+
+                // Prefetch next layer's attention weights while the down projection
+                // runs. The down projection is the heaviest single matvec in the FFN
+                // block (intermediate_dim x dim), so there is ample time for the
+                // prefetch to complete before the next layer's QKV matvec begins.
+                if layer_idx + 1 < config.num_layers {
+                    let next_layer = &self.weights.layers[layer_idx + 1];
+                    prefetch_weight_f32(next_layer.attn_norm.data());
+                    if use_cpu_q8 {
+                        let next_fused = &self.fused_weights.as_ref().unwrap()[layer_idx + 1];
+                        prefetch_weight_bytes(&next_fused.qkv_data);
+                    } else if self.fused_f32_qkv.is_some() {
+                        prefetch_weight_f32(&self.fused_f32_qkv.as_ref().unwrap()[layer_idx + 1]);
+                    } else {
+                        prefetch_weight_f32(next_layer.wq.data());
+                    }
+                }
+
+                // Down projection
+                if use_raw {
+                    let rw = &self.raw_weights.as_ref().unwrap()[layer_idx];
+                    let tmp = self.backend.batched_dequant_matmul(
+                        &rw.w_down,
+                        &self.forward_buffers.ffn_hidden,
+                        1,
+                    );
+                    self.forward_buffers.ffn_out.copy_from_slice(&tmp);
+                } else if use_cpu_q4k {
+                    let rw = &self.raw_weights.as_ref().unwrap()[layer_idx];
+                    matvec_q4k_into(
+                        &rw.w_down.data,
+                        &self.forward_buffers.ffn_hidden,
+                        rw.w_down.num_rows,
+                        config.intermediate_dim,
+                        &mut self.forward_buffers.ffn_out,
+                    );
+                } else if use_cpu_q8 {
+                    let rw = &self.raw_weights.as_ref().unwrap()[layer_idx];
+                    matvec_q8_0_into(
+                        &rw.w_down.data,
+                        &self.forward_buffers.ffn_hidden,
+                        rw.w_down.num_rows,
+                        config.intermediate_dim,
+                        &mut self.forward_buffers.ffn_out,
+                    );
+                } else {
+                    matvec_into(
+                        layer.w_down.data(),
+                        &self.forward_buffers.ffn_hidden,
+                        dim,
+                        config.intermediate_dim,
+                        &mut self.forward_buffers.ffn_out,
+                    );
+                }
             } // end dense FFN path
 
             // Gemma 2: apply post-FFN RMSNorm before the residual add
@@ -2045,52 +2044,53 @@ impl Model {
                         vec![0.0f32; seq_len * dim]
                     }
                 } else {
-                // Dense FFN path (non-MoE)
+                    // Dense FFN path (non-MoE)
 
-                // Single batched dispatch for gate and up projections.
-                let gate_batch = if use_raw {
-                    let rw = &self.raw_weights.as_ref().unwrap()[layer_idx];
-                    self.backend
-                        .batched_dequant_matmul(&rw.w_gate, &normed_batch2, seq_len)
-                } else {
-                    let w_gate: Vec<f32> = self.weights.layers[layer_idx].w_gate.data().to_vec();
-                    self.backend
-                        .batched_matmul(&w_gate, &normed_batch2, inter, dim, seq_len)
-                };
-                let up_batch = if use_raw {
-                    let rw = &self.raw_weights.as_ref().unwrap()[layer_idx];
-                    self.backend
-                        .batched_dequant_matmul(&rw.w_up, &normed_batch2, seq_len)
-                } else {
-                    let w_up: Vec<f32> = self.weights.layers[layer_idx].w_up.data().to_vec();
-                    self.backend
-                        .batched_matmul(&w_up, &normed_batch2, inter, dim, seq_len)
-                };
+                    // Single batched dispatch for gate and up projections.
+                    let gate_batch = if use_raw {
+                        let rw = &self.raw_weights.as_ref().unwrap()[layer_idx];
+                        self.backend
+                            .batched_dequant_matmul(&rw.w_gate, &normed_batch2, seq_len)
+                    } else {
+                        let w_gate: Vec<f32> =
+                            self.weights.layers[layer_idx].w_gate.data().to_vec();
+                        self.backend
+                            .batched_matmul(&w_gate, &normed_batch2, inter, dim, seq_len)
+                    };
+                    let up_batch = if use_raw {
+                        let rw = &self.raw_weights.as_ref().unwrap()[layer_idx];
+                        self.backend
+                            .batched_dequant_matmul(&rw.w_up, &normed_batch2, seq_len)
+                    } else {
+                        let w_up: Vec<f32> = self.weights.layers[layer_idx].w_up.data().to_vec();
+                        self.backend
+                            .batched_matmul(&w_up, &normed_batch2, inter, dim, seq_len)
+                    };
 
-                // Per-token silu_mul / gelu_mul (CPU arithmetic, no GPU dispatch).
-                let ffn_hidden_batch: Vec<f32> = (0..seq_len)
-                    .flat_map(|t| {
-                        let gate_t = &gate_batch[t * inter..(t + 1) * inter];
-                        let up_t = &up_batch[t * inter..(t + 1) * inter];
-                        if config.architecture == Architecture::Gemma2 {
-                            gelu_mul_cpu(gate_t, up_t)
-                        } else {
-                            self.backend.silu_mul_vec(gate_t, up_t)
-                        }
-                    })
-                    .collect();
+                    // Per-token silu_mul / gelu_mul (CPU arithmetic, no GPU dispatch).
+                    let ffn_hidden_batch: Vec<f32> = (0..seq_len)
+                        .flat_map(|t| {
+                            let gate_t = &gate_batch[t * inter..(t + 1) * inter];
+                            let up_t = &up_batch[t * inter..(t + 1) * inter];
+                            if config.architecture == Architecture::Gemma2 {
+                                gelu_mul_cpu(gate_t, up_t)
+                            } else {
+                                self.backend.silu_mul_vec(gate_t, up_t)
+                            }
+                        })
+                        .collect();
 
-                // Single batched dispatch for the down projection.
-                if use_raw {
-                    let rw = &self.raw_weights.as_ref().unwrap()[layer_idx];
-                    self.backend
-                        .batched_dequant_matmul(&rw.w_down, &ffn_hidden_batch, seq_len)
-                } else {
-                    let w_down: Vec<f32> = self.weights.layers[layer_idx].w_down.data().to_vec();
-                    self.backend
-                        .batched_matmul(&w_down, &ffn_hidden_batch, dim, inter, seq_len)
-                }
-
+                    // Single batched dispatch for the down projection.
+                    if use_raw {
+                        let rw = &self.raw_weights.as_ref().unwrap()[layer_idx];
+                        self.backend
+                            .batched_dequant_matmul(&rw.w_down, &ffn_hidden_batch, seq_len)
+                    } else {
+                        let w_down: Vec<f32> =
+                            self.weights.layers[layer_idx].w_down.data().to_vec();
+                        self.backend
+                            .batched_matmul(&w_down, &ffn_hidden_batch, dim, inter, seq_len)
+                    }
                 }; // end dense FFN / MoE branch
 
                 for t in 0..seq_len {
@@ -8259,7 +8259,10 @@ mod tests {
         assert_eq!(weights.len(), 2);
         // Weights should sum to 1.0
         let sum: f32 = weights.iter().sum();
-        assert!((sum - 1.0).abs() < 1e-5, "weights should sum to 1, got {sum}");
+        assert!(
+            (sum - 1.0).abs() < 1e-5,
+            "weights should sum to 1, got {sum}"
+        );
         // First weight should be larger (higher logit)
         assert!(weights[0] > weights[1]);
     }
@@ -8323,9 +8326,7 @@ mod tests {
         let num_experts = 2;
         let num_active = 1;
 
-        let gate_data: Vec<f32> = (0..num_experts * dim)
-            .map(|i| (i as f32) * 0.1)
-            .collect();
+        let gate_data: Vec<f32> = (0..num_experts * dim).map(|i| (i as f32) * 0.1).collect();
         let gate = Tensor::from_vec(gate_data, &[num_experts * dim]).unwrap();
 
         let experts: Vec<ExpertWeights> = (0..num_experts)

@@ -57,7 +57,8 @@ const PREFILL_ATTENTION_SHADER: &str = include_str!("../shaders/prefill_attentio
 const DEQUANT_Q3K_SHADER: &str = include_str!("../shaders/dequant_q3k.wgsl");
 const ATTENTION_SUBGROUP_SHADER: &str = include_str!("../shaders/attention_subgroup.wgsl");
 const BATCHED_MATVEC_SHADER: &str = include_str!("../shaders/batched_matvec.wgsl");
-const BATCHED_MATVEC_SUBGROUP_SHADER: &str = include_str!("../shaders/batched_matvec_subgroup.wgsl");
+const BATCHED_MATVEC_SUBGROUP_SHADER: &str =
+    include_str!("../shaders/batched_matvec_subgroup.wgsl");
 const BATCHED_RMSNORM_SHADER: &str = include_str!("../shaders/batched_rmsnorm.wgsl");
 const BATCHED_ROPE_SHADER: &str = include_str!("../shaders/batched_rope.wgsl");
 const ADD_RESIDUAL_SHADER: &str = include_str!("../shaders/add_residual.wgsl");
@@ -3466,7 +3467,7 @@ impl WebGpuBackend {
 
                 pass.set_pipeline(&cached.pipeline);
                 pass.set_bind_group(0, &bind_group, &[]);
-                let workgroups = ((count as u32) + 255) / 256;
+                let workgroups = (count as u32).div_ceil(256);
                 pass.dispatch_workgroups(workgroups, 1, 1);
             },
         );
@@ -4589,9 +4590,21 @@ impl ComputeBackend for WebGpuBackend {
                 (num_layers * max_seq_len * num_kv_heads * head_dim * 2 * 2) as f64
                     / (1024.0 * 1024.0),
             );
-            GpuKvCache::new_f16(&self.device, num_layers, max_seq_len, num_kv_heads, head_dim)
+            GpuKvCache::new_f16(
+                &self.device,
+                num_layers,
+                max_seq_len,
+                num_kv_heads,
+                head_dim,
+            )
         } else {
-            GpuKvCache::new(&self.device, num_layers, max_seq_len, num_kv_heads, head_dim)
+            GpuKvCache::new(
+                &self.device,
+                num_layers,
+                max_seq_len,
+                num_kv_heads,
+                head_dim,
+            )
         };
         *self
             .gpu_kv_cache
