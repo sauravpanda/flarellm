@@ -702,3 +702,29 @@ Baseline model: SmolLM2-135M-Instruct Q8_0 (138MB, 30 layers, dim=576).
 | Decode (256 tok) | 204.0 |
 | Sustained (512 tok) | **187.2** |
 
+### 2026-04-14 10:59 — `e961f13 Merge pull request #417 from sauravpanda/fuse-qkv-gate-up...`
+
+**Hardware:** Apple M5 Pro, ARM64 (NEON SIMD)  
+**Model:** Llama, ~1498M params, 16 layers, dim=2048  
+**Load time:** 1.24s
+
+| Metric | tok/s |
+|---|---|
+| Decode (16 tok) | 34.1 |
+| Decode (64 tok) | 16.8 |
+| Decode (256 tok) | 29.2 |
+| Sustained (512 tok) | **29.0** |
+
+### 2026-04-14 10:59 — `e961f13 Merge pull request #417 from sauravpanda/fuse-qkv-gate-up...`
+
+**Hardware:** Apple M5 Pro, ARM64 (NEON SIMD)  
+**Model:** Llama, ~162M params, 30 layers, dim=576  
+**Load time:** 0.11s
+
+| Metric | tok/s |
+|---|---|
+| Decode (16 tok) | 216.5 |
+| Decode (64 tok) | 197.1 |
+| Decode (256 tok) | 174.2 |
+| Sustained (512 tok) | **153.5** |
+

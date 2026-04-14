@@ -1068,9 +1068,15 @@ impl Model {
                     fused.qkv_rows,
                     &mut self.forward_buffers.qkv,
                 );
-                self.forward_buffers.q_data.copy_from_slice(&self.forward_buffers.qkv[..q_dim]);
-                self.forward_buffers.k_data.copy_from_slice(&self.forward_buffers.qkv[q_dim..q_dim + kv_dim]);
-                self.forward_buffers.v_data.copy_from_slice(&self.forward_buffers.qkv[q_dim + kv_dim..]);
+                self.forward_buffers
+                    .q_data
+                    .copy_from_slice(&self.forward_buffers.qkv[..q_dim]);
+                self.forward_buffers
+                    .k_data
+                    .copy_from_slice(&self.forward_buffers.qkv[q_dim..q_dim + kv_dim]);
+                self.forward_buffers
+                    .v_data
+                    .copy_from_slice(&self.forward_buffers.qkv[q_dim + kv_dim..]);
             } else if let Some(ref fused_qkv) = self.fused_f32_qkv {
                 matvec_into(
                     &fused_qkv[layer_idx],
@@ -1079,9 +1085,15 @@ impl Model {
                     dim,
                     &mut self.forward_buffers.qkv,
                 );
-                self.forward_buffers.q_data.copy_from_slice(&self.forward_buffers.qkv[..q_dim]);
-                self.forward_buffers.k_data.copy_from_slice(&self.forward_buffers.qkv[q_dim..q_dim + kv_dim]);
-                self.forward_buffers.v_data.copy_from_slice(&self.forward_buffers.qkv[q_dim + kv_dim..]);
+                self.forward_buffers
+                    .q_data
+                    .copy_from_slice(&self.forward_buffers.qkv[..q_dim]);
+                self.forward_buffers
+                    .k_data
+                    .copy_from_slice(&self.forward_buffers.qkv[q_dim..q_dim + kv_dim]);
+                self.forward_buffers
+                    .v_data
+                    .copy_from_slice(&self.forward_buffers.qkv[q_dim + kv_dim..]);
             } else {
                 matvec_into(
                     layer.wq.data(),
@@ -1302,8 +1314,12 @@ impl Model {
                     fused.gate_up_rows,
                     &mut self.forward_buffers.gate_up,
                 );
-                self.forward_buffers.gate.copy_from_slice(&self.forward_buffers.gate_up[..inter_dim]);
-                self.forward_buffers.up.copy_from_slice(&self.forward_buffers.gate_up[inter_dim..]);
+                self.forward_buffers
+                    .gate
+                    .copy_from_slice(&self.forward_buffers.gate_up[..inter_dim]);
+                self.forward_buffers
+                    .up
+                    .copy_from_slice(&self.forward_buffers.gate_up[inter_dim..]);
             } else if let Some(ref fused_gu) = self.fused_f32_gate_up {
                 matvec_into(
                     &fused_gu[layer_idx],
@@ -1312,8 +1328,12 @@ impl Model {
                     dim,
                     &mut self.forward_buffers.gate_up,
                 );
-                self.forward_buffers.gate.copy_from_slice(&self.forward_buffers.gate_up[..inter_dim]);
-                self.forward_buffers.up.copy_from_slice(&self.forward_buffers.gate_up[inter_dim..]);
+                self.forward_buffers
+                    .gate
+                    .copy_from_slice(&self.forward_buffers.gate_up[..inter_dim]);
+                self.forward_buffers
+                    .up
+                    .copy_from_slice(&self.forward_buffers.gate_up[inter_dim..]);
             } else {
                 matvec_into(
                     layer.w_gate.data(),
@@ -1949,9 +1969,15 @@ impl Model {
                     fused.qkv_rows,
                     &mut self.forward_buffers.qkv,
                 );
-                self.forward_buffers.q_data.copy_from_slice(&self.forward_buffers.qkv[..q_dim]);
-                self.forward_buffers.k_data.copy_from_slice(&self.forward_buffers.qkv[q_dim..q_dim + kv_dim]);
-                self.forward_buffers.v_data.copy_from_slice(&self.forward_buffers.qkv[q_dim + kv_dim..]);
+                self.forward_buffers
+                    .q_data
+                    .copy_from_slice(&self.forward_buffers.qkv[..q_dim]);
+                self.forward_buffers
+                    .k_data
+                    .copy_from_slice(&self.forward_buffers.qkv[q_dim..q_dim + kv_dim]);
+                self.forward_buffers
+                    .v_data
+                    .copy_from_slice(&self.forward_buffers.qkv[q_dim + kv_dim..]);
             } else if let Some(ref fused_qkv) = self.fused_f32_qkv {
                 matvec_into(
                     &fused_qkv[layer_idx],
@@ -1960,9 +1986,15 @@ impl Model {
                     dim,
                     &mut self.forward_buffers.qkv,
                 );
-                self.forward_buffers.q_data.copy_from_slice(&self.forward_buffers.qkv[..q_dim]);
-                self.forward_buffers.k_data.copy_from_slice(&self.forward_buffers.qkv[q_dim..q_dim + kv_dim]);
-                self.forward_buffers.v_data.copy_from_slice(&self.forward_buffers.qkv[q_dim + kv_dim..]);
+                self.forward_buffers
+                    .q_data
+                    .copy_from_slice(&self.forward_buffers.qkv[..q_dim]);
+                self.forward_buffers
+                    .k_data
+                    .copy_from_slice(&self.forward_buffers.qkv[q_dim..q_dim + kv_dim]);
+                self.forward_buffers
+                    .v_data
+                    .copy_from_slice(&self.forward_buffers.qkv[q_dim + kv_dim..]);
             } else {
                 matvec_into(
                     layer.wq.data(),
@@ -2175,8 +2207,12 @@ impl Model {
                     fused.gate_up_rows,
                     &mut self.forward_buffers.gate_up,
                 );
-                self.forward_buffers.gate.copy_from_slice(&self.forward_buffers.gate_up[..inter_dim]);
-                self.forward_buffers.up.copy_from_slice(&self.forward_buffers.gate_up[inter_dim..]);
+                self.forward_buffers
+                    .gate
+                    .copy_from_slice(&self.forward_buffers.gate_up[..inter_dim]);
+                self.forward_buffers
+                    .up
+                    .copy_from_slice(&self.forward_buffers.gate_up[inter_dim..]);
             } else if let Some(ref fused_gu) = self.fused_f32_gate_up {
                 matvec_into(
                     &fused_gu[layer_idx],
@@ -2185,8 +2221,12 @@ impl Model {
                     dim,
                     &mut self.forward_buffers.gate_up,
                 );
-                self.forward_buffers.gate.copy_from_slice(&self.forward_buffers.gate_up[..inter_dim]);
-                self.forward_buffers.up.copy_from_slice(&self.forward_buffers.gate_up[inter_dim..]);
+                self.forward_buffers
+                    .gate
+                    .copy_from_slice(&self.forward_buffers.gate_up[..inter_dim]);
+                self.forward_buffers
+                    .up
+                    .copy_from_slice(&self.forward_buffers.gate_up[inter_dim..]);
             } else {
                 matvec_into(
                     layer.w_gate.data(),
@@ -4716,6 +4756,7 @@ mod tests {
             for h in 0..num_heads {
                 let kv_head = h / heads_per_kv;
                 let q_offset = h * head_dim;
+                #[allow(clippy::needless_range_loop)]
                 for t in 0..seq_len {
                     let k_offset = t * kv_stride + kv_head * head_dim;
                     let mut dot = 0.0f32;
@@ -4738,6 +4779,7 @@ mod tests {
                     *s *= inv;
                 }
                 let out_off = h * head_dim;
+                #[allow(clippy::needless_range_loop)]
                 for t in 0..seq_len {
                     let w = scores[t];
                     let v_off = t * kv_stride + kv_head * head_dim;
