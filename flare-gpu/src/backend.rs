@@ -55,7 +55,9 @@ const DEQUANT_Q5K_SHADER: &str = include_str!("../shaders/dequant_q5k.wgsl");
 const DEQUANT_Q6K_SHADER: &str = include_str!("../shaders/dequant_q6k.wgsl");
 const PREFILL_ATTENTION_SHADER: &str = include_str!("../shaders/prefill_attention.wgsl");
 const DEQUANT_Q3K_SHADER: &str = include_str!("../shaders/dequant_q3k.wgsl");
+const ATTENTION_SUBGROUP_SHADER: &str = include_str!("../shaders/attention_subgroup.wgsl");
 const BATCHED_MATVEC_SHADER: &str = include_str!("../shaders/batched_matvec.wgsl");
+const BATCHED_MATVEC_SUBGROUP_SHADER: &str = include_str!("../shaders/batched_matvec_subgroup.wgsl");
 const BATCHED_RMSNORM_SHADER: &str = include_str!("../shaders/batched_rmsnorm.wgsl");
 const BATCHED_ROPE_SHADER: &str = include_str!("../shaders/batched_rope.wgsl");
 const ADD_RESIDUAL_SHADER: &str = include_str!("../shaders/add_residual.wgsl");
@@ -177,6 +179,9 @@ pub struct WebGpuBackend {
     /// Pre-allocated intermediate buffers for `forward_single_token_gpu`.
     /// Allocated once when `upload_weights_to_gpu` is called.
     gpu_forward_buffers: Mutex<Option<GpuForwardBuffers>>,
+    /// Whether the GPU adapter supports the `subgroups` feature for
+    /// warp-level SIMT reductions (subgroupAdd, subgroupMax, etc.).
+    has_subgroups: bool,
 }
 
 impl WebGpuBackend {
@@ -215,15 +220,22 @@ impl WebGpuBackend {
             .await
             .ok_or(GpuError::NoAdapter)?;
 
-        // Enable PIPELINE_CACHE if the backend supports it (Vulkan).
-        // On WebGPU / Metal / DX12 the feature flag is absent; requesting an
-        // absent feature is an error, so we check first.
+        // Enable optional features if the backend supports them.
+        // Requesting an absent feature is an error, so we check first.
         let adapter_features = adapter.features();
-        let extra_features = if adapter_features.contains(wgpu::Features::PIPELINE_CACHE) {
-            wgpu::Features::PIPELINE_CACHE
-        } else {
-            wgpu::Features::empty()
-        };
+        let mut extra_features = wgpu::Features::empty();
+
+        if adapter_features.contains(wgpu::Features::PIPELINE_CACHE) {
+            extra_features |= wgpu::Features::PIPELINE_CACHE;
+        }
+
+        // Enable subgroup operations for warp-level reductions in attention
+        // and matmul shaders.  Available on Vulkan, Metal, and Chrome 144+.
+        let has_subgroups = adapter_features.contains(wgpu::Features::SUBGROUP);
+        if has_subgroups {
+            extra_features |= wgpu::Features::SUBGROUP;
+            log::info!("flare-gpu: subgroup operations enabled");
+        }
 
         let (device, queue) = adapter
             .request_device(
@@ -258,6 +270,7 @@ impl WebGpuBackend {
             gpu_kv_cache: Mutex::new(None),
             gpu_weights: Mutex::new(None),
             gpu_forward_buffers: Mutex::new(None),
+            has_subgroups,
         })
     }
 
@@ -389,6 +402,26 @@ impl WebGpuBackend {
             storage_rw_entry(3),
             uniform_entry(4),
         ]
+    }
+
+    /// Returns the attention shader source and pipeline cache key, selecting the
+    /// subgroup-optimized variant when the GPU supports it.
+    fn attention_shader_pair(&self) -> (&'static str, &'static str) {
+        if self.has_subgroups {
+            ("attention_scores_subgroup", ATTENTION_SUBGROUP_SHADER)
+        } else {
+            ("attention_scores", ATTENTION_SHADER)
+        }
+    }
+
+    /// Returns the batched matvec shader source and pipeline cache key, selecting
+    /// the subgroup-optimized variant when the GPU supports it.
+    fn batched_matvec_shader_pair(&self) -> (&'static str, &'static str) {
+        if self.has_subgroups {
+            ("batched_matvec_subgroup", BATCHED_MATVEC_SUBGROUP_SHADER)
+        } else {
+            ("batched_matvec", BATCHED_MATVEC_SHADER)
+        }
     }
 
     /// 5-binding layout for fused kernels with 3 read-only inputs, 1 read-write output, 1 uniform.
@@ -1864,10 +1897,11 @@ impl WebGpuBackend {
                 .get_uniform(&self.device, &self.queue, bytemuck::cast_slice(&params));
 
         let layout_entries = Self::standard_layout();
+        let (mv_name, mv_shader) = self.batched_matvec_shader_pair();
         let result = self.cache.with_pipeline(
             &self.device,
-            "batched_matvec",
-            BATCHED_MATVEC_SHADER,
+            mv_name,
+            mv_shader,
             "batched_matvec",
             &layout_entries,
             |cached| {
@@ -2973,10 +3007,11 @@ impl WebGpuBackend {
         let out_head_size = (head_dim * 4) as u64;
 
         let layout_entries = Self::attention_layout();
+        let (attn_name, attn_shader) = self.attention_shader_pair();
         self.cache.with_pipeline(
             &self.device,
-            "attention_scores",
-            ATTENTION_SHADER,
+            attn_name,
+            attn_shader,
             "attention_scores",
             &layout_entries,
             |cached| {
@@ -3245,10 +3280,11 @@ impl WebGpuBackend {
         let out_head_size = (head_dim * 4) as u64;
 
         let layout_entries = Self::attention_layout();
+        let (attn_name, attn_shader) = self.attention_shader_pair();
         self.cache.with_pipeline(
             &self.device,
-            "attention_scores",
-            ATTENTION_SHADER,
+            attn_name,
+            attn_shader,
             "attention_scores",
             &layout_entries,
             |cached| {
@@ -3749,10 +3785,11 @@ impl WebGpuBackend {
                 let logit_byte_size = (shard_rows * 4) as u64;
 
                 let layout_entries = Self::standard_layout();
+                let (mv_name, mv_shader) = self.batched_matvec_shader_pair();
                 self.cache.with_pipeline(
                     &self.device,
-                    "batched_matvec",
-                    BATCHED_MATVEC_SHADER,
+                    mv_name,
+                    mv_shader,
                     "batched_matvec",
                     &layout_entries,
                     |cached| {
@@ -4175,6 +4212,7 @@ impl ComputeBackend for WebGpuBackend {
         let scale = 1.0_f32 / (head_dim as f32).sqrt();
 
         let layout_entries = Self::attention_layout();
+        let (attn_name, attn_shader) = self.attention_shader_pair();
 
         for h in 0..num_heads {
             let kv_head = h / heads_per_kv;
@@ -4220,8 +4258,8 @@ impl ComputeBackend for WebGpuBackend {
 
             let head_output = self.cache.with_pipeline(
                 &self.device,
-                "attention_scores",
-                ATTENTION_SHADER,
+                attn_name,
+                attn_shader,
                 "attention_scores",
                 &layout_entries,
                 |cached| {
@@ -4339,6 +4377,7 @@ impl ComputeBackend for WebGpuBackend {
         let scale = 1.0_f32 / (head_dim as f32).sqrt();
 
         let layout_entries = Self::attention_layout();
+        let (attn_name, attn_shader) = self.attention_shader_pair();
 
         for h in 0..num_heads {
             let kv_head = h / heads_per_kv;
@@ -4369,8 +4408,8 @@ impl ComputeBackend for WebGpuBackend {
 
             let head_output = self.cache.with_pipeline(
                 &self.device,
-                "attention_scores",
-                ATTENTION_SHADER,
+                attn_name,
+                attn_shader,
                 "attention_scores",
                 &layout_entries,
                 |cached| {
