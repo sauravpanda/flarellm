@@ -1623,33 +1623,65 @@ fn matvec_simd(mat: &[f32], vec: &[f32], rows: usize, cols: usize) -> Vec<f32> {
     output
 }
 
+/// Compute a single row dot product with 4-wide unrolling for auto-vectorization.
+fn matvec_scalar_row(row: &[f32], vec: &[f32], cols: usize) -> f32 {
+    let cols4 = cols & !3;
+    let mut sum0 = 0.0f32;
+    let mut sum1 = 0.0f32;
+    let mut sum2 = 0.0f32;
+    let mut sum3 = 0.0f32;
+
+    let mut j = 0;
+    while j < cols4 {
+        sum0 += row[j] * vec[j];
+        sum1 += row[j + 1] * vec[j + 1];
+        sum2 += row[j + 2] * vec[j + 2];
+        sum3 += row[j + 3] * vec[j + 3];
+        j += 4;
+    }
+    while j < cols {
+        sum0 += row[j] * vec[j];
+        j += 1;
+    }
+    sum0 + sum1 + sum2 + sum3
+}
+
 /// Scalar matvec with 4-wide unrolling for auto-vectorization.
 ///
 /// Always available as a reference implementation for tests, regardless of target.
+/// When the `wasm_threads` feature is enabled on wasm32, rows are processed in
+/// parallel via rayon (backed by SharedArrayBuffer + Web Workers).
 pub fn matvec_scalar(mat: &[f32], vec: &[f32], rows: usize, cols: usize) -> Vec<f32> {
-    let mut output = vec![0.0f32; rows];
-    let cols4 = cols & !3;
+    // Parallel path for wasm32 with wasm_threads feature enabled.
+    #[cfg(all(target_arch = "wasm32", feature = "wasm_threads"))]
+    {
+        const PARALLEL_THRESHOLD: usize = 5_000_000;
+        const CHUNK_ROWS: usize = 64;
+        let total_work = rows * cols;
 
+        if total_work >= PARALLEL_THRESHOLD && rows >= CHUNK_ROWS * 2 {
+            use rayon::prelude::*;
+            let mut output = vec![0.0f32; rows];
+            output
+                .par_chunks_mut(CHUNK_ROWS)
+                .enumerate()
+                .for_each(|(chunk_idx, out_chunk)| {
+                    let row_start = chunk_idx * CHUNK_ROWS;
+                    for (local_i, out) in out_chunk.iter_mut().enumerate() {
+                        let i = row_start + local_i;
+                        let row = &mat[i * cols..i * cols + cols];
+                        *out = matvec_scalar_row(row, vec, cols);
+                    }
+                });
+            return output;
+        }
+    }
+
+    // Sequential path (default for wasm32, or when below parallel threshold).
+    let mut output = vec![0.0f32; rows];
     for (i, out) in output.iter_mut().enumerate() {
         let row = &mat[i * cols..(i + 1) * cols];
-        let mut sum0 = 0.0f32;
-        let mut sum1 = 0.0f32;
-        let mut sum2 = 0.0f32;
-        let mut sum3 = 0.0f32;
-
-        let mut j = 0;
-        while j < cols4 {
-            sum0 += row[j] * vec[j];
-            sum1 += row[j + 1] * vec[j + 1];
-            sum2 += row[j + 2] * vec[j + 2];
-            sum3 += row[j + 3] * vec[j + 3];
-            j += 4;
-        }
-        while j < cols {
-            sum0 += row[j] * vec[j];
-            j += 1;
-        }
-        *out = sum0 + sum1 + sum2 + sum3;
+        *out = matvec_scalar_row(row, vec, cols);
     }
     output
 }
