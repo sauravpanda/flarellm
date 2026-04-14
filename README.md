@@ -6,412 +6,229 @@
 
 A WASM-first LLM inference engine with WebGPU acceleration, built in pure Rust.
 
-Run large language models directly in the browser with zero server costs. Single codebase compiles to both native and WebAssembly.
+Run large language models directly in the browser with zero server costs. Single codebase compiles to both native and WebAssembly — same WGSL shaders, same quantization kernels, same inference pipeline.
 
-**Current performance** (M5 Pro, ARM NEON SIMD + rayon parallelism):
-- SmolLM2-135M Q8_0: **~120 tok/s** decode (was 19 at session start, 6.3x faster)
-- Llama-3.2-1B Q8_0: **~25 tok/s** decode
+## Performance
+
+Benchmarked on Apple M5 Pro, April 2026:
+
+| Model | Flare (native) | llama.cpp | Gap | Browser (est.) |
+|---|---|---|---|---|
+| SmolLM2-135M Q8_0 | **224 tok/s** | 390 tok/s | 1.7x | ~80 tok/s |
+| Llama 3.2 1B Q8_0 | **38 tok/s** | 124 tok/s | 3.2x | ~15 tok/s |
 
 See [`BENCHMARK_HISTORY.md`](BENCHMARK_HISTORY.md) for the full performance log.
 
 ## Why Flare?
 
-- **Privacy**: Data never leaves the user's device
-- **Cost**: No GPU server bills — the user's hardware does the work
-- **Latency**: Zero network round trips, tokens start immediately
-- **Offline**: Works without internet connectivity
-- **Scale**: Millions of concurrent users at CDN cost
+|  | Flare | llama.cpp | WebLLM | Transformers.js |
+|---|---|---|---|---|
+| Browser inference | **Yes** | No | Yes | Yes |
+| Native inference | **Yes** | Yes | No | Via Node |
+| Single codebase | **Yes** | No | No | No |
+| Standard GGUF files | **Yes** | Yes | No (TVM) | No (ONNX) |
+| Pure Rust/WASM | **Yes** | C/C++ | C++ (emscripten) | C++ (ONNX RT) |
+| Progressive loading | **Yes** | No | No | No |
+| Speculative decoding | **Yes** | Yes | No | No |
+| BitNet ternary | **Yes** | Partial | No | No |
+
+### The Browser Advantage
+
+- **Privacy**: Data never leaves the user's device — no server to breach
+- **Cost**: No GPU bills. Your "inference cluster" is every user's device
+- **Latency**: Zero network round trips. Tokens start immediately
+- **Offline**: Works without internet after first model download
+- **Scale**: Millions of concurrent users at CDN cost (~$500/mo vs $50K-500K/mo GPU)
 
 ## Features
 
-- Pure Rust — compiles to native binary and WASM from one codebase
-- WebGPU acceleration via `wgpu` (Vulkan/Metal/DX12 on native, WebGPU in browser)
-- WASM SIMD128 CPU fallback for browsers without WebGPU
-- GGUF and SafeTensors model format support
-- Q4_0, Q8_0, F16, F32 quantization with on-the-fly dequantization
-- Llama/Qwen2/Mistral architecture support
-- Ring-buffer KV cache for memory-efficient generation
-- Greedy, top-k, top-p sampling with temperature and repeat penalty
-- BPE tokenizer compatible with HuggingFace `tokenizer.json`
-- Streaming token generation with callback support
+### Inference Engine
+- 22+ quantization formats: Q4_0–Q8_1, Q2K–Q6K, IQ1S–IQ4XS, BF16, F16, F32, **BitNet ternary**
+- Fused QKV and gate/up projections (43% fewer matvec calls per layer)
+- Online softmax attention (Flash Attention style, single-pass)
+- N-gram speculative decoding (zero memory overhead)
+- KIVI 2-bit KV cache quantization (8x memory savings)
+- Progressive inference — generate with partial model load
+- Greedy fused argmax (skips logits buffer for temperature=0)
+- Zero-allocation forward pass with pre-allocated buffers
+
+### Compute Backends
+- **Apple Accelerate** (macOS) — AMX hardware via `cblas_sgemv`
+- **ARM NEON SIMD** — Q8_0 int8 dot product with inline `sdot` assembly
+- **x86 AVX2/FMA** — auto-detected at runtime
+- **WebGPU** — 37 WGSL shaders, GPU-resident forward pass, fused kernels
+- **WASM SIMD128** — browser CPU fallback
+- **Multi-worker WASM** — parallel matmul via SharedArrayBuffer (opt-in)
+
+### Model Support
+- GGUF and SafeTensors formats
+- Llama, Qwen2, Mistral, Phi-3, Gemma 2 architectures
+- Grouped-query attention (GQA)
+- Ring-buffer KV cache with Q8 and Q2 quantization options
+- BPE tokenizer (HuggingFace `tokenizer.json` compatible)
+- 6 chat templates: Llama3, ChatML, Phi3, Gemma, Alpaca, Raw
+
+### Browser / WASM
+- Progressive model loading with download progress
+- Cache API integration for offline model persistence
+- Streaming token generation with callbacks
+- WebGPU auto-detection with SIMD fallback
+- COOP/COEP headers for SharedArrayBuffer multi-threading
+- Full chat demo with system prompts and performance metrics
 
 ## Quick Start
 
-### Installation
+### Native
 
-Add the umbrella crate to your `Cargo.toml`:
+```bash
+# Clone and build
+git clone https://github.com/sauravpanda/flarellm
+cd flarellm
+cargo build --release
 
-```toml
-[dependencies]
-flarellm = "0.1"
+# Download a small model
+bash scripts/download_baseline_model.sh
+
+# Run benchmark
+cargo run --release --example e2e_bench
+
+# Run with GPU acceleration
+cargo run --release --example e2e_bench -- --gpu
+
+# Run speculative decoding comparison
+cargo run --release --example e2e_bench -- --speculative
 ```
 
-Or pick individual crates:
-
-```toml
-[dependencies]
-flarellm-core = "0.1"     # tensor, model, sampling
-flarellm-loader = "0.1"   # GGUF / SafeTensors loading
-flarellm-gpu = "0.1"      # WebGPU compute backend (optional)
-```
-
-### Load and Run a GGUF Model
+### Rust API
 
 ```rust
-use std::fs::File;
-use std::io::BufReader;
-
 use flare_core::generate::Generator;
 use flare_core::model::Model;
 use flare_core::sampling::SamplingParams;
-use flare_core::tokenizer::{BpeTokenizer, Tokenizer};
 use flare_loader::gguf::GgufFile;
 use flare_loader::weights::load_model_weights;
+use std::io::BufReader;
+use std::fs::File;
 
-fn main() {
-    // Parse GGUF header and extract model config
-    let mut reader = BufReader::new(File::open("model.gguf").unwrap());
-    let gguf = GgufFile::parse_header(&mut reader).unwrap();
-    let config = gguf.to_model_config().unwrap();
-
-    println!("Model: {:?}, {} layers, {} params",
-        config.architecture, config.num_layers, config.estimate_param_count());
-
-    // Load weights (dequantizes Q4/Q8 on the fly)
-    let weights = load_model_weights(&gguf, &mut reader).unwrap();
-    let mut model = Model::new(config, weights);
-
-    // Load tokenizer
-    let tokenizer = BpeTokenizer::from_file("tokenizer.json").unwrap();
-
-    // Encode prompt
-    let prompt_tokens = tokenizer.encode("Once upon a time").unwrap();
-
-    // Generate
-    let params = SamplingParams {
-        temperature: 0.7,
-        top_p: 0.9,
-        ..Default::default()
-    };
-
-    let mut generator = Generator::new(&mut model, params);
-    let generated = generator.generate(
-        &prompt_tokens,
-        128,                        // max tokens
-        tokenizer.eos_token_id(),   // stop on EOS
-        || rand::random::<f32>(),   // RNG
-        |token_id, _step| {
-            // Stream tokens as they arrive
-            print!("{}", tokenizer.decode(&[token_id]).unwrap_or_default());
-            true // continue generating
-        },
-    );
-
-    println!("\n({} tokens generated)", generated.len());
-}
-```
-
-### CLI Usage
-
-```bash
-# Build the CLI
-cargo build --release --bin flare-cli
-
-# Run with a GGUF model
-./target/release/flare-cli model.gguf tokenizer.json --prompt "Explain quantum computing"
-
-# Interactive mode (omit --prompt)
-./target/release/flare-cli model.gguf tokenizer.json
-```
-
-### Browser / npm
-
-The `@aspect/flare` package contains the compiled WASM module and JS glue generated by `wasm-pack`.
-
-```bash
-npm install @aspect/flare
-```
-
-```javascript
-import init, { FlareEngine, FlareProgressiveLoader } from '@aspect/flare';
-
-// Initialise the WASM module once on page load
-await init();
-
-// ── Option A: load from a Uint8Array (e.g. from a file picker) ──────────────
-const buffer = await file.arrayBuffer();
-const engine = FlareEngine.load(new Uint8Array(buffer));
-
-// ── Option B: progressive URL load with download progress ───────────────────
-const loader = new FlareProgressiveLoader('https://example.com/model.gguf');
-const engine = await loader.load((loaded, total) => {
-  const pct = total > 0 ? Math.round((loaded / total) * 100) : 0;
-  progressBar.value = pct / 100;
-  statusText.textContent = `Downloading… ${pct}%`;
-});
-
-// Generate tokens (greedy)
-const promptTokens = new Uint32Array([1]); // BOS token
-const tokens = engine.generate_tokens(promptTokens, 50);
-console.log('Token IDs:', Array.from(tokens));
-
-// Generate with sampling
-const tokens2 = engine.generate_with_params(
-  promptTokens,
-  128,   // max tokens
-  0.7,   // temperature
-  0.9,   // top_p
-);
-```
-
-**Requirements:**
-- Chrome 113+ or Edge 113+ with WebGPU enabled (recommended)
-- Any modern browser with WASM support (SIMD fallback path)
-- Build from source: `wasm-pack build flare-web --target web --out-dir pkg`
-- See `flare-web/demo/index.html` for a complete browser demo
-
-**npm publishing** is automated via `.github/workflows/npm-publish.yml`, which
-triggers on GitHub releases. A dry-run (`npm pack --dry-run`) runs on every PR
-that touches `flare-web/`. To publish, create a GitHub release with a `v*` tag
-and set the `NPM_TOKEN` repository secret.
-
-## Architecture
-
-```
-flare-core        Core inference engine (tensor, model, KV cache, sampling, tokenizer)
-flare-loader      Model loading (GGUF, SafeTensors, quantization, weight mapping)
-flare-gpu         WebGPU/wgpu compute backend + WGSL shaders
-flare-simd        WASM SIMD128 CPU fallback
-flare-web         Browser integration (wasm-bindgen, WebGPU detection)
-flare-server      Native server + CLI binary
-```
-
-### Compute Path Selection
-
-Flare automatically selects the best available compute path:
-
-| Platform | GPU Available | Compute Path |
-|----------|--------------|-------------|
-| Chrome/Firefox | WebGPU | WGSL compute shaders via `wgpu` |
-| Older browsers | No | WASM SIMD128 CPU fallback |
-| macOS/Linux/Windows | Metal/Vulkan/DX12 | Native `wgpu` |
-
-### Supported Model Formats
-
-| Format | Quantizations | Use Case |
-|--------|--------------|----------|
-| **GGUF** | Q4_0, Q8_0, F16, F32 | Primary format, pre-quantized models from HuggingFace |
-| **SafeTensors** | F16, BF16, F32 | Custom fine-tuned models, LoRA adapters |
-
-### Memory Requirements
-
-| Model | Quantization | Weights | KV Cache (2K ctx) | Total |
-|-------|-------------|---------|-------------------|-------|
-| 0.5B | Q4_0 | ~300MB | ~16MB | ~320MB |
-| 1B | Q4_0 | ~500MB | ~32MB | ~540MB |
-| 1.5B | Q4_0 | ~800MB | ~48MB | ~850MB |
-| 3B | Q4_0 | ~1.5GB | ~96MB | ~1.6GB |
-
-## Crate Documentation
-
-### flare-core
-
-The core inference engine. Contains everything needed to run a model once weights are loaded.
-
-#### Tensor
-
-```rust
-use flare_core::tensor::Tensor;
-
-let t = Tensor::zeros(&[2, 3]);           // 2x3 zero tensor
-let t = Tensor::from_vec(data, &[4, 4])?; // from existing data
-t.shape();     // &[2, 3]
-t.data();      // &[f32]
-t.data_mut();  // &mut [f32]
-t.numel();     // 6
-t.reshape(&[3, 2])?;
-```
-
-#### Model Configuration
-
-```rust
-use flare_core::config::ModelConfig;
-
-let config = ModelConfig::default(); // Llama-3.2-1B dimensions
-
-// Memory estimation
-config.estimate_param_count();                  // ~1.2B
-config.estimate_weight_memory(4.0);             // ~600MB at Q4
-config.estimate_kv_cache_memory(2048, 8.0);     // ~64MB at Q8
-```
-
-#### Sampling
-
-```rust
-use flare_core::sampling::*;
-
-let mut logits = vec![1.0, 5.0, 2.0, 0.1];
-
-// Apply transforms
-apply_temperature(&mut logits, 0.7);
-apply_repeat_penalty(&mut logits, &previous_tokens, 1.1);
-
-// Sample
-let token = sample_greedy(&logits);
-let token = sample_top_p(&logits, 0.9, rng_value);
-let token = sample_top_k(&logits, 40, rng_value);
-```
-
-#### KV Cache
-
-Ring-buffer design — fixed memory, no allocations during generation:
-
-```rust
-use flare_core::kv_cache::KvCache;
-
-let mut cache = KvCache::new(
-    num_layers,   // 16
-    max_seq_len,  // 2048
-    num_kv_heads, // 8
-    head_dim,     // 64
-);
-
-cache.write(layer_idx, &key_data, &value_data);
-cache.advance();  // move to next position
-cache.len();      // number of cached tokens
-cache.clear();    // reset for new conversation
-```
-
-#### Generation
-
-```rust
-use flare_core::generate::Generator;
-use flare_core::sampling::SamplingParams;
+let mut reader = BufReader::new(File::open("model.gguf").unwrap());
+let gguf = GgufFile::parse_header(&mut reader).unwrap();
+let config = gguf.to_model_config().unwrap();
+let weights = load_model_weights(&gguf, &mut reader).unwrap();
+let mut model = Model::new(config, weights);
 
 let params = SamplingParams {
     temperature: 0.7,
     top_p: 0.9,
-    top_k: 40,
-    repeat_penalty: 1.1,
+    ..Default::default()
 };
 
 let mut gen = Generator::new(&mut model, params);
-
-// Prefill prompt
-gen.prefill(&prompt_tokens);
-
-// Generate token by token
-let step = gen.step(rng_value);
-println!("Token: {}", step.token_id);
-
-// Or generate in a loop with callback
-let tokens = gen.generate(&prompt, 256, eos_id, rng_fn, |token, step| {
-    print!("{}", decode(token));
-    true // return false to stop early
-});
+let tokens = gen.generate(
+    &prompt_tokens, 128, eos_id,
+    || rand::random::<f32>(),
+    |token, _| { print!("{}", decode(token)); true },
+);
 ```
 
-#### Tokenizer
+### Browser
 
-```rust
-use flare_core::tokenizer::{BpeTokenizer, Tokenizer};
+```bash
+# Build WASM
+wasm-pack build flare-web --target web
 
-// Load from HuggingFace tokenizer.json
-let tok = BpeTokenizer::from_file("tokenizer.json")?;
-
-let ids = tok.encode("Hello, world!")?;
-let text = tok.decode(&ids)?;
-
-tok.vocab_size();       // 128256
-tok.bos_token_id();     // Some(1)
-tok.eos_token_id();     // Some(2)
+# Open the demo
+open flare-web/demo/index.html
 ```
 
-### flare-loader
+```javascript
+import init, { FlareEngine } from '@aspect/flare';
 
-Load models from GGUF and SafeTensors formats.
+await init();
+const buffer = await fetch('model.gguf').then(r => r.arrayBuffer());
+const engine = FlareEngine.load(new Uint8Array(buffer));
 
-#### GGUF Loading
+// Initialize WebGPU (falls back to CPU SIMD if unavailable)
+await engine.init_gpu();
 
-```rust
-use flare_loader::gguf::GgufFile;
-use flare_loader::weights::load_model_weights;
-use std::io::BufReader;
-use std::fs::File;
-
-let mut reader = BufReader::new(File::open("model.gguf")?);
-
-// Parse header (fast — doesn't read weight data)
-let gguf = GgufFile::parse_header(&mut reader)?;
-
-// Inspect metadata
-println!("Architecture: {:?}", gguf.architecture());
-println!("Tensors: {}", gguf.tensors.len());
-
-// Extract model config
-let config = gguf.to_model_config()?;
-
-// Load all weights (dequantizes to f32)
-let weights = load_model_weights(&gguf, &mut reader)?;
-
-// Or load a single tensor
-let tensor = gguf.read_tensor_data(&mut reader, &gguf.tensors[0])?;
-```
-
-#### SafeTensors Loading
-
-```rust
-use flare_loader::safetensors::SafeTensorsFile;
-use std::io::Cursor;
-
-let data = std::fs::read("model.safetensors")?;
-let mut reader = Cursor::new(&data);
-
-let st = SafeTensorsFile::parse_header(&mut reader)?;
-
-// List tensors
-for name in st.tensor_names() {
-    println!("{}", name);
+// Stream tokens
+engine.begin_stream(promptTokens, 128);
+while (!engine.stream_done()) {
+    const token = engine.next_token();
+    document.body.textContent += engine.decode_token(token);
 }
-
-// Read a specific tensor as f32
-let tensor = st.read_tensor(&mut reader, "model.embed_tokens.weight")?;
 ```
 
-### flare-gpu
+## Architecture
 
-WebGPU compute backend. Same code runs on native (Vulkan/Metal/DX12) and browser (WebGPU).
-
-```rust
-use flare_gpu::WebGpuBackend;
-
-// Async initialization (works on both native and WASM)
-let backend = WebGpuBackend::new().await?;
-
-// Access the underlying wgpu device/queue
-let device = backend.device();
-let queue = backend.queue();
+```
+flare-core        Core inference (tensor, model, KV cache, sampling, tokenizer)
+flare-loader      Model loading (GGUF, SafeTensors, quantization, progressive)
+flare-gpu         WebGPU/wgpu compute backend + 37 WGSL shaders
+flare-simd        WASM SIMD128 CPU fallback
+flare-web         Browser integration (wasm-bindgen, WebGPU, Cache API)
+flare-server      Native server with OpenAI-compatible API
 ```
 
-WGSL compute shaders are in `flare-gpu/shaders/`:
-- `matmul.wgsl` — Tiled 16x16 matrix multiply
-- `rmsnorm.wgsl` — Fused RMSNorm + residual add
-- `rope.wgsl` — Rotary position embeddings
-- `silu_mul.wgsl` — SiLU activation fused with element-wise multiply
+### Compute Path Selection
 
-### flare-simd
+| Platform | Condition | Compute Path |
+|---|---|---|
+| macOS | Always | Apple Accelerate (AMX) + Q8_0 int8 for large models |
+| Linux/Windows ARM | Always | ARM NEON SIMD with rayon parallelism |
+| Linux/Windows x86 | AVX2+FMA detected | AVX2 SIMD with rayon parallelism |
+| Chrome/Edge/Firefox | WebGPU available | WGSL compute shaders via wgpu |
+| Any browser | Fallback | WASM SIMD128 (+ multi-worker if SharedArrayBuffer available) |
 
-CPU fallback backend. Implements the same `ComputeBackend` trait as flare-gpu.
+### Quantization Support
 
-```rust
-use flare_simd::SimdBackend;
-use flare_core::model::ComputeBackend;
+| Format | Bits/weight | GPU shader | CPU direct matvec | Notes |
+|---|---|---|---|---|
+| Q4_0, Q4_1 | 4.5 | Yes | Yes | Standard 4-bit |
+| Q5_0, Q5_1 | 5.5 | Yes | — | Standard 5-bit |
+| Q8_0, Q8_1 | 8.5 | Yes | Yes (NEON sdot) | Best quality/speed tradeoff |
+| Q2K–Q6K | 2.5–6.5 | Yes | Q4K direct | K-quant family |
+| IQ1S–IQ4XS | 1.5–4.5 | Yes | — | Importance-matrix quants |
+| BF16, F16 | 16 | Yes | — | Half precision |
+| **Ternary** | **1.58** | **Yes** | **Yes (NEON)** | **BitNet b1.58 — add/sub only** |
 
-let backend = SimdBackend::new();
-backend.matmul(&a, &b, &mut output);
-backend.rmsnorm(&input, &weight, 1e-5, &mut output);
-backend.softmax(&mut logits);
-```
+### Memory Requirements
+
+| Model | Q8_0 | Q4_K | Ternary | KV Cache (2K) | Total (Q8_0) |
+|---|---|---|---|---|---|
+| 135M | 138MB | ~75MB | ~32MB | ~8MB | ~150MB |
+| 1B | 1.2GB | ~600MB | ~250MB | ~32MB | ~1.2GB |
+| 3B | 3.5GB | ~1.8GB | ~750MB | ~96MB | ~3.6GB |
+| 7B | 7.5GB | ~3.8GB | ~1.6GB | ~256MB | ~7.8GB |
+
+## Roadmap
+
+### Shipped (v1.0–v1.1)
+- [x] CPU inference: GGUF parser, Llama forward pass, sampling, tokenizer
+- [x] WebGPU acceleration with GPU-resident forward pass
+- [x] Browser demo with streaming chat, progressive loading, WebGPU
+- [x] Native server with OpenAI-compatible API
+- [x] Apple Accelerate AMX integration
+- [x] Q8_0 int8 dot product with ARM sdot
+- [x] Fused projections, online softmax attention, zero-alloc forward
+- [x] N-gram speculative decoding
+- [x] BitNet ternary weight support
+- [x] Progressive inference (partial model generation)
+- [x] KIVI 2-bit KV cache quantization
+
+### In Progress
+- [ ] WebGPU subgroups for attention/matmul speedup ([#386](../../issues/386))
+- [ ] WebNN backend for NPU acceleration ([#388](../../issues/388))
+- [ ] OPFS model caching for instant offline start ([#394](../../issues/394))
+
+### Planned
+- [ ] MoE on-demand expert loading from OPFS ([#387](../../issues/387))
+- [ ] P2P collaborative inference via WebRTC ([#389](../../issues/389))
+- [ ] LoRA adapter hot-swapping ([#390](../../issues/390))
+- [ ] Edge runtime for Cloudflare Workers / Fermyon Spin ([#392](../../issues/392))
+- [ ] WebTransport for parallel weight streaming ([#397](../../issues/397))
+- [ ] AudioWorklet voice pipeline ([#395](../../issues/395))
+
+See all [open issues](../../issues) for the full roadmap.
 
 ## Building
 
@@ -419,49 +236,22 @@ backend.softmax(&mut logits);
 # Native build
 cargo build --release
 
-# Run tests
+# Run all tests (550+)
 cargo test --workspace
-
-# Build CLI
-cargo build --release --bin flare-cli
-
-# Check everything compiles
-cargo check --workspace --all-targets
 
 # Lint
 cargo clippy --workspace --all-targets -- -D warnings
-```
 
-### WASM Build
-
-```bash
-# Install wasm-pack
-cargo install wasm-pack
-
-# Build for browser
+# WASM build
 wasm-pack build flare-web --target web
 
-# Build for Node.js
-wasm-pack build flare-web --target nodejs
+# WASM with multi-threading support
+wasm-pack build flare-web --target web --features wasm_threads
 ```
 
-## Project Status
+## Contributing
 
-This project is in early development (Phase 1 complete).
-
-- [x] **Phase 1**: CPU inference in WASM — GGUF parser, Llama forward pass, sampling, tokenizer, CLI
-- [ ] **Phase 2**: WebGPU acceleration — wire WGSL shaders into the inference pipeline
-- [ ] **Phase 3**: Browser polish — progressive loading, Web Workers, Cache API, npm package
-- [ ] **Phase 4**: Native server — OpenAI-compatible API, speculative decoding
-- [ ] **Phase 5**: Ecosystem — React hooks, model gallery, documentation site
-
-## Supported Architectures
-
-| Architecture | Status | Models |
-|-------------|--------|--------|
-| Llama | Supported | Llama 3.2 (1B, 3B), TinyLlama |
-| Qwen2 | Config parsing | Qwen2.5 (0.5B, 1.5B, 3B) |
-| Mistral | Config parsing | Mistral 7B (requires >4GB, native only) |
+See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
 
 ## License
 
