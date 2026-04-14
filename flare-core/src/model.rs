@@ -1279,6 +1279,20 @@ impl Model {
             }
 
             // --- FFN block ---
+
+            // Prefetch FFN gate/up weights while computing FFN RMSNorm.
+            // The norm is lightweight (~dim FLOPs) and doesn't touch weight
+            // memory, so issuing prefetch hints here lets the memory subsystem
+            // start pulling gate/up data into L2 before the matvec needs it.
+            if use_cpu_q8 {
+                let fused = &self.fused_weights.as_ref().unwrap()[layer_idx];
+                prefetch_weight_bytes(&fused.gate_up_data);
+            } else if self.fused_f32_gate_up.is_some() {
+                prefetch_weight_f32(&self.fused_f32_gate_up.as_ref().unwrap()[layer_idx]);
+            } else {
+                prefetch_weight_f32(layer.w_gate.data());
+            }
+
             rmsnorm_into(
                 x.data(),
                 layer.ffn_norm.data(),
@@ -1364,6 +1378,23 @@ impl Model {
                     &self.forward_buffers.up,
                     &mut self.forward_buffers.ffn_hidden,
                 );
+            }
+
+            // Prefetch next layer's attention weights while the down projection
+            // runs. The down projection is the heaviest single matvec in the FFN
+            // block (intermediate_dim x dim), so there is ample time for the
+            // prefetch to complete before the next layer's QKV matvec begins.
+            if layer_idx + 1 < config.num_layers {
+                let next_layer = &self.weights.layers[layer_idx + 1];
+                prefetch_weight_f32(next_layer.attn_norm.data());
+                if use_cpu_q8 {
+                    let next_fused = &self.fused_weights.as_ref().unwrap()[layer_idx + 1];
+                    prefetch_weight_bytes(&next_fused.qkv_data);
+                } else if self.fused_f32_qkv.is_some() {
+                    prefetch_weight_f32(&self.fused_f32_qkv.as_ref().unwrap()[layer_idx + 1]);
+                } else {
+                    prefetch_weight_f32(next_layer.wq.data());
+                }
             }
 
             // Down projection
@@ -2172,6 +2203,17 @@ impl Model {
             }
 
             // --- FFN block ---
+
+            // Prefetch FFN gate/up weights while computing FFN RMSNorm.
+            if use_cpu_q8 {
+                let fused = &self.fused_weights.as_ref().unwrap()[layer_idx];
+                prefetch_weight_bytes(&fused.gate_up_data);
+            } else if self.fused_f32_gate_up.is_some() {
+                prefetch_weight_f32(&self.fused_f32_gate_up.as_ref().unwrap()[layer_idx]);
+            } else if !use_raw {
+                prefetch_weight_f32(layer.w_gate.data());
+            }
+
             rmsnorm_into(
                 x.data(),
                 layer.ffn_norm.data(),
@@ -2256,6 +2298,20 @@ impl Model {
                     &self.forward_buffers.up,
                     &mut self.forward_buffers.ffn_hidden,
                 );
+            }
+
+            // Prefetch next layer's attention weights during down projection.
+            if layer_idx + 1 < num_layers {
+                let next_layer = &self.weights.layers[layer_idx + 1];
+                prefetch_weight_f32(next_layer.attn_norm.data());
+                if use_cpu_q8 {
+                    let next_fused = &self.fused_weights.as_ref().unwrap()[layer_idx + 1];
+                    prefetch_weight_bytes(&next_fused.qkv_data);
+                } else if self.fused_f32_qkv.is_some() {
+                    prefetch_weight_f32(&self.fused_f32_qkv.as_ref().unwrap()[layer_idx + 1]);
+                } else if !use_raw {
+                    prefetch_weight_f32(next_layer.wq.data());
+                }
             }
 
             if use_raw {
@@ -2839,6 +2895,76 @@ fn f16_to_f32_inline(bits: u16) -> f32 {
     }
     let f32_exp = exp + (127 - 15);
     f32::from_bits((sign << 31) | (f32_exp << 23) | (mant << 13))
+}
+
+/// Maximum number of bytes to prefetch for next-layer weight data.
+///
+/// We prefetch a limited window (8 KB) of the next operation's weight data to
+/// warm the L2 cache while the current operation's compute is running. This is
+/// small enough to avoid evicting useful data from cache, but large enough to
+/// cover the first few hundred rows of weight data that will be accessed next.
+const PREFETCH_BYTES: usize = 8192;
+
+/// Issue software prefetch hints for the first `PREFETCH_BYTES` of a byte slice.
+///
+/// On aarch64, this emits `prfm pldl2strm` instructions spaced 64 bytes apart
+/// (one per cache line). The L2 streaming hint tells the hardware this data will
+/// be read once sequentially, so it should not displace hot L1 data.
+///
+/// On non-aarch64 targets (including WASM), this is a no-op.
+#[inline(always)]
+fn prefetch_weight_bytes(data: &[u8]) {
+    #[cfg(target_arch = "aarch64")]
+    {
+        let len = data.len().min(PREFETCH_BYTES);
+        let ptr = data.as_ptr();
+        let mut offset = 0;
+        while offset < len {
+            // SAFETY: We only issue prefetch hints within the bounds of the
+            // allocated slice. `prfm` is a hint instruction that cannot fault
+            // even if the address is invalid, but we stay in-bounds regardless.
+            unsafe {
+                core::arch::asm!(
+                    "prfm pldl2strm, [{addr}]",
+                    addr = in(reg) ptr.add(offset),
+                    options(nostack, preserves_flags, readonly),
+                );
+            }
+            offset += 64; // aarch64 cache line = 64 bytes
+        }
+    }
+    #[cfg(not(target_arch = "aarch64"))]
+    {
+        let _ = data;
+    }
+}
+
+/// Issue software prefetch hints for the first `PREFETCH_BYTES` of an f32 slice.
+///
+/// Convenience wrapper around [`prefetch_weight_bytes`] that reinterprets an
+/// f32 slice as raw bytes. Used for f32 weight tensors and norm vectors.
+#[inline(always)]
+fn prefetch_weight_f32(data: &[f32]) {
+    #[cfg(target_arch = "aarch64")]
+    {
+        let byte_len = (data.len() * 4).min(PREFETCH_BYTES);
+        let ptr = data.as_ptr() as *const u8;
+        let mut offset = 0;
+        while offset < byte_len {
+            unsafe {
+                core::arch::asm!(
+                    "prfm pldl2strm, [{addr}]",
+                    addr = in(reg) ptr.add(offset),
+                    options(nostack, preserves_flags, readonly),
+                );
+            }
+            offset += 64;
+        }
+    }
+    #[cfg(not(target_arch = "aarch64"))]
+    {
+        let _ = data;
+    }
 }
 
 /// Q8_0 block constants.
