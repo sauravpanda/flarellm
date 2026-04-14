@@ -804,7 +804,11 @@ impl Model {
         // data. The input vector is quantized to Q8_0 on the fly, then we use NEON
         // widening multiply for int8*int8 dot products. Reads 1 byte/weight + 1 byte/input
         // instead of 4 bytes each, giving ~4x less memory bandwidth than f32 paths.
+        //
+        // Only beneficial for bandwidth-bound models (dim >= 1024). For small models
+        // where weights fit in L2 cache, Accelerate's cblas_sgemv (AMX) is faster.
         let use_cpu_q8 = !use_raw
+            && dim >= 1024
             && self.raw_weights.is_some()
             && self
                 .raw_weights
@@ -1499,6 +1503,7 @@ impl Model {
 
         let use_raw = self.backend.supports_dequant_matmul() && self.raw_weights.is_some();
         let use_cpu_q8 = !use_raw
+            && dim >= 1024
             && self.raw_weights.is_some()
             && self
                 .raw_weights
@@ -2431,7 +2436,7 @@ unsafe fn dot_q8_0_q8_0_neon(
     }
 
     // Handle odd remaining block
-    if blocks_per_row % 2 != 0 {
+    if blocks_per_row & 1 != 0 {
         let ib = blocks_per_row - 1;
         let w_ptr = row_bytes.as_ptr().add(ib * Q8_0_BLOCK_BYTES);
         let w_scale = f16_to_f32_inline(u16::from_le_bytes([*w_ptr, *w_ptr.add(1)]));
@@ -2495,12 +2500,7 @@ fn matvec_q8_0_neon(weight_data: &[u8], input: &[f32], rows: usize, cols: usize)
                     let row_bytes = &weight_data[start..start + bytes_per_row];
                     // SAFETY: NEON always available on aarch64
                     *out = unsafe {
-                        dot_q8_0_q8_0_neon(
-                            row_bytes,
-                            &input_scales,
-                            &input_quants,
-                            blocks_per_row,
-                        )
+                        dot_q8_0_q8_0_neon(row_bytes, &input_scales, &input_quants, blocks_per_row)
                     };
                 }
             });
@@ -2512,9 +2512,8 @@ fn matvec_q8_0_neon(weight_data: &[u8], input: &[f32], rows: usize, cols: usize)
         let start = i * bytes_per_row;
         let row_bytes = &weight_data[start..start + bytes_per_row];
         // SAFETY: NEON always available on aarch64
-        *out = unsafe {
-            dot_q8_0_q8_0_neon(row_bytes, &input_scales, &input_quants, blocks_per_row)
-        };
+        *out =
+            unsafe { dot_q8_0_q8_0_neon(row_bytes, &input_scales, &input_quants, blocks_per_row) };
     }
     output
 }
