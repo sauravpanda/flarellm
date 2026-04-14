@@ -179,8 +179,29 @@ impl<'a> Generator<'a> {
 
     /// Generate a single next token, returning the token ID.
     pub fn step(&mut self, rng_val: f32) -> GenerationStep {
-        // Get logits from the last token
         let last_token = *self.tokens.last().unwrap_or(&0);
+
+        // Fast path: greedy decoding without repeat penalty can use
+        // forward_greedy() which fuses the argmax into the output projection,
+        // avoiding a 512KB+ logits buffer write and the subsequent scan.
+        if self.params.temperature == 0.0 && self.params.repeat_penalty == 1.0 {
+            let (token_id, _logit_val) = self.model.forward_greedy(last_token, self.position);
+
+            self.tokens.push(token_id);
+            self.position += 1;
+
+            if self.is_speculative() {
+                self.ngram_cache.record(&self.tokens);
+            }
+
+            // Return empty logits vec since we skipped full logits computation.
+            return GenerationStep {
+                token_id,
+                logits: Vec::new(),
+            };
+        }
+
+        // Standard path: compute full logits for sampling or repeat penalty.
         let logits_tensor = self.model.forward(last_token, self.position);
         let mut logits = logits_tensor.data().to_vec();
 
@@ -226,16 +247,28 @@ impl<'a> Generator<'a> {
 
         let mut accepted = Vec::new();
 
+        // Use the fused greedy path when no repeat penalty is active.
+        let use_greedy_fused = self.params.repeat_penalty == 1.0;
+
         for &draft_token in &drafts {
-            // Run the model forward for the current last token.
             let last_token = *self.tokens.last().unwrap_or(&0);
-            let logits_tensor = self.model.forward(last_token, self.position);
-            let mut logits = logits_tensor.data().to_vec();
 
-            sampling::apply_repeat_penalty(&mut logits, &self.tokens, self.params.repeat_penalty);
-            // temperature is 0.0 for speculative (greedy only)
-
-            let verified_token = sampling::sample_greedy(&logits);
+            let (verified_token, logits) = if use_greedy_fused {
+                // Fast path: fused argmax in the output projection.
+                let (tid, _val) = self.model.forward_greedy(last_token, self.position);
+                (tid, Vec::new())
+            } else {
+                // Standard path: full logits needed for repeat penalty.
+                let logits_tensor = self.model.forward(last_token, self.position);
+                let mut logits = logits_tensor.data().to_vec();
+                sampling::apply_repeat_penalty(
+                    &mut logits,
+                    &self.tokens,
+                    self.params.repeat_penalty,
+                );
+                let tid = sampling::sample_greedy(&logits);
+                (tid, logits)
+            };
 
             if verified_token == draft_token {
                 // Draft matches — accept it.
@@ -807,6 +840,61 @@ mod tests {
         assert_eq!(
             baseline, speculative,
             "speculative output must match greedy baseline: baseline={baseline:?} vs speculative={speculative:?}"
+        );
+    }
+
+    #[test]
+    fn test_forward_greedy_matches_forward_argmax() {
+        // forward_greedy must produce the same token as forward + argmax.
+        // This test uses repeat_penalty=1.0 + temperature=0.0 to exercise
+        // the fused greedy code path in Generator::step().
+        let prompt = vec![1u32, 2, 3];
+        let max = 6;
+
+        // Run with forward_greedy path (repeat_penalty == 1.0).
+        let greedy_fused = {
+            let mut model = tiny_model();
+            let params = SamplingParams {
+                temperature: 0.0,
+                repeat_penalty: 1.0,
+                speculative: false,
+                ..Default::default()
+            };
+            let mut gen = Generator::new(&mut model, params);
+            gen.generate(&prompt, max, None, || 0.5, |_, _| true)
+        };
+
+        // Run with standard forward path (repeat_penalty == 1.0 but
+        // force through the normal code path by using a tiny temperature
+        // that behaves like greedy for practical purposes, but != 0.0).
+        // Actually, just verify consistency by running forward + argmax
+        // directly.
+        let standard = {
+            let mut model = tiny_model();
+            let prompt_tokens = &prompt;
+            let mut position = 0;
+            // Prefill
+            for &t in prompt_tokens {
+                model.forward(t, position);
+                position += 1;
+            }
+            let mut tokens = prompt.to_vec();
+            let mut result = Vec::new();
+            for _ in 0..max {
+                let last = *tokens.last().unwrap();
+                let logits_tensor = model.forward(last, position);
+                let logits = logits_tensor.data();
+                let token = crate::sampling::sample_greedy(logits);
+                tokens.push(token);
+                result.push(token);
+                position += 1;
+            }
+            result
+        };
+
+        assert_eq!(
+            greedy_fused, standard,
+            "forward_greedy must match forward+argmax: fused={greedy_fused:?} vs standard={standard:?}"
         );
     }
 
