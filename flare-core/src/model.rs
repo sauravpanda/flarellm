@@ -2972,7 +2972,7 @@ fn attn_dot_scores_neon(
     use std::arch::aarch64::*;
     let dim4 = head_dim & !3;
 
-    for t in 0..seq_len {
+    for (t, score) in scores[..seq_len].iter_mut().enumerate() {
         let k_offset = t * kv_stride + kv_head * head_dim;
         unsafe {
             let mut acc = vdupq_n_f32(0.0);
@@ -2986,7 +2986,7 @@ fn attn_dot_scores_neon(
             for d in dim4..head_dim {
                 dot += q[q_offset + d] * k_cache[k_offset + d];
             }
-            scores[t] = dot * scale;
+            *score = dot * scale;
         }
     }
 }
@@ -3068,6 +3068,7 @@ pub fn cpu_grouped_query_attention(
 
         // Weighted sum of values
         let out_offset = h * head_dim;
+        #[allow(clippy::needless_range_loop)]
         for t in 0..seq_len {
             let weight = scores[t];
             if weight < 1e-8 {

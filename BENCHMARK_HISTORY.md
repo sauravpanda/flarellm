@@ -494,3 +494,68 @@ Baseline model: SmolLM2-135M-Instruct Q8_0 (138MB, 30 layers, dim=576).
 | Decode (256 tok) | 29.8 |
 | Sustained (512 tok) | **28.3** |
 
+### 2026-04-13 18:24 — `77c10a1 Use ARM SDOT inline assembly for int8 dot product (#410)`
+
+**Hardware:** Apple M5 Pro, ARM64 (NEON SIMD)  
+**Model:** Llama, ~1498M params, 16 layers, dim=2048  
+**Load time:** 0.96s
+
+| Metric | tok/s |
+|---|---|
+| Decode (16 tok) | 31.8 |
+| Decode (64 tok) | 31.3 |
+| Decode (256 tok) | 29.7 |
+| Sustained (512 tok) | **28.2** |
+
+### 2026-04-13 18:24 — `77c10a1 Use ARM SDOT inline assembly for int8 dot product (#410)`
+
+**Hardware:** Apple M5 Pro, ARM64 (NEON SIMD)  
+**Model:** Llama, ~162M params, 30 layers, dim=576  
+**Load time:** 0.11s
+
+| Metric | tok/s |
+|---|---|
+| Decode (16 tok) | 229.1 |
+| Decode (64 tok) | 220.9 |
+| Decode (256 tok) | 185.0 |
+| Sustained (512 tok) | **151.1** |
+
+### 2026-04-13 18:29 — `e99a0ff Merge pull request #411 from sauravpanda/optimize-silu-at...`
+
+**Hardware:** Apple M5 Pro, ARM64 (NEON SIMD)  
+**Model:** Llama, ~1498M params, 16 layers, dim=2048  
+**Load time:** 0.92s
+
+| Metric | tok/s |
+|---|---|
+| Decode (16 tok) | 30.8 |
+| Decode (64 tok) | 25.5 |
+| Decode (256 tok) | 30.6 |
+| Sustained (512 tok) | **24.5** |
+
+### 2026-04-13 18:29 — `e99a0ff Merge pull request #411 from sauravpanda/optimize-silu-at...`
+
+**Hardware:** Apple M5 Pro, ARM64 (NEON SIMD)  
+**Model:** Llama, ~162M params, 30 layers, dim=576  
+**Load time:** 0.10s
+
+| Metric | tok/s |
+|---|---|
+| Decode (16 tok) | 211.1 |
+| Decode (64 tok) | 217.0 |
+| Decode (256 tok) | 191.0 |
+| Sustained (512 tok) | **169.1** |
+
+### 2026-04-13 18:30 — `e99a0ff Merge pull request #411 from sauravpanda/optimize-silu-at...`
+
+**Hardware:** Apple M5 Pro, ARM64 (NEON SIMD)  
+**Model:** Llama, ~1498M params, 16 layers, dim=2048  
+**Load time:** 0.91s
+
+| Metric | tok/s |
+|---|---|
+| Decode (16 tok) | 30.8 |
+| Decode (64 tok) | 31.0 |
+| Decode (256 tok) | 30.5 |
+| Sustained (512 tok) | **29.5** |
+
