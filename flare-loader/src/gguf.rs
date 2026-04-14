@@ -288,6 +288,19 @@ impl GgufFile {
             .meta_f32(&format!("{prefix}.final_logit_softcapping"))
             .unwrap_or(0.0);
 
+        // MoE (Mixture-of-Experts) detection via GGUF metadata keys.
+        // Mixtral and similar models set `llm.expert_count` and `llm.expert_used_count`.
+        // Some models use the architecture-prefixed variant instead.
+        let num_experts = self
+            .meta_usize("llm.expert_count")
+            .or_else(|_| self.meta_usize(&format!("{prefix}.expert_count")))
+            .unwrap_or(0);
+        let num_experts_per_token = self
+            .meta_usize("llm.expert_used_count")
+            .or_else(|_| self.meta_usize(&format!("{prefix}.expert_used_count")))
+            .unwrap_or(0);
+        let moe = num_experts > 0 && num_experts_per_token > 0;
+
         Ok(ModelConfig {
             architecture,
             vocab_size,
@@ -303,6 +316,9 @@ impl GgufFile {
             attn_logit_softcap,
             final_logit_softcap,
             kv_cache_bits: 32,
+            moe,
+            num_experts,
+            num_experts_per_token,
         })
     }
 

@@ -38,6 +38,19 @@ pub struct ModelConfig {
     /// Set to 2 to enable KIVI-style 2-bit quantization for ~8x memory savings.
     #[serde(default = "default_kv_cache_bits")]
     pub kv_cache_bits: u8,
+    /// Whether this model uses Mixture-of-Experts (MoE) architecture.
+    /// When true, the FFN block uses a gating router to select a subset of
+    /// experts per token instead of a single shared FFN.
+    #[serde(default)]
+    pub moe: bool,
+    /// Total number of experts per MoE layer (e.g., 8 for Mixtral).
+    /// Only meaningful when `moe` is true.
+    #[serde(default)]
+    pub num_experts: usize,
+    /// Number of experts activated per token (e.g., 2 for Mixtral).
+    /// Only meaningful when `moe` is true.
+    #[serde(default)]
+    pub num_experts_per_token: usize,
 }
 
 fn default_kv_cache_bits() -> u8 {
@@ -69,7 +82,14 @@ impl ModelConfig {
             let attn_qkv =
                 self.hidden_dim * (self.num_heads + 2 * self.num_kv_heads) * self.head_dim;
             let attn_out = self.num_heads * self.head_dim * self.hidden_dim;
-            let ffn = 3 * self.hidden_dim * self.intermediate_dim; // gate + up + down
+            let ffn_per_expert = 3 * self.hidden_dim * self.intermediate_dim; // gate + up + down
+            let ffn = if self.moe {
+                // MoE: router + num_experts * expert FFN
+                let router = self.hidden_dim * self.num_experts;
+                router + self.num_experts * ffn_per_expert
+            } else {
+                ffn_per_expert
+            };
             let norms = 2 * self.hidden_dim;
             attn_qkv + attn_out + ffn + norms
         };
@@ -103,6 +123,9 @@ impl Default for ModelConfig {
             attn_logit_softcap: 0.0,
             final_logit_softcap: 0.0,
             kv_cache_bits: 32,
+            moe: false,
+            num_experts: 0,
+            num_experts_per_token: 0,
         }
     }
 }
@@ -129,6 +152,9 @@ mod tests {
             attn_logit_softcap: 0.0,
             final_logit_softcap: 0.0,
             kv_cache_bits: 32,
+            moe: false,
+            num_experts: 0,
+            num_experts_per_token: 0,
         }
     }
 
@@ -256,5 +282,36 @@ mod tests {
         let mem1 = config.estimate_kv_cache_memory(64, 8.0);
         let mem2 = config.estimate_kv_cache_memory(128, 8.0);
         assert_eq!(mem2, mem1 * 2, "KV cache should be proportional to seq_len");
+    }
+
+    #[test]
+    fn test_moe_param_count_includes_experts() {
+        let dense = tiny_config();
+        let dense_params = dense.estimate_param_count();
+
+        let mut moe = tiny_config();
+        moe.moe = true;
+        moe.num_experts = 4;
+        moe.num_experts_per_token = 2;
+        let moe_params = moe.estimate_param_count();
+
+        // MoE should have more params: 4 expert FFNs + router vs 1 shared FFN
+        assert!(
+            moe_params > dense_params,
+            "MoE params ({moe_params}) should exceed dense params ({dense_params})"
+        );
+        // Router params = hidden_dim * num_experts = 4 * 4 = 16
+        // Dense FFN = 3 * hidden_dim * intermediate_dim = 3 * 4 * 8 = 96
+        // MoE FFN = router + 4 * 96 = 16 + 384 = 400
+        // Difference = 400 - 96 = 304
+        assert_eq!(moe_params - dense_params, 304);
+    }
+
+    #[test]
+    fn test_default_config_is_not_moe() {
+        let config = ModelConfig::default();
+        assert!(!config.moe);
+        assert_eq!(config.num_experts, 0);
+        assert_eq!(config.num_experts_per_token, 0);
     }
 }

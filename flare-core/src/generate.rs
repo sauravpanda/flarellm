@@ -582,6 +582,7 @@ mod tests {
             attn_v_bias: None,
             post_attn_norm: None,
             post_ffn_norm: None,
+            moe: None,
         };
 
         let weights = ModelWeights {
@@ -1128,6 +1129,7 @@ mod tests {
             attn_v_bias: None,
             post_attn_norm: None,
             post_ffn_norm: None,
+            moe: None,
         };
 
         let weights = ModelWeights {
