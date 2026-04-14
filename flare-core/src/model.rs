@@ -90,6 +90,23 @@ pub struct RawLayerWeights {
     pub w_down: RawWeight,
 }
 
+/// Fused Q8_0 weight data for projections that share the same input vector.
+///
+/// Created once at model-load time by concatenating the raw Q8_0 bytes of
+/// [wq; wk; wv] and [w_gate; w_up].  This lets us replace 3 matvec calls
+/// (Q, K, V) with 1, and 2 matvec calls (gate, up) with 1, reading the
+/// input vector once instead of multiple times.
+pub struct FusedLayerWeights {
+    /// Concatenated Q8_0 bytes for [wq; wk; wv].
+    pub qkv_data: Vec<u8>,
+    /// Total output rows = q_dim + kv_dim + kv_dim.
+    pub qkv_rows: usize,
+    /// Concatenated Q8_0 bytes for [w_gate; w_up].
+    pub gate_up_data: Vec<u8>,
+    /// Total output rows = intermediate_dim * 2.
+    pub gate_up_rows: usize,
+}
+
 /// Trait for compute backends (WebGPU, SIMD, native wgpu).
 /// Each backend implements these fundamental operations.
 pub trait ComputeBackend: Send + Sync {
@@ -601,6 +618,10 @@ pub struct ForwardBuffers {
     pub ffn_normed_q8: QuantizedInput,
     /// Pre-quantized Q8_0 buffer for final normed output (used for Q8_0 logits projection)
     pub output_q8: QuantizedInput,
+    /// Fused QKV output buffer `[q_dim + kv_dim + kv_dim]`
+    pub qkv: Vec<f32>,
+    /// Fused gate+up output buffer `[intermediate_dim * 2]`
+    pub gate_up: Vec<f32>,
 }
 
 impl ForwardBuffers {
@@ -641,6 +662,8 @@ impl ForwardBuffers {
                 quants: vec![0; dim],
                 blocks_per_row: dim / Q8_0_BLOCK_SIZE,
             },
+            qkv: vec![0.0; q_dim + kv_dim + kv_dim],
+            gate_up: vec![0.0; intermediate_dim * 2],
         }
     }
 }
@@ -686,6 +709,14 @@ pub struct Model {
     /// via `load_layer_weights`.  `None` means all layers were provided at
     /// construction time and are fully available.
     layers_loaded: Option<usize>,
+    /// Fused Q8_0 layer weights: concatenated [wq;wk;wv] and [w_gate;w_up]
+    /// per layer. Built once in `set_raw_weights()` to reduce matvec calls
+    /// from 7 to 4 per layer.
+    fused_weights: Option<Vec<FusedLayerWeights>>,
+    /// Fused f32 layer weights for the CPU f32 path: concatenated f32 data
+    /// for [wq;wk;wv] and [w_gate;w_up] per layer.
+    fused_f32_qkv: Option<Vec<Vec<f32>>>,
+    fused_f32_gate_up: Option<Vec<Vec<f32>>>,
 }
 
 impl Model {
@@ -717,6 +748,9 @@ impl Model {
             backend: Box::new(CpuBackend),
             forward_buffers,
             layers_loaded: None,
+            fused_weights: None,
+            fused_f32_qkv: None,
+            fused_f32_gate_up: None,
         }
     }
 
@@ -726,6 +760,38 @@ impl Model {
     /// will use the fused dequant+matvec shaders instead of the f32 projection
     /// matrices, saving memory bandwidth.
     pub fn set_raw_weights(&mut self, raw: Vec<RawLayerWeights>) {
+        // Build fused Q8_0 weights by concatenating bytes for shared-input
+        // projections. This is done once at load time so forward() can use
+        // a single matvec call instead of 3 (QKV) or 2 (gate/up).
+        if !raw.is_empty() && raw[0].wq.format == WeightFormat::Q8_0 {
+            let fused: Vec<FusedLayerWeights> = raw
+                .iter()
+                .map(|rw| {
+                    // Concatenate [wq; wk; wv] Q8_0 bytes
+                    let mut qkv_data =
+                        Vec::with_capacity(rw.wq.data.len() + rw.wk.data.len() + rw.wv.data.len());
+                    qkv_data.extend_from_slice(&rw.wq.data);
+                    qkv_data.extend_from_slice(&rw.wk.data);
+                    qkv_data.extend_from_slice(&rw.wv.data);
+                    let qkv_rows = rw.wq.num_rows + rw.wk.num_rows + rw.wv.num_rows;
+
+                    // Concatenate [w_gate; w_up] Q8_0 bytes
+                    let mut gate_up_data =
+                        Vec::with_capacity(rw.w_gate.data.len() + rw.w_up.data.len());
+                    gate_up_data.extend_from_slice(&rw.w_gate.data);
+                    gate_up_data.extend_from_slice(&rw.w_up.data);
+                    let gate_up_rows = rw.w_gate.num_rows + rw.w_up.num_rows;
+
+                    FusedLayerWeights {
+                        qkv_data,
+                        qkv_rows,
+                        gate_up_data,
+                        gate_up_rows,
+                    }
+                })
+                .collect();
+            self.fused_weights = Some(fused);
+        }
         self.raw_weights = Some(raw);
     }
 
@@ -741,6 +807,34 @@ impl Model {
     /// Returns `true` if a raw quantized output weight has been set.
     pub fn has_raw_output_weight(&self) -> bool {
         self.raw_output_weight.is_some()
+    }
+
+    /// Build fused f32 weight matrices for the CPU f32 path.
+    ///
+    /// Concatenates [wq; wk; wv] and [w_gate; w_up] f32 data per layer so
+    /// forward() can use a single matvec_into call instead of 3 (QKV) or 2
+    /// (gate/up). Call this after all layer weights have been loaded.
+    pub fn build_fused_f32_weights(&mut self) {
+        let layers = &self.weights.layers;
+        let mut qkv_all = Vec::with_capacity(layers.len());
+        let mut gate_up_all = Vec::with_capacity(layers.len());
+        for layer in layers {
+            let mut qkv = Vec::with_capacity(
+                layer.wq.data().len() + layer.wk.data().len() + layer.wv.data().len(),
+            );
+            qkv.extend_from_slice(layer.wq.data());
+            qkv.extend_from_slice(layer.wk.data());
+            qkv.extend_from_slice(layer.wv.data());
+            qkv_all.push(qkv);
+
+            let mut gate_up =
+                Vec::with_capacity(layer.w_gate.data().len() + layer.w_up.data().len());
+            gate_up.extend_from_slice(layer.w_gate.data());
+            gate_up.extend_from_slice(layer.w_up.data());
+            gate_up_all.push(gate_up);
+        }
+        self.fused_f32_qkv = Some(qkv_all);
+        self.fused_f32_gate_up = Some(gate_up_all);
     }
 
     /// Upload all model weights to persistent GPU buffers.
@@ -782,9 +876,10 @@ impl Model {
         );
     }
 
-    /// Remove raw weights, reverting to the f32 weight path.
+    /// Remove raw weights and fused weight data, reverting to the f32 weight path.
     pub fn clear_raw_weights(&mut self) {
         self.raw_weights = None;
+        self.fused_weights = None;
     }
 
     /// Returns `true` if raw quantized weights have been set.
@@ -944,9 +1039,9 @@ impl Model {
                 &mut self.forward_buffers.normed,
             );
 
-            // QKV projections — use fused dequant+matvec when raw weights are loaded,
-            // or CPU Q8_0 direct matvec when running on CPU with quantized weights,
-            // or _into variants for pure CPU f32 path (zero allocations).
+            // QKV projections — fused into a single matvec where possible.
+            // Reads the input vector once instead of three times.
+            let q_dim = num_heads * head_dim;
             if use_raw {
                 let rw = &self.raw_weights.as_ref().unwrap()[layer_idx];
                 let q_tmp =
@@ -962,34 +1057,36 @@ impl Model {
                         .batched_dequant_matmul(&rw.wv, &self.forward_buffers.normed, 1);
                 self.forward_buffers.v_data.copy_from_slice(&v_tmp);
             } else if use_cpu_q8 {
-                let rw = &self.raw_weights.as_ref().unwrap()[layer_idx];
                 quantize_input_q8_0_into(
                     &self.forward_buffers.normed,
                     &mut self.forward_buffers.normed_q8,
                 );
+                let fused = &self.fused_weights.as_ref().unwrap()[layer_idx];
                 matvec_q8_0_preq_into(
-                    &rw.wq.data,
+                    &fused.qkv_data,
                     &self.forward_buffers.normed_q8,
-                    rw.wq.num_rows,
-                    &mut self.forward_buffers.q_data,
+                    fused.qkv_rows,
+                    &mut self.forward_buffers.qkv,
                 );
-                matvec_q8_0_preq_into(
-                    &rw.wk.data,
-                    &self.forward_buffers.normed_q8,
-                    rw.wk.num_rows,
-                    &mut self.forward_buffers.k_data,
+                self.forward_buffers.q_data.copy_from_slice(&self.forward_buffers.qkv[..q_dim]);
+                self.forward_buffers.k_data.copy_from_slice(&self.forward_buffers.qkv[q_dim..q_dim + kv_dim]);
+                self.forward_buffers.v_data.copy_from_slice(&self.forward_buffers.qkv[q_dim + kv_dim..]);
+            } else if let Some(ref fused_qkv) = self.fused_f32_qkv {
+                matvec_into(
+                    &fused_qkv[layer_idx],
+                    &self.forward_buffers.normed,
+                    q_dim + kv_dim + kv_dim,
+                    dim,
+                    &mut self.forward_buffers.qkv,
                 );
-                matvec_q8_0_preq_into(
-                    &rw.wv.data,
-                    &self.forward_buffers.normed_q8,
-                    rw.wv.num_rows,
-                    &mut self.forward_buffers.v_data,
-                );
+                self.forward_buffers.q_data.copy_from_slice(&self.forward_buffers.qkv[..q_dim]);
+                self.forward_buffers.k_data.copy_from_slice(&self.forward_buffers.qkv[q_dim..q_dim + kv_dim]);
+                self.forward_buffers.v_data.copy_from_slice(&self.forward_buffers.qkv[q_dim + kv_dim..]);
             } else {
                 matvec_into(
                     layer.wq.data(),
                     &self.forward_buffers.normed,
-                    num_heads * head_dim,
+                    q_dim,
                     dim,
                     &mut self.forward_buffers.q_data,
                 );
@@ -1177,7 +1274,8 @@ impl Model {
                 &mut self.forward_buffers.ffn_normed,
             );
 
-            // Gate and up projections
+            // Gate and up projections — fused into a single matvec where possible.
+            let inter_dim = config.intermediate_dim;
             if use_raw {
                 let rw = &self.raw_weights.as_ref().unwrap()[layer_idx];
                 let gate_tmp = self.backend.batched_dequant_matmul(
@@ -1193,35 +1291,41 @@ impl Model {
                 );
                 self.forward_buffers.up.copy_from_slice(&up_tmp);
             } else if use_cpu_q8 {
-                let rw = &self.raw_weights.as_ref().unwrap()[layer_idx];
                 quantize_input_q8_0_into(
                     &self.forward_buffers.ffn_normed,
                     &mut self.forward_buffers.ffn_normed_q8,
                 );
+                let fused = &self.fused_weights.as_ref().unwrap()[layer_idx];
                 matvec_q8_0_preq_into(
-                    &rw.w_gate.data,
+                    &fused.gate_up_data,
                     &self.forward_buffers.ffn_normed_q8,
-                    rw.w_gate.num_rows,
-                    &mut self.forward_buffers.gate,
+                    fused.gate_up_rows,
+                    &mut self.forward_buffers.gate_up,
                 );
-                matvec_q8_0_preq_into(
-                    &rw.w_up.data,
-                    &self.forward_buffers.ffn_normed_q8,
-                    rw.w_up.num_rows,
-                    &mut self.forward_buffers.up,
+                self.forward_buffers.gate.copy_from_slice(&self.forward_buffers.gate_up[..inter_dim]);
+                self.forward_buffers.up.copy_from_slice(&self.forward_buffers.gate_up[inter_dim..]);
+            } else if let Some(ref fused_gu) = self.fused_f32_gate_up {
+                matvec_into(
+                    &fused_gu[layer_idx],
+                    &self.forward_buffers.ffn_normed,
+                    inter_dim * 2,
+                    dim,
+                    &mut self.forward_buffers.gate_up,
                 );
+                self.forward_buffers.gate.copy_from_slice(&self.forward_buffers.gate_up[..inter_dim]);
+                self.forward_buffers.up.copy_from_slice(&self.forward_buffers.gate_up[inter_dim..]);
             } else {
                 matvec_into(
                     layer.w_gate.data(),
                     &self.forward_buffers.ffn_normed,
-                    config.intermediate_dim,
+                    inter_dim,
                     dim,
                     &mut self.forward_buffers.gate,
                 );
                 matvec_into(
                     layer.w_up.data(),
                     &self.forward_buffers.ffn_normed,
-                    config.intermediate_dim,
+                    inter_dim,
                     dim,
                     &mut self.forward_buffers.up,
                 );
@@ -1817,6 +1921,8 @@ impl Model {
                 &mut self.forward_buffers.normed,
             );
 
+            // QKV projections — fused into a single matvec where possible.
+            let q_dim = num_heads * head_dim;
             if use_raw {
                 let rw = &self.raw_weights.as_ref().unwrap()[layer_idx];
                 let q_tmp =
@@ -1832,34 +1938,36 @@ impl Model {
                         .batched_dequant_matmul(&rw.wv, &self.forward_buffers.normed, 1);
                 self.forward_buffers.v_data.copy_from_slice(&v_tmp);
             } else if use_cpu_q8 {
-                let rw = &self.raw_weights.as_ref().unwrap()[layer_idx];
                 quantize_input_q8_0_into(
                     &self.forward_buffers.normed,
                     &mut self.forward_buffers.normed_q8,
                 );
+                let fused = &self.fused_weights.as_ref().unwrap()[layer_idx];
                 matvec_q8_0_preq_into(
-                    &rw.wq.data,
+                    &fused.qkv_data,
                     &self.forward_buffers.normed_q8,
-                    rw.wq.num_rows,
-                    &mut self.forward_buffers.q_data,
+                    fused.qkv_rows,
+                    &mut self.forward_buffers.qkv,
                 );
-                matvec_q8_0_preq_into(
-                    &rw.wk.data,
-                    &self.forward_buffers.normed_q8,
-                    rw.wk.num_rows,
-                    &mut self.forward_buffers.k_data,
+                self.forward_buffers.q_data.copy_from_slice(&self.forward_buffers.qkv[..q_dim]);
+                self.forward_buffers.k_data.copy_from_slice(&self.forward_buffers.qkv[q_dim..q_dim + kv_dim]);
+                self.forward_buffers.v_data.copy_from_slice(&self.forward_buffers.qkv[q_dim + kv_dim..]);
+            } else if let Some(ref fused_qkv) = self.fused_f32_qkv {
+                matvec_into(
+                    &fused_qkv[layer_idx],
+                    &self.forward_buffers.normed,
+                    q_dim + kv_dim + kv_dim,
+                    dim,
+                    &mut self.forward_buffers.qkv,
                 );
-                matvec_q8_0_preq_into(
-                    &rw.wv.data,
-                    &self.forward_buffers.normed_q8,
-                    rw.wv.num_rows,
-                    &mut self.forward_buffers.v_data,
-                );
+                self.forward_buffers.q_data.copy_from_slice(&self.forward_buffers.qkv[..q_dim]);
+                self.forward_buffers.k_data.copy_from_slice(&self.forward_buffers.qkv[q_dim..q_dim + kv_dim]);
+                self.forward_buffers.v_data.copy_from_slice(&self.forward_buffers.qkv[q_dim + kv_dim..]);
             } else {
                 matvec_into(
                     layer.wq.data(),
                     &self.forward_buffers.normed,
-                    num_heads * head_dim,
+                    q_dim,
                     dim,
                     &mut self.forward_buffers.q_data,
                 );
@@ -2039,6 +2147,8 @@ impl Model {
                 &mut self.forward_buffers.ffn_normed,
             );
 
+            // Gate and up projections — fused into a single matvec where possible.
+            let inter_dim = config.intermediate_dim;
             if use_raw {
                 let rw = &self.raw_weights.as_ref().unwrap()[layer_idx];
                 let gate_tmp = self.backend.batched_dequant_matmul(
@@ -2054,35 +2164,41 @@ impl Model {
                 );
                 self.forward_buffers.up.copy_from_slice(&up_tmp);
             } else if use_cpu_q8 {
-                let rw = &self.raw_weights.as_ref().unwrap()[layer_idx];
                 quantize_input_q8_0_into(
                     &self.forward_buffers.ffn_normed,
                     &mut self.forward_buffers.ffn_normed_q8,
                 );
+                let fused = &self.fused_weights.as_ref().unwrap()[layer_idx];
                 matvec_q8_0_preq_into(
-                    &rw.w_gate.data,
+                    &fused.gate_up_data,
                     &self.forward_buffers.ffn_normed_q8,
-                    rw.w_gate.num_rows,
-                    &mut self.forward_buffers.gate,
+                    fused.gate_up_rows,
+                    &mut self.forward_buffers.gate_up,
                 );
-                matvec_q8_0_preq_into(
-                    &rw.w_up.data,
-                    &self.forward_buffers.ffn_normed_q8,
-                    rw.w_up.num_rows,
-                    &mut self.forward_buffers.up,
+                self.forward_buffers.gate.copy_from_slice(&self.forward_buffers.gate_up[..inter_dim]);
+                self.forward_buffers.up.copy_from_slice(&self.forward_buffers.gate_up[inter_dim..]);
+            } else if let Some(ref fused_gu) = self.fused_f32_gate_up {
+                matvec_into(
+                    &fused_gu[layer_idx],
+                    &self.forward_buffers.ffn_normed,
+                    inter_dim * 2,
+                    dim,
+                    &mut self.forward_buffers.gate_up,
                 );
+                self.forward_buffers.gate.copy_from_slice(&self.forward_buffers.gate_up[..inter_dim]);
+                self.forward_buffers.up.copy_from_slice(&self.forward_buffers.gate_up[inter_dim..]);
             } else {
                 matvec_into(
                     layer.w_gate.data(),
                     &self.forward_buffers.ffn_normed,
-                    config.intermediate_dim,
+                    inter_dim,
                     dim,
                     &mut self.forward_buffers.gate,
                 );
                 matvec_into(
                     layer.w_up.data(),
                     &self.forward_buffers.ffn_normed,
-                    config.intermediate_dim,
+                    inter_dim,
                     dim,
                     &mut self.forward_buffers.up,
                 );
