@@ -35,6 +35,16 @@ web-sys = { workspace = true, features = [
     "Gpu",
     "GpuAdapter",
     "GpuDevice",
+    "Blob",
+    "File",
+    "StorageManager",
+    "FileSystemDirectoryHandle",
+    "FileSystemFileHandle",
+    "FileSystemGetFileOptions",
+    "FileSystemGetDirectoryOptions",
+    "FileSystemWritableFileStream",
+    "WritableStream",
+    "StorageEstimate",
 ] }
 js-sys = { workspace = true }
 wasm-bindgen-futures = { workspace = true }

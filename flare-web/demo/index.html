@@ -32,6 +32,17 @@
     .error { color: #d33; }
     progress { width: 100%; height: 8px; }
     .progress-label { font-size: 0.8rem; opacity: 0.7; margin-top: 0.25rem; }
+    .cache-list { list-style: none; padding: 0; margin: 0.5rem 0; }
+    .cache-item {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 0.4rem 0; border-bottom: 1px solid #8882; gap: 0.5rem;
+    }
+    .cache-item:last-child { border-bottom: none; }
+    .cache-item-name { font-size: 0.9rem; word-break: break-all; flex: 1; }
+    .cache-item-size { font-size: 0.8rem; opacity: 0.7; white-space: nowrap; }
+    .cache-item-actions { display: flex; gap: 0.3rem; }
+    .cache-item-actions button { padding: 0.25rem 0.5rem; font-size: 0.8rem; }
+    .cache-stats { font-size: 0.8rem; opacity: 0.7; margin-top: 0.25rem; }
     .tabs { display: flex; gap: 0.5rem; margin-bottom: 1rem; }
     .tab-btn { padding: 0.35rem 0.8rem; font-size: 0.9rem; border-radius: 4px; }
     .tab-btn.active { background: #4488ff22; border-color: #4488ff88; }
@@ -104,6 +115,12 @@
     <progress id="load-progress" value="0" max="1" hidden></progress>
     <p class="progress-label" id="progress-label" hidden></p>
     <p class="stats" id="model-info"></p>
+
+    <details id="cache-section" style="margin-top:0.75rem;">
+      <summary style="cursor:pointer;font-size:0.9rem;">Cached models (OPFS) <span class="badge info" id="cache-count">0</span></summary>
+      <ul class="cache-list" id="cache-list"></ul>
+      <p class="cache-stats" id="cache-stats"></p>
+    </details>
   </div>
 
   <div class="panel">
@@ -176,7 +193,9 @@
   <script type="module">
     import init, {
       FlareEngine, FlareProgressiveLoader, FlareTokenizer,
-      webgpu_available, init_thread_pool
+      webgpu_available, init_thread_pool,
+      is_model_cached, cache_model, load_cached_model,
+      delete_cached_model, list_cached_models, storage_estimate
     } from '../pkg/flare_web.js';
 
     const $ = id => document.getElementById(id);
@@ -208,9 +227,17 @@
     const $genStats      = $('gen-stats');
     const $perf          = $('perf');
 
+    const $cacheSection = $('cache-section');
+    const $cacheList    = $('cache-list');
+    const $cacheCount   = $('cache-count');
+    const $cacheStats   = $('cache-stats');
+
     let engine    = null;
     let tokenizer = null;
     let streaming = false;
+
+    // Whether OPFS is supported (set during init)
+    let opfsAvailable = false;
 
     // Conversation history: [{role: 'user'|'assistant'|'system', content: string}]
     let history = [];
@@ -292,6 +319,94 @@
       $genStats.textContent = '';
       $perf.textContent = '';
     }
+
+    // ---------- OPFS cache UI ----------
+    function formatSize(bytes) {
+      if (bytes < 1024) return bytes + ' B';
+      if (bytes < 1048576) return (bytes / 1024).toFixed(1) + ' KB';
+      if (bytes < 1073741824) return (bytes / 1048576).toFixed(1) + ' MB';
+      return (bytes / 1073741824).toFixed(2) + ' GB';
+    }
+
+    async function refreshCacheList() {
+      if (!opfsAvailable) {
+        $cacheSection.style.display = 'none';
+        return;
+      }
+      try {
+        const raw = await list_cached_models();
+        const models = JSON.parse(typeof raw === 'string' ? raw : raw.toString());
+        $cacheCount.textContent = models.length;
+        $cacheList.innerHTML = '';
+        if (models.length === 0) {
+          $cacheList.innerHTML = '<li style="opacity:0.5;font-size:0.85rem;padding:0.3rem 0;">No cached models.</li>';
+        } else {
+          for (const m of models) {
+            const li = document.createElement('li');
+            li.className = 'cache-item';
+            li.innerHTML = `
+              <span class="cache-item-name">${m.name}</span>
+              <span class="cache-item-size">${formatSize(m.size)}</span>
+              <span class="cache-item-actions">
+                <button class="cache-load" data-name="${m.name}">Load</button>
+                <button class="cache-delete" data-name="${m.name}">Delete</button>
+              </span>`;
+            $cacheList.appendChild(li);
+          }
+        }
+        // Storage estimate
+        const est = await storage_estimate();
+        const info = JSON.parse(typeof est === 'string' ? est : est.toString());
+        if (info.usage !== undefined) {
+          $cacheStats.textContent = `Storage: ${formatSize(info.usage)} used / ${formatSize(info.quota)} quota`;
+        }
+      } catch (e) {
+        console.warn('Failed to list cached models:', e);
+      }
+    }
+
+    // Handle clicks on cache list buttons (event delegation)
+    $cacheList.addEventListener('click', async (e) => {
+      const btn = e.target.closest('button');
+      if (!btn) return;
+      const name = btn.dataset.name;
+
+      if (btn.classList.contains('cache-load')) {
+        btn.disabled = true;
+        showProgress('Loading from OPFS cache...');
+        try {
+          const t0 = performance.now();
+          clearChat();
+          const cached = await load_cached_model(name);
+          if (cached) {
+            const bytes = new Uint8Array(cached.buffer || cached);
+            updateProgress(bytes.length, bytes.length, 'Parsing (cached)...');
+            await new Promise(r => setTimeout(r, 10));
+            const eng = FlareEngine.load(bytes);
+            await onModelLoaded(eng, performance.now() - t0, bytes);
+            $status.textContent = 'Loaded from OPFS cache.';
+          } else {
+            $modelInfo.textContent = 'Cache miss: model not found.';
+            hideProgress();
+          }
+        } catch (err) {
+          $modelInfo.textContent = 'Cache load error: ' + err;
+          $modelInfo.classList.add('error');
+          hideProgress();
+        } finally { btn.disabled = false; }
+      }
+
+      if (btn.classList.contains('cache-delete')) {
+        if (!confirm(`Delete cached model "${name}"?`)) return;
+        btn.disabled = true;
+        try {
+          await delete_cached_model(name);
+          await refreshCacheList();
+        } catch (err) {
+          console.warn('Delete failed:', err);
+        } finally { btn.disabled = false; }
+      }
+    });
 
     // ---------- Show/hide system prompt row ----------
     $chatMode.addEventListener('change', () => {
@@ -412,10 +527,21 @@
           }
         }
 
+        // Detect OPFS support
+        try {
+          if (navigator.storage && navigator.storage.getDirectory) {
+            await navigator.storage.getDirectory();
+            opfsAvailable = true;
+          }
+        } catch (_) { opfsAvailable = false; }
+
         $status.textContent = 'WASM module loaded. Ready.';
-        $env.textContent = `WebGPU: ${webgpu_available() ? 'yes' : 'no'}${threadsInfo}`;
+        $env.textContent = `WebGPU: ${webgpu_available() ? 'yes' : 'no'}${threadsInfo} | OPFS: ${opfsAvailable ? 'yes' : 'no'}`;
         [$fileInput, $urlInput, $urlLoad, $tokFileIn, $tokUrlIn, $tokUrlLoad]
           .forEach(el => { el.disabled = false; });
+
+        // Populate cache list
+        refreshCacheList();
       } catch (err) {
         $status.textContent = 'Failed to load WASM: ' + err;
         $status.classList.add('error');
@@ -426,16 +552,21 @@
     $fileInput.addEventListener('change', async e => {
       const file = e.target.files[0];
       if (!file) return;
-      showProgress('Reading…');
+      showProgress('Reading...');
       $generate.disabled = true;
       try {
         const buffer = await file.arrayBuffer();
-        updateProgress(file.size, file.size, 'Parsing…');
+        updateProgress(file.size, file.size, 'Parsing...');
         await new Promise(r => setTimeout(r, 10));
         const t0 = performance.now();
         clearChat();
         const bytes = new Uint8Array(buffer);
         await onModelLoaded(FlareEngine.load(bytes), performance.now() - t0, bytes);
+
+        // Cache to OPFS for fast reload on next visit (best-effort)
+        if (opfsAvailable) {
+          cache_model(file.name, bytes).then(() => refreshCacheList()).catch(() => {});
+        }
       } catch (err) {
         $modelInfo.textContent = 'Error: ' + err;
         $modelInfo.classList.add('error');
@@ -446,21 +577,52 @@
     // Cache name — bump version to invalidate all cached models on format change.
     const MODEL_CACHE = 'flare-models-v1';
 
+    /// Extract a filename from a URL for use as an OPFS cache key.
+    function modelNameFromUrl(url) {
+      try {
+        const pathname = new URL(url).pathname;
+        return pathname.split('/').pop() || 'model.gguf';
+      } catch (_) {
+        return url.split('/').pop() || 'model.gguf';
+      }
+    }
+
     async function loadModelFromUrl(url) {
-      // 1. Check browser Cache API for a previously downloaded copy.
+      const modelName = modelNameFromUrl(url);
+
+      // 1. Check OPFS cache first (faster than Cache API for large files).
+      if (opfsAvailable) {
+        try {
+          const isCached = await is_model_cached(modelName);
+          if (isCached) {
+            updateProgress(1, 1, 'Loading from OPFS cache...');
+            const cached = await load_cached_model(modelName);
+            if (cached) {
+              const buf = new Uint8Array(cached.buffer || cached);
+              return { bytes: buf, fromCache: true };
+            }
+          }
+        } catch (_) { /* OPFS unavailable — fall through */ }
+      }
+
+      // 2. Fall back to Cache API for previously downloaded copies.
       if ('caches' in window) {
         try {
           const cache = await caches.open(MODEL_CACHE);
           const cached = await cache.match(url);
           if (cached) {
-            updateProgress(1, 1, 'Loading from cache…');
+            updateProgress(1, 1, 'Loading from cache...');
             const buf = new Uint8Array(await cached.arrayBuffer());
+            // Migrate to OPFS for faster access next time
+            if (opfsAvailable) {
+              cache_model(modelName, buf).catch(() => {});
+            }
             return { bytes: buf, fromCache: true };
           }
         } catch (_) { /* Cache API unavailable in this context — fall through */ }
       }
 
-      // 2. Fresh download: stream the response body to show progress.
+      // 3. Fresh download: stream the response body to show progress.
       const resp = await fetch(url);
       if (!resp.ok) throw new Error(`HTTP ${resp.status} ${resp.statusText}`);
       const total = parseInt(resp.headers.get('Content-Length') || '0', 10);
@@ -472,14 +634,23 @@
         if (done) break;
         chunks.push(value);
         loaded += value.byteLength;
-        updateProgress(loaded, total || loaded, 'Downloading…');
+        updateProgress(loaded, total || loaded, 'Downloading...');
       }
       // Concatenate chunks
       const buf = new Uint8Array(loaded);
       let offset = 0;
       for (const chunk of chunks) { buf.set(chunk, offset); offset += chunk.byteLength; }
 
-      // 3. Store in Cache API for next visit (best-effort).
+      // 4. Store in OPFS for fast access on next visit (best-effort).
+      if (opfsAvailable) {
+        try {
+          updateProgress(loaded, loaded, 'Caching to OPFS...');
+          await cache_model(modelName, buf);
+          refreshCacheList();
+        } catch (_) { /* Quota exceeded or private browsing — ignore */ }
+      }
+
+      // 5. Also store in Cache API as fallback (best-effort).
       if ('caches' in window) {
         try {
           const cache = await caches.open(MODEL_CACHE);

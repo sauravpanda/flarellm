@@ -2272,3 +2272,168 @@ impl FlareTokenizer {
         self.inner.vocab_size() as u32
     }
 }
+
+// ---------------------------------------------------------------------------
+// OPFS (Origin Private File System) model caching
+// ---------------------------------------------------------------------------
+
+/// Directory name under the OPFS root where cached models are stored.
+const OPFS_MODELS_DIR: &str = "flare-models";
+
+/// Get the OPFS root directory handle, returning `Err` if unavailable.
+async fn opfs_root() -> Result<web_sys::FileSystemDirectoryHandle, JsValue> {
+    let window = web_sys::window().ok_or_else(|| JsValue::from_str("no window"))?;
+    let storage = window.navigator().storage();
+    let promise = storage.get_directory();
+    let root = wasm_bindgen_futures::JsFuture::from(promise).await?;
+    Ok(root.unchecked_into())
+}
+
+/// Get (or create) the `flare-models` subdirectory inside OPFS.
+async fn opfs_models_dir(create: bool) -> Result<web_sys::FileSystemDirectoryHandle, JsValue> {
+    let root = opfs_root().await?;
+    let opts = web_sys::FileSystemGetDirectoryOptions::new();
+    opts.set_create(create);
+    let promise = root.get_directory_handle_with_options(OPFS_MODELS_DIR, &opts);
+    let dir = wasm_bindgen_futures::JsFuture::from(promise).await?;
+    Ok(dir.unchecked_into())
+}
+
+/// Check if a model is cached in OPFS by name.
+///
+/// Returns `false` if OPFS is unavailable or the model is not found.
+#[wasm_bindgen]
+pub async fn is_model_cached(model_name: &str) -> bool {
+    let dir = match opfs_models_dir(false).await {
+        Ok(d) => d,
+        Err(_) => return false,
+    };
+    let promise = dir.get_file_handle(model_name);
+    wasm_bindgen_futures::JsFuture::from(promise).await.is_ok()
+}
+
+/// Save model bytes to OPFS.
+///
+/// Creates the `flare-models` directory if it does not exist.  Overwrites any
+/// existing file with the same name.
+#[wasm_bindgen]
+pub async fn cache_model(model_name: &str, data: &[u8]) -> Result<(), JsValue> {
+    let dir = opfs_models_dir(true).await?;
+    let opts = web_sys::FileSystemGetFileOptions::new();
+    opts.set_create(true);
+    let file_handle: web_sys::FileSystemFileHandle =
+        wasm_bindgen_futures::JsFuture::from(dir.get_file_handle_with_options(model_name, &opts))
+            .await?
+            .unchecked_into();
+
+    let writable: web_sys::FileSystemWritableFileStream =
+        wasm_bindgen_futures::JsFuture::from(file_handle.create_writable())
+            .await?
+            .unchecked_into();
+
+    let write_promise = writable.write_with_u8_array(data)?;
+    wasm_bindgen_futures::JsFuture::from(write_promise).await?;
+    wasm_bindgen_futures::JsFuture::from(writable.close()).await?;
+    Ok(())
+}
+
+/// Load model bytes from OPFS.
+///
+/// Returns `null` (JS) / `None` (Rust) if the model is not cached or OPFS is
+/// unavailable.
+#[wasm_bindgen]
+pub async fn load_cached_model(model_name: &str) -> Result<JsValue, JsValue> {
+    let dir = match opfs_models_dir(false).await {
+        Ok(d) => d,
+        Err(_) => return Ok(JsValue::NULL),
+    };
+    let file_handle: web_sys::FileSystemFileHandle =
+        match wasm_bindgen_futures::JsFuture::from(dir.get_file_handle(model_name)).await {
+            Ok(h) => h.unchecked_into(),
+            Err(_) => return Ok(JsValue::NULL),
+        };
+
+    let file: web_sys::File =
+        wasm_bindgen_futures::JsFuture::from(file_handle.get_file())
+            .await?
+            .unchecked_into();
+
+    let array_buffer =
+        wasm_bindgen_futures::JsFuture::from(file.array_buffer())
+            .await?;
+
+    let uint8_array = js_sys::Uint8Array::new(&array_buffer);
+    Ok(uint8_array.into())
+}
+
+/// Delete a cached model from OPFS.
+#[wasm_bindgen]
+pub async fn delete_cached_model(model_name: &str) -> Result<(), JsValue> {
+    let dir = opfs_models_dir(false).await?;
+    wasm_bindgen_futures::JsFuture::from(dir.remove_entry(model_name)).await?;
+    Ok(())
+}
+
+/// List all cached models with their sizes (in bytes).
+///
+/// Returns a JSON-serialised array of objects: `[{name: string, size: number}, ...]`.
+/// Returns `"[]"` if OPFS is unavailable or the models directory does not exist.
+#[wasm_bindgen]
+pub async fn list_cached_models() -> Result<JsValue, JsValue> {
+    let dir = match opfs_models_dir(false).await {
+        Ok(d) => d,
+        Err(_) => {
+            return Ok(JsValue::from_str("[]"));
+        }
+    };
+
+    let entries_iter = dir.entries();
+    let mut models: Vec<String> = Vec::new();
+
+    loop {
+        let next = wasm_bindgen_futures::JsFuture::from(entries_iter.next()?).await?;
+        let done = js_sys::Reflect::get(&next, &JsValue::from_str("done"))?;
+        if done.as_bool().unwrap_or(true) {
+            break;
+        }
+        let value = js_sys::Reflect::get(&next, &JsValue::from_str("value"))?;
+        let pair = js_sys::Array::from(&value);
+        let name: String = pair.get(0).as_string().unwrap_or_default();
+        let handle: web_sys::FileSystemFileHandle = pair.get(1).unchecked_into();
+        let file: web_sys::File =
+            wasm_bindgen_futures::JsFuture::from(handle.get_file())
+                .await?
+                .unchecked_into();
+        let size = file.size();
+        let escaped_name = name.replace('\\', "\\\\").replace('"', "\\\"");
+        models.push(format!(r#"{{"name":"{}","size":{}}}"#, escaped_name, size));
+    }
+
+    Ok(JsValue::from_str(&format!("[{}]", models.join(","))))
+}
+
+/// Get storage usage and quota estimate.
+///
+/// Returns a JSON string: `{usage: number, quota: number}`.
+/// Returns `"{}"` if the Storage API is unavailable.
+#[wasm_bindgen]
+pub async fn storage_estimate() -> Result<JsValue, JsValue> {
+    let window = match web_sys::window() {
+        Some(w) => w,
+        None => return Ok(JsValue::from_str("{}")),
+    };
+    let storage = window.navigator().storage();
+    let estimate: web_sys::StorageEstimate =
+        match storage.estimate() {
+            Ok(promise) => wasm_bindgen_futures::JsFuture::from(promise)
+                .await?
+                .unchecked_into(),
+            Err(_) => return Ok(JsValue::from_str("{}")),
+        };
+    let usage = estimate.get_usage().unwrap_or(0.0);
+    let quota = estimate.get_quota().unwrap_or(0.0);
+    Ok(JsValue::from_str(&format!(
+        r#"{{"usage":{},"quota":{}}}"#,
+        usage, quota
+    )))
+}
