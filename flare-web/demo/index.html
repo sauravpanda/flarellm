@@ -9,123 +9,575 @@
   <meta http-equiv="Cross-Origin-Embedder-Policy" content="require-corp">
   <title>Flare LLM Browser Demo</title>
   <style>
+    /* ---- Design tokens ---- */
     :root {
       color-scheme: light dark;
+      --bg: #ffffff;
+      --bg-surface: #f7f8fa;
+      --bg-surface-alt: #eef0f4;
+      --fg: #1a1a2e;
+      --fg-dim: #6b7280;
+      --fg-faint: #9ca3af;
+      --border: #e2e5ea;
+      --border-focus: #4f8fff;
+      --accent: #4f8fff;
+      --accent-bg: #4f8fff14;
+      --accent-border: #4f8fff44;
+      --success: #22c55e;
+      --success-bg: #22c55e14;
+      --success-border: #22c55e44;
+      --warn: #f59e0b;
+      --warn-bg: #f59e0b14;
+      --warn-border: #f59e0b44;
+      --error: #ef4444;
+      --error-bg: #ef444414;
+      --error-border: #ef444444;
+      --radius: 10px;
+      --radius-sm: 6px;
+      --font-mono: 'SF Mono', 'Cascadia Code', 'Fira Code', 'Menlo', monospace;
       font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
     }
-    body { max-width: 720px; margin: 2rem auto; padding: 0 1rem; line-height: 1.5; }
-    h1 { margin-bottom: 0.25rem; }
-    .subtitle { opacity: 0.7; margin-top: 0; }
-    .panel { border: 1px solid #8884; border-radius: 8px; padding: 1rem; margin: 1rem 0; }
-    button {
-      font: inherit; padding: 0.5rem 1rem; border: 1px solid #8888;
-      border-radius: 4px; background: #8881; cursor: pointer;
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #0f1117;
+        --bg-surface: #1a1d27;
+        --bg-surface-alt: #22262f;
+        --fg: #e5e7eb;
+        --fg-dim: #9ca3af;
+        --fg-faint: #6b7280;
+        --border: #2d3140;
+        --border-focus: #4f8fff;
+      }
     }
-    button:disabled { opacity: 0.5; cursor: not-allowed; }
-    button:hover:not(:disabled) { background: #8882; }
-    input[type="text"], input[type="url"], textarea {
-      font: inherit; padding: 0.4rem 0.6rem; border: 1px solid #8888;
-      border-radius: 4px; width: 100%; box-sizing: border-box; margin-bottom: 0.5rem;
+
+    /* ---- Reset & base ---- */
+    *, *::before, *::after { box-sizing: border-box; }
+    body {
+      background: var(--bg);
+      color: var(--fg);
+      max-width: 860px;
+      margin: 0 auto;
+      padding: 1.5rem 1rem 3rem;
+      line-height: 1.6;
+    }
+    h1, h2, h3 { margin: 0; font-weight: 600; }
+    a { color: var(--accent); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+
+    /* ---- Header ---- */
+    .header { margin-bottom: 1.5rem; }
+    .header h1 { font-size: 1.75rem; letter-spacing: -0.02em; }
+    .header .subtitle {
+      color: var(--fg-dim);
+      margin: 0.25rem 0 0;
+      font-size: 0.95rem;
+    }
+
+    /* ---- Panels ---- */
+    .panel {
+      background: var(--bg-surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 1.25rem;
+      margin-bottom: 1rem;
+    }
+    .panel h3 {
+      font-size: 0.95rem;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      color: var(--fg-dim);
+      margin-bottom: 0.75rem;
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+    }
+
+    /* ---- Buttons ---- */
+    button {
+      font: inherit;
+      font-size: 0.875rem;
+      font-weight: 500;
+      padding: 0.5rem 1rem;
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      background: var(--bg-surface-alt);
+      color: var(--fg);
+      cursor: pointer;
+      transition: background 0.15s, border-color 0.15s;
+    }
+    button:hover:not(:disabled) {
+      border-color: var(--border-focus);
+      background: var(--accent-bg);
+    }
+    button:disabled { opacity: 0.45; cursor: not-allowed; }
+    button.primary {
+      background: var(--accent);
+      color: #fff;
+      border-color: var(--accent);
+    }
+    button.primary:hover:not(:disabled) {
+      background: #3d7ae6;
+      border-color: #3d7ae6;
+    }
+    button.danger {
+      color: var(--error);
+      border-color: var(--error-border);
+    }
+    button.danger:hover:not(:disabled) {
+      background: var(--error-bg);
+    }
+
+    /* ---- Inputs ---- */
+    input[type="text"], input[type="url"], input[type="number"], textarea, select {
+      font: inherit;
+      font-size: 0.9rem;
+      padding: 0.5rem 0.7rem;
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      background: var(--bg);
+      color: var(--fg);
+      width: 100%;
+      margin-bottom: 0.5rem;
+      transition: border-color 0.15s;
+    }
+    input:focus, textarea:focus, select:focus {
+      outline: none;
+      border-color: var(--border-focus);
+      box-shadow: 0 0 0 3px var(--accent-bg);
     }
     textarea { resize: vertical; min-height: 3.5rem; }
-    .stats { font-size: 0.85rem; opacity: 0.8; }
-    .error { color: #d33; }
-    progress { width: 100%; height: 8px; }
-    .progress-label { font-size: 0.8rem; opacity: 0.7; margin-top: 0.25rem; }
-    .cache-list { list-style: none; padding: 0; margin: 0.5rem 0; }
-    .cache-item {
-      display: flex; align-items: center; justify-content: space-between;
-      padding: 0.4rem 0; border-bottom: 1px solid #8882; gap: 0.5rem;
+
+    /* ---- Badges ---- */
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      font-size: 0.7rem;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      padding: 0.15rem 0.45rem;
+      border-radius: 4px;
+      border: 1px solid var(--border);
+      background: var(--bg-surface-alt);
     }
-    .cache-item:last-child { border-bottom: none; }
-    .cache-item-name { font-size: 0.9rem; word-break: break-all; flex: 1; }
-    .cache-item-size { font-size: 0.8rem; opacity: 0.7; white-space: nowrap; }
-    .cache-item-actions { display: flex; gap: 0.3rem; }
-    .cache-item-actions button { padding: 0.25rem 0.5rem; font-size: 0.8rem; }
-    .cache-stats { font-size: 0.8rem; opacity: 0.7; margin-top: 0.25rem; }
-    .tabs { display: flex; gap: 0.5rem; margin-bottom: 1rem; }
-    .tab-btn { padding: 0.35rem 0.8rem; font-size: 0.9rem; border-radius: 4px; }
-    .tab-btn.active { background: #4488ff22; border-color: #4488ff88; }
+    .badge.ok   { background: var(--success-bg); border-color: var(--success-border); color: var(--success); }
+    .badge.warn { background: var(--warn-bg); border-color: var(--warn-border); color: var(--warn); }
+    .badge.info { background: var(--accent-bg); border-color: var(--accent-border); color: var(--accent); }
+    .badge.error{ background: var(--error-bg); border-color: var(--error-border); color: var(--error); }
+
+    /* ---- Stats text ---- */
+    .stats { font-size: 0.82rem; color: var(--fg-dim); margin: 0.25rem 0; }
+    .error { color: var(--error); }
+    .field-label { font-size: 0.82rem; color: var(--fg-dim); margin-bottom: 0.25rem; }
+
+    /* ---- Tabs ---- */
+    .tabs { display: flex; gap: 0.25rem; margin-bottom: 0.75rem; }
+    .tab-btn {
+      font-size: 0.82rem;
+      padding: 0.3rem 0.7rem;
+      border-radius: var(--radius-sm);
+      border: 1px solid transparent;
+      background: transparent;
+    }
+    .tab-btn.active {
+      background: var(--accent-bg);
+      border-color: var(--accent-border);
+      color: var(--accent);
+    }
     .tab-panel { display: none; }
     .tab-panel.active { display: block; }
-    .badge {
-      display: inline-block; font-size: 0.75rem; padding: 0.1rem 0.4rem;
-      border-radius: 3px; background: #8881; border: 1px solid #8884; margin-left: 0.25rem;
+
+    /* ---- Progress bar ---- */
+    .progress-wrap { margin: 0.75rem 0; display: none; }
+    .progress-wrap.visible { display: block; }
+    .progress-bar-outer {
+      width: 100%;
+      height: 6px;
+      background: var(--bg-surface-alt);
+      border-radius: 3px;
+      overflow: hidden;
     }
-    .badge.ok   { background: #22aa4422; border-color: #22aa4444; color: #4a4; }
-    .badge.warn { background: #ffaa0022; border-color: #ffaa0044; color: #a80; }
-    .badge.info { background: #4488ff22; border-color: #4488ff44; color: #48f; }
-    label.checkbox { display: flex; align-items: center; gap: 0.4rem; font-size: 0.9rem; cursor: pointer; }
-    .field-label { font-size: 0.85rem; opacity: 0.8; margin-bottom: 0.25rem; }
+    .progress-bar-inner {
+      height: 100%;
+      width: 0%;
+      background: var(--accent);
+      border-radius: 3px;
+      transition: width 0.2s ease;
+    }
+    .progress-bar-inner.indeterminate {
+      width: 30%;
+      animation: indeterminate 1.2s infinite ease-in-out;
+    }
+    @keyframes indeterminate {
+      0%   { transform: translateX(-100%); }
+      100% { transform: translateX(400%); }
+    }
+    .progress-label {
+      font-size: 0.78rem;
+      color: var(--fg-dim);
+      margin-top: 0.3rem;
+      display: flex;
+      justify-content: space-between;
+    }
+
+    /* ---- Skeleton shimmer ---- */
+    .skeleton {
+      background: linear-gradient(90deg, var(--bg-surface-alt) 25%, var(--bg-surface) 50%, var(--bg-surface-alt) 75%);
+      background-size: 200% 100%;
+      animation: shimmer 1.5s infinite;
+      border-radius: var(--radius-sm);
+    }
+    @keyframes shimmer {
+      0%   { background-position: 200% 0; }
+      100% { background-position: -200% 0; }
+    }
+    .skeleton-line {
+      height: 0.8rem;
+      margin-bottom: 0.4rem;
+      border-radius: 3px;
+    }
+    .skeleton-line:last-child { width: 60%; }
+
+    /* ---- Performance dashboard ---- */
+    .perf-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+      gap: 0.5rem;
+    }
+    .perf-card {
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      padding: 0.6rem 0.75rem;
+      text-align: center;
+    }
+    .perf-card .value {
+      font-size: 1.3rem;
+      font-weight: 700;
+      font-variant-numeric: tabular-nums;
+      letter-spacing: -0.02em;
+      color: var(--fg);
+    }
+    .perf-card .value.accent { color: var(--accent); }
+    .perf-card .label {
+      font-size: 0.7rem;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: var(--fg-faint);
+      margin-top: 0.15rem;
+    }
+
+    /* ---- Model info grid ---- */
+    .model-info-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(170px, 1fr));
+      gap: 0.4rem 1rem;
+      font-size: 0.85rem;
+    }
+    .model-info-grid dt {
+      color: var(--fg-faint);
+      font-size: 0.75rem;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }
+    .model-info-grid dd {
+      margin: 0 0 0.3rem;
+      font-weight: 500;
+    }
+
+    /* ---- Sampling controls ---- */
+    .sampling-controls {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+      gap: 0.5rem 1rem;
+      margin-bottom: 0.75rem;
+    }
+    .sampling-controls label {
+      font-size: 0.82rem;
+      color: var(--fg-dim);
+    }
+    .sampling-controls .slider-row {
+      display: flex;
+      align-items: center;
+      gap: 0.4rem;
+    }
+    .sampling-controls input[type="range"] {
+      flex: 1;
+      height: 4px;
+      accent-color: var(--accent);
+    }
+    .sampling-controls .slider-val {
+      font-size: 0.8rem;
+      font-family: var(--font-mono);
+      min-width: 2.5rem;
+      text-align: right;
+      color: var(--fg);
+    }
 
     /* ---- Chat thread ---- */
     .chat-thread {
-      display: flex; flex-direction: column; gap: 0.75rem;
-      max-height: 420px; overflow-y: auto;
-      padding: 0.5rem 0; margin-bottom: 0.75rem;
+      display: flex;
+      flex-direction: column;
+      gap: 0.75rem;
+      max-height: 480px;
+      overflow-y: auto;
+      padding: 0.5rem 0;
+      margin-bottom: 0.75rem;
+      scroll-behavior: smooth;
     }
     .chat-thread:empty::before {
       content: 'Your conversation will appear here.';
-      opacity: 0.4; font-size: 0.9rem; text-align: center; padding: 1rem 0;
+      color: var(--fg-faint);
+      font-size: 0.9rem;
+      text-align: center;
+      padding: 2rem 0;
       display: block;
     }
+    .msg-wrap { display: flex; flex-direction: column; }
     .msg {
-      max-width: 88%; padding: 0.6rem 0.9rem; border-radius: 12px;
-      font-size: 0.95rem; line-height: 1.5; white-space: pre-wrap; word-break: break-word;
+      max-width: 88%;
+      padding: 0.7rem 1rem;
+      border-radius: 14px;
+      font-size: 0.92rem;
+      line-height: 1.6;
+      word-break: break-word;
     }
     .msg.user {
       align-self: flex-end;
-      background: #4488ff22; border: 1px solid #4488ff44;
-      border-bottom-right-radius: 3px;
+      background: var(--accent);
+      color: #fff;
+      border-bottom-right-radius: 4px;
     }
     .msg.assistant {
       align-self: flex-start;
-      background: #8881; border: 1px solid #8884;
-      border-bottom-left-radius: 3px;
+      background: var(--bg-surface-alt);
+      border: 1px solid var(--border);
+      border-bottom-left-radius: 4px;
     }
-    .msg.assistant.streaming { border-color: #4488ff66; }
-    .msg-role { font-size: 0.7rem; opacity: 0.55; margin-bottom: 0.2rem; }
+    .msg.assistant.streaming {
+      border-color: var(--accent-border);
+    }
+    .msg-role {
+      font-size: 0.68rem;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: var(--fg-faint);
+      margin-bottom: 0.2rem;
+      padding: 0 0.3rem;
+    }
+    .msg-wrap:has(.msg.user) .msg-role { text-align: right; }
+
+    /* ---- Markdown in assistant messages ---- */
+    .msg.assistant code {
+      font-family: var(--font-mono);
+      font-size: 0.84em;
+      background: var(--bg);
+      padding: 0.15em 0.35em;
+      border-radius: 3px;
+      border: 1px solid var(--border);
+    }
+    .msg.assistant pre {
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      padding: 0.7rem 0.8rem;
+      overflow-x: auto;
+      margin: 0.5rem 0;
+      font-size: 0.82em;
+      line-height: 1.5;
+    }
+    .msg.assistant pre code {
+      background: none;
+      border: none;
+      padding: 0;
+    }
+    .msg.assistant ul, .msg.assistant ol {
+      margin: 0.4rem 0;
+      padding-left: 1.2rem;
+    }
+    .msg.assistant li { margin-bottom: 0.2rem; }
+    .msg.assistant p { margin: 0.3rem 0; }
+    .msg.assistant p:first-child { margin-top: 0; }
+    .msg.assistant p:last-child { margin-bottom: 0; }
+    .msg.assistant strong { font-weight: 600; }
+    .msg.assistant em { font-style: italic; }
+
+    /* ---- Compose bar ---- */
+    .compose-bar {
+      display: flex;
+      gap: 0.5rem;
+      align-items: flex-end;
+    }
+    .compose-bar textarea {
+      flex: 1;
+      margin-bottom: 0;
+    }
+    .compose-actions {
+      display: flex;
+      gap: 0.35rem;
+      flex-wrap: wrap;
+      margin-top: 0.5rem;
+      align-items: center;
+    }
+
+    /* ---- Loading skeleton ---- */
+    .loading-skeleton {
+      padding: 1rem;
+      display: none;
+    }
+    .loading-skeleton.visible { display: block; }
+
+    /* ---- Cache list ---- */
+    .cache-item {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 0.4rem 0; border-bottom: 1px solid var(--border); gap: 0.5rem;
+    }
+    .cache-item:last-child { border-bottom: none; }
+    .cache-item-name { font-size: 0.88rem; word-break: break-all; flex: 1; }
+    .cache-item-size { font-size: 0.8rem; color: var(--fg-dim); white-space: nowrap; }
+    .cache-item-actions { display: flex; gap: 0.3rem; }
+    .cache-item-actions button { padding: 0.2rem 0.5rem; font-size: 0.78rem; }
+
+    /* ---- Footer ---- */
+    .footer {
+      text-align: center;
+      color: var(--fg-faint);
+      font-size: 0.82rem;
+      margin-top: 2rem;
+      padding-top: 1rem;
+      border-top: 1px solid var(--border);
+    }
+
+    /* ---- Two-column layout on wider screens ---- */
+    .two-col {
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 1rem;
+    }
+    @media (min-width: 640px) {
+      .two-col { grid-template-columns: 1fr 1fr; }
+    }
+
+    /* ---- Responsive ---- */
+    @media (max-width: 480px) {
+      body { padding: 1rem 0.75rem 2rem; }
+      .perf-grid { grid-template-columns: repeat(3, 1fr); }
+      .sampling-controls { grid-template-columns: 1fr; }
+      .model-info-grid { grid-template-columns: 1fr 1fr; }
+    }
+
+    /* ---- Checkbox / toggle ---- */
+    label.checkbox {
+      display: flex; align-items: center; gap: 0.4rem;
+      font-size: 0.88rem; cursor: pointer;
+    }
+
+    /* ---- Collapsible ---- */
+    details summary {
+      cursor: pointer;
+      font-size: 0.85rem;
+      color: var(--fg-dim);
+      margin-bottom: 0.5rem;
+    }
+    details summary:hover { color: var(--fg); }
   </style>
 </head>
 <body>
-  <h1>Flare LLM</h1>
-  <p class="subtitle">WASM-first LLM inference, running entirely in your browser.</p>
+  <!-- ==================== HEADER ==================== -->
+  <div class="header">
+    <h1>Flare LLM</h1>
+    <p class="subtitle">WASM-first LLM inference, running entirely in your browser.</p>
+  </div>
 
+  <!-- ==================== STATUS ==================== -->
   <div class="panel">
     <h3>Status</h3>
     <p id="status">Initializing WASM module...</p>
     <p class="stats" id="env"></p>
   </div>
 
+  <!-- ==================== PERFORMANCE DASHBOARD ==================== -->
+  <div class="panel" id="perf-panel" style="display:none;">
+    <h3>Performance</h3>
+    <div class="perf-grid">
+      <div class="perf-card">
+        <div class="value accent" id="perf-tps">--</div>
+        <div class="label">Tok/s</div>
+      </div>
+      <div class="perf-card">
+        <div class="value" id="perf-ttft">--</div>
+        <div class="label">TTFT (ms)</div>
+      </div>
+      <div class="perf-card">
+        <div class="value" id="perf-tokens">0</div>
+        <div class="label">Tokens</div>
+      </div>
+      <div class="perf-card">
+        <div class="value" id="perf-mem">--</div>
+        <div class="label">Memory (MB)</div>
+      </div>
+      <div class="perf-card">
+        <div class="value" id="perf-backend">--</div>
+        <div class="label">Backend</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ==================== LOAD MODEL ==================== -->
   <div class="panel">
     <h3>1. Load a model</h3>
     <div class="tabs">
       <button class="tab-btn active" data-tab="file">Local file</button>
-      <button class="tab-btn" data-tab="url">From URL (progressive)</button>
+      <button class="tab-btn" data-tab="url">From URL</button>
     </div>
     <div id="tab-file" class="tab-panel active">
-      <p>Select a GGUF file. Try SmolLM2-135M Q8_0 (~138 MB).</p>
+      <p class="stats">Select a GGUF file. Try SmolLM2-135M Q8_0 (~138 MB).</p>
       <input type="file" id="file-input" accept=".gguf" disabled>
     </div>
     <div id="tab-url" class="tab-panel">
-      <p>Paste a direct URL to a GGUF file. Download progress updates in real time.</p>
+      <p class="stats">Paste a direct URL to a GGUF file. Download progress shown in real time.</p>
       <input type="url" id="url-input" placeholder="https://example.com/model.gguf" disabled>
       <button id="url-load" disabled>Load from URL</button>
     </div>
-    <progress id="load-progress" value="0" max="1" hidden></progress>
-    <p class="progress-label" id="progress-label" hidden></p>
-    <p class="stats" id="model-info"></p>
 
-    <details id="cache-section" style="margin-top:0.75rem;">
-      <summary style="cursor:pointer;font-size:0.9rem;">Cached models (OPFS) <span class="badge info" id="cache-count">0</span></summary>
-      <ul class="cache-list" id="cache-list"></ul>
-      <p class="cache-stats" id="cache-stats"></p>
+    <!-- Progress bar -->
+    <div class="progress-wrap" id="progress-wrap">
+      <div class="progress-bar-outer">
+        <div class="progress-bar-inner" id="progress-bar"></div>
+      </div>
+      <div class="progress-label">
+        <span id="progress-label-text">Connecting...</span>
+        <span id="progress-label-speed"></span>
+      </div>
+    </div>
+
+    <!-- Loading skeleton -->
+    <div class="loading-skeleton" id="model-skeleton">
+      <div class="skeleton skeleton-line" style="width:90%"></div>
+      <div class="skeleton skeleton-line" style="width:70%"></div>
+      <div class="skeleton skeleton-line" style="width:50%"></div>
+    </div>
+  </div>
+
+  <!-- ==================== CACHED MODELS (OPFS) ==================== -->
+  <div class="panel" id="cache-panel" style="display:none;">
+    <details id="cache-section">
+      <summary style="cursor:pointer;font-weight:600;">Cached models (OPFS) <span class="badge" id="cache-count" style="margin-left:0.3rem;">0</span></summary>
+      <ul id="cache-list" style="list-style:none;padding:0;margin:0.5rem 0;"></ul>
+      <p class="stats" id="cache-stats"></p>
     </details>
   </div>
 
+  <!-- ==================== MODEL INFO ==================== -->
+  <div class="panel" id="model-info-panel" style="display:none;">
+    <h3>Model Info</h3>
+    <dl class="model-info-grid" id="model-info-grid"></dl>
+  </div>
+
+  <!-- ==================== LOAD TOKENIZER ==================== -->
   <div class="panel">
-    <h3>2. Load tokenizer <span class="badge warn" id="tok-badge">not loaded</span></h3>
-    <p>Load a HuggingFace <code>tokenizer.json</code> to see decoded text output.
+    <h3>2. Tokenizer <span class="badge warn" id="tok-badge">not loaded</span></h3>
+    <p class="stats">Load a HuggingFace <code>tokenizer.json</code> for decoded text output.
        Without it, raw token IDs are shown.</p>
     <div class="tabs">
       <button class="tab-btn active" data-tab="tok-file">Local file</button>
@@ -141,54 +593,98 @@
     <p class="stats" id="tok-info"></p>
   </div>
 
+  <!-- ==================== CHAT ==================== -->
   <div class="panel">
     <h3>3. Chat</h3>
 
+    <!-- Chat mode toggle -->
     <div style="margin-bottom:0.75rem;">
       <label class="checkbox">
         <input type="checkbox" id="chat-mode" checked>
         Apply chat template
         <span class="badge info" id="template-badge" style="display:none"></span>
       </label>
-      <p class="stats" style="margin:0.2rem 0 0 1.4rem;">
-        Wraps your prompt in the model's instruction format (ChatML, Llama3, etc.).
-        Disable for raw completion.
+      <p class="stats" style="margin:0.15rem 0 0 1.4rem;">
+        Wraps your prompt in the model's instruction format. Disable for raw completion.
       </p>
     </div>
 
-    <div id="system-prompt-row" style="margin-bottom:0.5rem;">
+    <!-- System prompt -->
+    <div id="system-prompt-row" style="margin-bottom:0.75rem;">
       <div class="field-label">System prompt (optional, applied on first turn)</div>
       <textarea id="system-input" placeholder="You are a helpful assistant." disabled rows="2"></textarea>
     </div>
 
+    <!-- Sampling controls (collapsible) -->
+    <details style="margin-bottom:0.75rem;">
+      <summary>Sampling parameters</summary>
+      <div class="sampling-controls" id="sampling-controls">
+        <div>
+          <label>Temperature</label>
+          <div class="slider-row">
+            <input type="range" id="param-temp" min="0" max="2" step="0.05" value="0.7">
+            <span class="slider-val" id="val-temp">0.70</span>
+          </div>
+        </div>
+        <div>
+          <label>Top-p</label>
+          <div class="slider-row">
+            <input type="range" id="param-topp" min="0" max="1" step="0.01" value="0.95">
+            <span class="slider-val" id="val-topp">0.95</span>
+          </div>
+        </div>
+        <div>
+          <label>Top-k</label>
+          <div class="slider-row">
+            <input type="range" id="param-topk" min="0" max="100" step="1" value="40">
+            <span class="slider-val" id="val-topk">40</span>
+          </div>
+        </div>
+        <div>
+          <label>Repeat penalty</label>
+          <div class="slider-row">
+            <input type="range" id="param-repeat" min="1" max="2" step="0.05" value="1.1">
+            <span class="slider-val" id="val-repeat">1.10</span>
+          </div>
+        </div>
+        <div>
+          <label>Max tokens</label>
+          <div class="slider-row">
+            <input type="range" id="max-tokens" min="16" max="512" step="16" value="128">
+            <span class="slider-val" id="val-maxtokens">128</span>
+          </div>
+        </div>
+      </div>
+    </details>
+
     <!-- Conversation thread -->
     <div class="chat-thread" id="chat"></div>
 
+    <!-- Compose area -->
     <div>
       <div class="field-label" style="display:flex;justify-content:space-between;align-items:baseline;">
         <span>Your message</span>
-        <span id="token-counter" style="font-size:0.8rem;color:#888;"></span>
+        <span id="token-counter" style="font-size:0.78rem;color:var(--fg-faint);font-family:var(--font-mono);"></span>
       </div>
-      <textarea id="prompt-input" placeholder="Ask me anything…" disabled rows="2"></textarea>
+      <div class="compose-bar">
+        <textarea id="prompt-input" placeholder="Ask me anything... (Ctrl+Enter to send)" disabled rows="2"></textarea>
+        <button id="generate" class="primary" disabled style="height:auto;align-self:stretch;">Send</button>
+      </div>
     </div>
 
-    <div style="display:flex;gap:0.5rem;align-items:center;flex-wrap:wrap;">
-      <button id="generate" disabled>Send</button>
-      <button id="stop" disabled>Stop</button>
-      <button id="clear" disabled>Clear conversation</button>
-      <button id="quick-test" disabled title="Run a quick test using the embedded GGUF tokenizer (no tokenizer.json needed)">Quick test</button>
-      <label style="font-size:0.85rem;">
-        Max tokens:&nbsp;<input type="number" id="max-tokens" value="128"
-          min="1" max="512" style="width:5rem;margin-bottom:0;">
-      </label>
+    <div class="compose-actions">
+      <button id="stop" class="danger" disabled>Stop</button>
+      <button id="clear" disabled>Clear</button>
+      <button id="quick-test" disabled title="Quick test using embedded GGUF tokenizer">Quick test</button>
+      <span style="flex:1;"></span>
+      <span class="stats" id="gen-stats"></span>
     </div>
-    <p class="stats" id="gen-stats"></p>
-    <p class="stats" id="perf" style="font-variant-numeric:tabular-nums;letter-spacing:0.01em;"></p>
   </div>
 
-  <p class="subtitle" style="text-align:center;margin-top:2rem;">
+  <!-- ==================== FOOTER ==================== -->
+  <div class="footer">
     <a href="https://github.com/sauravpanda/flarellm">github.com/sauravpanda/flarellm</a>
-  </p>
+  </div>
 
   <script type="module">
     import init, {
@@ -204,9 +700,13 @@
     const $fileInput   = $('file-input');
     const $urlInput    = $('url-input');
     const $urlLoad     = $('url-load');
-    const $progress    = $('load-progress');
-    const $progressLbl = $('progress-label');
-    const $modelInfo   = $('model-info');
+    const $progressWrap = $('progress-wrap');
+    const $progressBar  = $('progress-bar');
+    const $progressText = $('progress-label-text');
+    const $progressSpeed = $('progress-label-speed');
+    const $modelSkeleton = $('model-skeleton');
+    const $modelInfoPanel = $('model-info-panel');
+    const $modelInfoGrid  = $('model-info-grid');
     const $tokBadge    = $('tok-badge');
     const $tokFileIn   = $('tok-file-input');
     const $tokUrlIn    = $('tok-url-input');
@@ -216,35 +716,107 @@
     const $tmplBadge   = $('template-badge');
     const $systemRow   = $('system-prompt-row');
     const $systemIn    = $('system-input');
-    const $promptIn      = $('prompt-input');
-    const $tokenCounter  = $('token-counter');
-    const $generate      = $('generate');
-    const $stop          = $('stop');
-    const $clear         = $('clear');
-    const $quickTest     = $('quick-test');
-    const $maxTokens     = $('max-tokens');
-    const $chat          = $('chat');
-    const $genStats      = $('gen-stats');
-    const $perf          = $('perf');
+    const $promptIn    = $('prompt-input');
+    const $tokenCounter = $('token-counter');
+    const $generate    = $('generate');
+    const $stop        = $('stop');
+    const $clear       = $('clear');
+    const $quickTest   = $('quick-test');
+    const $maxTokens   = $('max-tokens');
+    const $chat        = $('chat');
+    const $genStats    = $('gen-stats');
 
-    const $cacheSection = $('cache-section');
-    const $cacheList    = $('cache-list');
-    const $cacheCount   = $('cache-count');
-    const $cacheStats   = $('cache-stats');
+    // Performance dashboard elements
+    const $perfPanel   = $('perf-panel');
+    const $perfTps     = $('perf-tps');
+    const $perfTtft    = $('perf-ttft');
+    const $perfTokens  = $('perf-tokens');
+    const $perfMem     = $('perf-mem');
+    const $perfBackend = $('perf-backend');
+
+    // Sampling param elements
+    const $paramTemp   = $('param-temp');
+    const $paramTopp   = $('param-topp');
+    const $paramTopk   = $('param-topk');
+    const $paramRepeat = $('param-repeat');
 
     let engine    = null;
     let tokenizer = null;
     let streaming = false;
-
-    // Whether OPFS is supported (set during init)
     let opfsAvailable = false;
+    let backendName = 'CPU';
 
-    // Conversation history: [{role: 'user'|'assistant'|'system', content: string}]
+    // Conversation history
     let history = [];
 
+    // Rolling tokens-per-second tracker
+    let tpsWindow = [];  // { time, count }
+
+    // ---------- Slider value display ----------
+    function setupSlider(slider, display, decimals = 2) {
+      const update = () => { display.textContent = parseFloat(slider.value).toFixed(decimals); };
+      slider.addEventListener('input', update);
+      update();
+    }
+    setupSlider($paramTemp, $('val-temp'));
+    setupSlider($paramTopp, $('val-topp'));
+    setupSlider($paramTopk, $('val-topk'), 0);
+    setupSlider($paramRepeat, $('val-repeat'));
+    setupSlider($maxTokens, $('val-maxtokens'), 0);
+
+    // ---------- Markdown rendering (lightweight) ----------
+    function renderMarkdown(text) {
+      // Simple markdown: code blocks, inline code, bold, italic, lists
+      let html = escapeHtml(text);
+
+      // Fenced code blocks: ```lang\n...\n```
+      html = html.replace(/```(\w*)\n([\s\S]*?)```/g, (_, lang, code) => {
+        return `<pre><code>${code.trimEnd()}</code></pre>`;
+      });
+
+      // Inline code
+      html = html.replace(/`([^`]+)`/g, '<code>$1</code>');
+
+      // Bold
+      html = html.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+
+      // Italic
+      html = html.replace(/\*(.+?)\*/g, '<em>$1</em>');
+
+      // Split into blocks by double newlines for paragraphs
+      const blocks = html.split(/\n\n+/);
+      const rendered = blocks.map(block => {
+        // Already a pre block?
+        if (block.startsWith('<pre>')) return block;
+
+        // Unordered list
+        const lines = block.split('\n');
+        if (lines.every(l => /^[\-\*]\s/.test(l) || l.trim() === '')) {
+          const items = lines.filter(l => l.trim()).map(l => `<li>${l.replace(/^[\-\*]\s/, '')}</li>`);
+          return `<ul>${items.join('')}</ul>`;
+        }
+
+        // Ordered list
+        if (lines.every(l => /^\d+\.\s/.test(l) || l.trim() === '')) {
+          const items = lines.filter(l => l.trim()).map(l => `<li>${l.replace(/^\d+\.\s/, '')}</li>`);
+          return `<ol>${items.join('')}</ol>`;
+        }
+
+        // Regular paragraph - join single newlines with <br>
+        return `<p>${block.replace(/\n/g, '<br>')}</p>`;
+      });
+
+      return rendered.join('');
+    }
+
+    function escapeHtml(str) {
+      return str
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;');
+    }
+
     // ---------- Template formatting ----------
-    // Build the full prompt from conversation history, formatted for the model's
-    // chat template.  Each turn is included so the model has full context.
     function buildPrompt(hist, templateName) {
       switch (templateName) {
         case 'ChatML': {
@@ -291,7 +863,7 @@
           parts.push('### Response:');
           return parts.join('\n\n');
         }
-        default: // 'Raw' — no template; just concatenate user/assistant turns
+        default:
           return hist.filter(m => m.role !== 'system').map(m => m.content).join('\n');
       }
     }
@@ -299,12 +871,17 @@
     // ---------- Chat UI helpers ----------
     function appendBubble(role, content, isStreaming = false) {
       const wrap = document.createElement('div');
+      wrap.className = 'msg-wrap';
       const label = document.createElement('div');
       label.className = 'msg-role';
       label.textContent = role === 'user' ? 'You' : 'Assistant';
       const bubble = document.createElement('div');
       bubble.className = `msg ${role}` + (isStreaming ? ' streaming' : '');
-      bubble.textContent = content;
+      if (role === 'user') {
+        bubble.textContent = content;
+      } else {
+        bubble.innerHTML = content ? renderMarkdown(content) : '';
+      }
       wrap.appendChild(label);
       wrap.appendChild(bubble);
       $chat.appendChild(wrap);
@@ -312,12 +889,69 @@
       return bubble;
     }
 
+    function updateAssistantBubble(bubble, text) {
+      // During streaming, just use textContent for performance;
+      // render markdown only on completion
+      bubble.textContent = text;
+    }
+
+    function finalizeAssistantBubble(bubble, text) {
+      bubble.innerHTML = renderMarkdown(text);
+    }
+
     function clearChat() {
       $chat.innerHTML = '';
       history = [];
       if (engine) engine.reset();
       $genStats.textContent = '';
-      $perf.textContent = '';
+      resetPerfDashboard();
+    }
+
+    // ---------- Performance dashboard ----------
+    function showPerfPanel() {
+      $perfPanel.style.display = '';
+    }
+
+    function resetPerfDashboard() {
+      $perfTps.textContent = '--';
+      $perfTtft.textContent = '--';
+      $perfTokens.textContent = '0';
+      tpsWindow = [];
+    }
+
+    function updatePerfLive(tokenCount, prefillMs) {
+      const now = performance.now();
+      tpsWindow.push({ time: now, count: tokenCount });
+      // Keep last 2 seconds of data for rolling average
+      const cutoff = now - 2000;
+      tpsWindow = tpsWindow.filter(e => e.time > cutoff);
+
+      if (tpsWindow.length >= 2) {
+        const first = tpsWindow[0];
+        const last = tpsWindow[tpsWindow.length - 1];
+        const dt = (last.time - first.time) / 1000;
+        const dc = last.count - first.count;
+        if (dt > 0 && dc > 0) {
+          $perfTps.textContent = (dc / dt).toFixed(1);
+        }
+      }
+
+      $perfTtft.textContent = prefillMs.toFixed(0);
+      $perfTokens.textContent = String(tokenCount);
+    }
+
+    function finalizePerfDashboard(summary) {
+      if (summary) {
+        $perfTps.textContent = summary.tokens_per_second.toFixed(1);
+        $perfTtft.textContent = summary.prefill_ms.toFixed(0);
+        $perfTokens.textContent = String(summary.tokens_generated);
+      }
+      // Memory estimate
+      if (performance.memory) {
+        $perfMem.textContent = (performance.memory.usedJSHeapSize / 1e6).toFixed(0);
+      } else {
+        $perfMem.textContent = 'N/A';
+      }
     }
 
     // ---------- OPFS cache UI ----------
@@ -329,17 +963,22 @@
     }
 
     async function refreshCacheList() {
-      if (!opfsAvailable) {
-        $cacheSection.style.display = 'none';
+      const $cachePanel = $('cache-panel');
+      const $cacheList  = $('cache-list');
+      const $cacheCount = $('cache-count');
+      const $cacheStats = $('cache-stats');
+      if (!opfsAvailable || !$cachePanel) {
+        if ($cachePanel) $cachePanel.style.display = 'none';
         return;
       }
       try {
         const raw = await list_cached_models();
         const models = JSON.parse(typeof raw === 'string' ? raw : raw.toString());
+        $cachePanel.style.display = '';
         $cacheCount.textContent = models.length;
         $cacheList.innerHTML = '';
         if (models.length === 0) {
-          $cacheList.innerHTML = '<li style="opacity:0.5;font-size:0.85rem;padding:0.3rem 0;">No cached models.</li>';
+          $cacheList.innerHTML = '<li style="opacity:0.5;font-size:0.85rem;padding:0.3rem 0;">No cached models yet. Models loaded from URL or file will be cached here.</li>';
         } else {
           for (const m of models) {
             const li = document.createElement('li');
@@ -354,7 +993,6 @@
             $cacheList.appendChild(li);
           }
         }
-        // Storage estimate
         const est = await storage_estimate();
         const info = JSON.parse(typeof est === 'string' ? est : est.toString());
         if (info.usage !== undefined) {
@@ -366,7 +1004,7 @@
     }
 
     // Handle clicks on cache list buttons (event delegation)
-    $cacheList.addEventListener('click', async (e) => {
+    document.getElementById('cache-list').addEventListener('click', async (e) => {
       const btn = e.target.closest('button');
       if (!btn) return;
       const name = btn.dataset.name;
@@ -386,12 +1024,12 @@
             await onModelLoaded(eng, performance.now() - t0, bytes);
             $status.textContent = 'Loaded from OPFS cache.';
           } else {
-            $modelInfo.textContent = 'Cache miss: model not found.';
+            $status.textContent = 'Cache miss: model not found.';
             hideProgress();
           }
         } catch (err) {
-          $modelInfo.textContent = 'Cache load error: ' + err;
-          $modelInfo.classList.add('error');
+          $status.textContent = 'Cache load error: ' + err;
+          $status.classList.add('error');
           hideProgress();
         } finally { btn.disabled = false; }
       }
@@ -425,42 +1063,104 @@
     });
 
     // ---------- Progress bar ----------
+    let downloadStartTime = 0;
+    let lastLoadedBytes = 0;
+
     function showProgress(label) {
-      $progress.hidden = false;
-      $progressLbl.hidden = false;
-      $progress.value = 0;
-      $progressLbl.textContent = label;
+      $progressWrap.classList.add('visible');
+      $progressBar.style.width = '0%';
+      $progressBar.classList.remove('indeterminate');
+      $progressText.textContent = label;
+      $progressSpeed.textContent = '';
+      $modelSkeleton.classList.add('visible');
+      downloadStartTime = performance.now();
+      lastLoadedBytes = 0;
     }
+
     function updateProgress(loaded, total, label) {
       if (total > 0) {
-        $progress.value = loaded / total;
         const pct = Math.round(loaded / total * 100);
+        $progressBar.style.width = `${pct}%`;
+        $progressBar.classList.remove('indeterminate');
         const mb = (loaded / 1e6).toFixed(1);
-        $progressLbl.textContent = `${label} ${mb} / ${(total/1e6).toFixed(1)} MB (${pct}%)`;
+        $progressText.textContent = `${label} ${mb} / ${(total/1e6).toFixed(1)} MB (${pct}%)`;
       } else {
-        $progress.removeAttribute('value');
-        $progressLbl.textContent = `${label} ${(loaded/1e6).toFixed(1)} MB…`;
+        $progressBar.classList.add('indeterminate');
+        $progressText.textContent = `${label} ${(loaded/1e6).toFixed(1)} MB...`;
+      }
+      // Download speed
+      const elapsed = (performance.now() - downloadStartTime) / 1000;
+      if (elapsed > 0.5 && loaded > 0) {
+        const speed = loaded / elapsed / 1e6;
+        $progressSpeed.textContent = `${speed.toFixed(1)} MB/s`;
       }
     }
+
     function hideProgress() {
       setTimeout(() => {
-        $progress.hidden = true;
-        $progressLbl.hidden = true;
-        $progress.value = 0;
-        $progress.max = 1;
-      }, 600);
+        $progressWrap.classList.remove('visible');
+        $modelSkeleton.classList.remove('visible');
+      }, 400);
+    }
+
+    // ---------- Model info panel ----------
+    function showModelInfo(eng) {
+      $modelInfoPanel.style.display = '';
+      const grid = $modelInfoGrid;
+      grid.innerHTML = '';
+
+      // Parse metadata for extra info
+      let meta = {};
+      try { meta = JSON.parse(eng.metadata_json); } catch (_) {}
+
+      const arch = eng.architecture || 'unknown';
+      const name = eng.model_name || arch;
+      const layers = eng.num_layers;
+      const heads = eng.num_heads;
+      const dim = eng.hidden_dim;
+      const ctx = eng.max_seq_len;
+      const vocab = eng.vocab_size;
+
+      // Rough parameter count estimate: vocab*dim + layers*(4*dim*dim + 3*dim*dim + 2*dim) + dim
+      // This is approximate for transformer models
+      const paramEstimate = vocab * dim + layers * (4 * dim * dim + 3 * dim * dim + 2 * dim) + dim;
+      const paramStr = paramEstimate > 1e9
+        ? (paramEstimate / 1e9).toFixed(1) + 'B'
+        : (paramEstimate / 1e6).toFixed(0) + 'M';
+
+      // Quantization from metadata
+      const quantType = meta['general.file_type'] || meta['general.quantization_version'] || '--';
+
+      const fields = [
+        ['Name', name],
+        ['Architecture', arch.charAt(0).toUpperCase() + arch.slice(1)],
+        ['Parameters', '~' + paramStr],
+        ['Quantization', String(quantType)],
+        ['Context Window', ctx.toLocaleString()],
+        ['Layers', layers],
+        ['Heads', heads],
+        ['Hidden Dim', dim.toLocaleString()],
+        ['Vocab Size', vocab.toLocaleString()],
+        ['Template', eng.chat_template_name],
+      ];
+
+      for (const [label, value] of fields) {
+        const dt = document.createElement('dt');
+        dt.textContent = label;
+        const dd = document.createElement('dd');
+        dd.textContent = value;
+        grid.appendChild(dt);
+        grid.appendChild(dd);
+      }
     }
 
     // ---------- Model loaded ----------
-    // rawBytes: optional Uint8Array of the GGUF file — used to load raw
-    // quantized weights for the fused dequant+matvec GPU path.
     async function onModelLoaded(eng, ms, rawBytes) {
       engine = eng;
       const tmplName = eng.chat_template_name;
-      $modelInfo.textContent =
-        `Loaded in ${ms.toFixed(0)} ms — Vocab: ${eng.vocab_size}, ` +
-        `Layers: ${eng.num_layers}, Hidden: ${eng.hidden_dim}, ` +
-        `Template: ${tmplName}`;
+
+      showModelInfo(eng);
+
       $generate.disabled = false;
       $promptIn.disabled = false;
       $systemIn.disabled = false;
@@ -470,33 +1170,44 @@
       $tmplBadge.style.display = '';
       hideProgress();
 
-      // Try to activate WebGPU backend for faster matrix ops
+      // Show perf panel
+      showPerfPanel();
+      $perfBackend.textContent = 'CPU';
+      backendName = 'CPU';
+
+      $status.textContent = `Model loaded in ${(ms/1000).toFixed(1)}s. Ready.`;
+
+      // Try to activate WebGPU backend
       if (webgpu_available()) {
-        $env.textContent = 'WebGPU: initialising…';
+        $status.textContent = 'Initializing WebGPU...';
         try {
           const gpuOn = await eng.init_gpu();
           if (gpuOn) {
-            // Attempt to load raw quantized weights for the fused
-            // dequant+matvec path (reduces memory bandwidth on GPU).
             if (rawBytes) {
               try {
                 const rawOk = eng.load_raw_weights(rawBytes);
-                $env.textContent = rawOk
-                  ? 'WebGPU: ✓ active (fused quant kernels)'
-                  : 'WebGPU: ✓ active (f32 path — unsupported quant format)';
+                backendName = rawOk ? 'WebGPU (fused)' : 'WebGPU (f32)';
               } catch (_) {
-                $env.textContent = 'WebGPU: ✓ active (f32 path)';
+                backendName = 'WebGPU (f32)';
               }
             } else {
-              $env.textContent = 'WebGPU: ✓ active';
+              backendName = 'WebGPU';
             }
+            $perfBackend.textContent = backendName;
+            $status.textContent = `Model loaded in ${(ms/1000).toFixed(1)}s. ${backendName} active.`;
           } else {
-            $env.textContent = 'WebGPU: available but init failed';
+            $status.textContent = `Model loaded in ${(ms/1000).toFixed(1)}s. WebGPU init failed, using CPU.`;
           }
         } catch (e) {
-          $env.textContent = 'WebGPU: error — ' + e;
+          $status.textContent = `Model loaded in ${(ms/1000).toFixed(1)}s. WebGPU error, using CPU.`;
         }
       }
+
+      // Memory estimate
+      if (performance.memory) {
+        $perfMem.textContent = (performance.memory.usedJSHeapSize / 1e6).toFixed(0);
+      }
+      $env.textContent = `Backend: ${backendName}`;
     }
 
     function onTokenizerLoaded(tok) {
@@ -504,8 +1215,8 @@
       $tokBadge.textContent = 'loaded';
       $tokBadge.className = 'badge ok';
       $tokInfo.textContent =
-        `Vocab: ${tok.vocab_size}  ` +
-        `BOS: ${tok.bos_token_id ?? 'none'}  ` +
+        `Vocab: ${tok.vocab_size}  |  ` +
+        `BOS: ${tok.bos_token_id ?? 'none'}  |  ` +
         `EOS: ${tok.eos_token_id ?? 'none'}`;
     }
 
@@ -514,14 +1225,12 @@
       try {
         await init();
 
-        // Initialize rayon thread pool for multi-threaded inference when
-        // built with --features wasm_threads and SharedArrayBuffer is available.
         let threadsInfo = '';
         if (typeof init_thread_pool === 'function' && typeof SharedArrayBuffer !== 'undefined') {
           const numThreads = navigator.hardwareConcurrency || 4;
           try {
             await init_thread_pool(numThreads);
-            threadsInfo = ` | Threads: ${numThreads}`;
+            threadsInfo = ` | ${numThreads} threads`;
           } catch (e) {
             console.warn('Thread pool init failed (COOP/COEP headers may be missing):', e);
           }
@@ -535,12 +1244,12 @@
           }
         } catch (_) { opfsAvailable = false; }
 
-        $status.textContent = 'WASM module loaded. Ready.';
-        $env.textContent = `WebGPU: ${webgpu_available() ? 'yes' : 'no'}${threadsInfo} | OPFS: ${opfsAvailable ? 'yes' : 'no'}`;
+        $status.textContent = 'WASM module loaded. Load a model to begin.';
+        $env.textContent = `WebGPU: ${webgpu_available() ? 'available' : 'not available'}${threadsInfo} | OPFS: ${opfsAvailable ? 'yes' : 'no'}`;
         [$fileInput, $urlInput, $urlLoad, $tokFileIn, $tokUrlIn, $tokUrlLoad]
           .forEach(el => { el.disabled = false; });
 
-        // Populate cache list
+        // Populate OPFS cache list
         refreshCacheList();
       } catch (err) {
         $status.textContent = 'Failed to load WASM: ' + err;
@@ -562,22 +1271,19 @@
         clearChat();
         const bytes = new Uint8Array(buffer);
         await onModelLoaded(FlareEngine.load(bytes), performance.now() - t0, bytes);
-
         // Cache to OPFS for fast reload on next visit (best-effort)
         if (opfsAvailable) {
           cache_model(file.name, bytes).then(() => refreshCacheList()).catch(() => {});
         }
       } catch (err) {
-        $modelInfo.textContent = 'Error: ' + err;
-        $modelInfo.classList.add('error');
+        $status.textContent = 'Error loading model: ' + err;
+        $status.classList.add('error');
         hideProgress();
       }
     });
 
-    // Cache name — bump version to invalidate all cached models on format change.
     const MODEL_CACHE = 'flare-models-v1';
 
-    /// Extract a filename from a URL for use as an OPFS cache key.
     function modelNameFromUrl(url) {
       try {
         const pathname = new URL(url).pathname;
@@ -596,13 +1302,14 @@
           const isCached = await is_model_cached(modelName);
           if (isCached) {
             updateProgress(1, 1, 'Loading from OPFS cache...');
+            $progressSpeed.textContent = 'cached (OPFS)';
             const cached = await load_cached_model(modelName);
             if (cached) {
               const buf = new Uint8Array(cached.buffer || cached);
               return { bytes: buf, fromCache: true };
             }
           }
-        } catch (_) { /* OPFS unavailable — fall through */ }
+        } catch (_) { /* OPFS unavailable - fall through */ }
       }
 
       // 2. Fall back to Cache API for previously downloaded copies.
@@ -612,6 +1319,7 @@
           const cached = await cache.match(url);
           if (cached) {
             updateProgress(1, 1, 'Loading from cache...');
+            $progressSpeed.textContent = 'cached';
             const buf = new Uint8Array(await cached.arrayBuffer());
             // Migrate to OPFS for faster access next time
             if (opfsAvailable) {
@@ -619,10 +1327,10 @@
             }
             return { bytes: buf, fromCache: true };
           }
-        } catch (_) { /* Cache API unavailable in this context — fall through */ }
+        } catch (_) { /* Cache API unavailable */ }
       }
 
-      // 3. Fresh download: stream the response body to show progress.
+      // 3. Fresh download with progress
       const resp = await fetch(url);
       if (!resp.ok) throw new Error(`HTTP ${resp.status} ${resp.statusText}`);
       const total = parseInt(resp.headers.get('Content-Length') || '0', 10);
@@ -636,7 +1344,6 @@
         loaded += value.byteLength;
         updateProgress(loaded, total || loaded, 'Downloading...');
       }
-      // Concatenate chunks
       const buf = new Uint8Array(loaded);
       let offset = 0;
       for (const chunk of chunks) { buf.set(chunk, offset); offset += chunk.byteLength; }
@@ -647,7 +1354,7 @@
           updateProgress(loaded, loaded, 'Caching to OPFS...');
           await cache_model(modelName, buf);
           refreshCacheList();
-        } catch (_) { /* Quota exceeded or private browsing — ignore */ }
+        } catch (_) { /* Quota exceeded or private browsing */ }
       }
 
       // 5. Also store in Cache API as fallback (best-effort).
@@ -657,7 +1364,7 @@
           await cache.put(url, new Response(buf, {
             headers: { 'Content-Type': 'application/octet-stream', 'Content-Length': String(loaded) }
           }));
-        } catch (_) { /* Quota exceeded or private browsing — ignore */ }
+        } catch (_) { /* Quota exceeded or private browsing */ }
       }
 
       return { bytes: buf, fromCache: false };
@@ -666,20 +1373,20 @@
     $urlLoad.addEventListener('click', async () => {
       const url = $urlInput.value.trim();
       if (!url) return;
-      showProgress('Connecting…');
+      showProgress('Connecting...');
       $generate.disabled = true;
       $urlLoad.disabled = true;
       try {
         const t0 = performance.now();
         clearChat();
         const { bytes, fromCache } = await loadModelFromUrl(url);
-        updateProgress(bytes.length, bytes.length, fromCache ? 'Parsing (cached)…' : 'Parsing…');
-        await new Promise(r => setTimeout(r, 10)); // yield so progress renders
+        updateProgress(bytes.length, bytes.length, fromCache ? 'Parsing (cached)...' : 'Parsing...');
+        await new Promise(r => setTimeout(r, 10));
         const eng = FlareEngine.load(bytes);
         await onModelLoaded(eng, performance.now() - t0, bytes);
       } catch (err) {
-        $modelInfo.textContent = 'Error: ' + err;
-        $modelInfo.classList.add('error');
+        $status.textContent = 'Error: ' + err;
+        $status.classList.add('error');
         hideProgress();
       } finally { $urlLoad.disabled = false; }
     });
@@ -700,7 +1407,7 @@
       const url = $tokUrlIn.value.trim();
       if (!url) return;
       $tokUrlLoad.disabled = true;
-      $tokInfo.textContent = 'Fetching…';
+      $tokInfo.textContent = 'Fetching...';
       try {
         const resp = await fetch(url);
         if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
@@ -712,20 +1419,17 @@
     });
 
     // ---------- Clear conversation ----------
-    $clear.addEventListener('click', () => {
-      clearChat();
-    });
+    $clear.addEventListener('click', () => clearChat());
 
-    // ---------- Quick test (streaming via embedded GGUF tokenizer, no tokenizer.json needed) ----------
+    // ---------- Quick test ----------
     $quickTest.addEventListener('click', () => {
       if (!engine || streaming) return;
       const prompt = $promptIn.value.trim() || 'Hello';
       const maxToks = parseInt($maxTokens.value, 10) || 64;
 
-      // Check embedded vocab is available by encoding 1 token
       const testEncode = engine.encode_text(prompt);
       if (!testEncode || testEncode.length === 0) {
-        $genStats.textContent = 'Quick test unavailable: no embedded GGUF tokenizer in this model.';
+        $genStats.textContent = 'Quick test unavailable: no embedded GGUF tokenizer.';
         return;
       }
 
@@ -734,8 +1438,8 @@
       $stop.disabled = false;
       $promptIn.value = '';
       $tokenCounter.textContent = '';
-      $genStats.textContent = 'Generating…';
-      $perf.textContent = '';
+      $genStats.textContent = 'Generating...';
+      tpsWindow = [];
 
       appendBubble('user', prompt);
       history.push({ role: 'user', content: prompt });
@@ -743,47 +1447,35 @@
       engine.reset();
       engine.begin_stream(testEncode, maxToks);
       const prefillMs = engine.last_prefill_ms;
-      $perf.textContent = `Prefill: ${prefillMs.toFixed(0)} ms`;
 
       let count = 0;
       let assistantText = '';
       const bubble = appendBubble('assistant', '', true);
+      showPerfPanel();
 
       function quickTick() {
-        if (!streaming) {
-          finishQuick();
-          return;
-        }
+        if (!streaming) { finishQuick(); return; }
         const id = engine.next_token();
-        if (id === undefined) {
-          streaming = false;
-          finishQuick();
-          return;
-        }
+        if (id === undefined) { streaming = false; finishQuick(); return; }
         count++;
         assistantText += engine.decode_ids(new Uint32Array([id]));
-        bubble.textContent = assistantText;
+        updateAssistantBubble(bubble, assistantText);
         $chat.scrollTop = $chat.scrollHeight;
-
-        $perf.textContent = `Prefill: ${prefillMs.toFixed(0)} ms | ${count} token${count === 1 ? '' : 's'}…`;
+        updatePerfLive(count, prefillMs);
         requestAnimationFrame(quickTick);
       }
 
       function finishQuick() {
         bubble.classList.remove('streaming');
-        if (assistantText) {
-          history.push({ role: 'assistant', content: assistantText });
-        }
+        finalizeAssistantBubble(bubble, assistantText);
+        if (assistantText) history.push({ role: 'assistant', content: assistantText });
         try {
           const s = JSON.parse(engine.performance_summary());
-          $perf.textContent =
-            `✓ ${s.tokens_generated} token${s.tokens_generated === 1 ? '' : 's'} | ` +
-            `TTFT: ${s.prefill_ms.toFixed(0)} ms | ` +
-            `${s.tokens_per_second.toFixed(1)} tok/s`;
+          finalizePerfDashboard(s);
+          $genStats.textContent = `${s.tokens_generated} tokens | ${s.tokens_per_second.toFixed(1)} tok/s (embedded tokenizer)`;
         } catch (_) {
-          $perf.textContent = `✓ ${count} tokens generated`;
+          $genStats.textContent = `${count} tokens generated`;
         }
-        $genStats.textContent = `(embedded GGUF tokenizer)`;
         $generate.disabled = false;
         $stop.disabled = true;
       }
@@ -800,7 +1492,6 @@
     // ---------- Generate (multi-turn streaming) ----------
     $generate.addEventListener('click', async () => {
       if (!engine || streaming) return;
-
       const userText = $promptIn.value.trim();
       if (!userText) return;
 
@@ -809,20 +1500,21 @@
       $stop.disabled = false;
       $promptIn.value = '';
       $tokenCounter.textContent = '';
-      $genStats.textContent = 'Generating…';
-      $perf.textContent = '';
+      $genStats.textContent = 'Generating...';
+      tpsWindow = [];
       await new Promise(r => setTimeout(r, 10));
 
-      const maxToks   = parseInt($maxTokens.value, 10) || 128;
-      const sysText   = $systemIn.value.trim();
-      const chatMode  = $chatMode.checked;
+      const maxToks    = parseInt($maxTokens.value, 10) || 128;
+      const temp       = parseFloat($paramTemp.value);
+      const topP       = parseFloat($paramTopp.value);
+      const topK       = parseInt($paramTopk.value, 10);
+      const repeatPen  = parseFloat($paramRepeat.value);
+      const sysText    = $systemIn.value.trim();
+      const chatMode   = $chatMode.checked;
 
-      // Add user bubble
       appendBubble('user', userText);
 
-      // Build conversation history for this turn
       if (chatMode) {
-        // Prepend system message only on the first turn
         if (history.length === 0 && sysText) {
           history.push({ role: 'system', content: sysText });
         }
@@ -830,7 +1522,6 @@
       }
 
       try {
-        // Format the full prompt including all prior turns
         let inputText;
         if (chatMode) {
           inputText = buildPrompt(history, engine.chat_template_name);
@@ -842,51 +1533,43 @@
           ? tokenizer.encode(inputText)
           : new Uint32Array([1]);
 
-        // Reset KV cache and re-run prefill over the full context each turn.
-        // For small models this is fast; a KV-cache continuation API can be
-        // added later for larger models.
         engine.reset();
-        engine.begin_stream(promptIds, maxToks);
+        // Use begin_stream_with_params to respect sampling settings
+        engine.begin_stream_with_params(promptIds, maxToks, temp, topP, topK, repeatPen, 0.0);
         const prefillMs = engine.last_prefill_ms;
-        $perf.textContent = `Prefill: ${prefillMs.toFixed(0)} ms`;
 
         let count = 0;
         let assistantText = '';
-
-        // Streaming assistant bubble
         const bubble = appendBubble('assistant', '', true);
+        showPerfPanel();
 
         function tick() {
-          if (!streaming) {
-            finishStream();
-            return;
-          }
+          if (!streaming) { finishStream(); return; }
           const id = engine.next_token();
-          if (id === undefined) {
-            streaming = false;
-            finishStream();
-            return;
-          }
+          if (id === undefined) { streaming = false; finishStream(); return; }
           count++;
           if (tokenizer) {
-            const piece = tokenizer.decode_one(id);
-            assistantText += piece;
-            bubble.textContent = assistantText;
+            assistantText += tokenizer.decode_one(id);
           } else {
             assistantText += `[${id}]`;
-            bubble.textContent = assistantText;
           }
+          updateAssistantBubble(bubble, assistantText);
           $chat.scrollTop = $chat.scrollHeight;
+          updatePerfLive(count, prefillMs);
 
-          $perf.textContent =
-            `Prefill: ${prefillMs.toFixed(0)} ms | ${count} token${count === 1 ? '' : 's'}…`;
+          // Update context counter
+          const used = engine.tokens_used;
+          const max = engine.max_seq_len;
+          $tokenCounter.textContent = `${used} / ${max}`;
+          $tokenCounter.style.color = used > max * 0.85 ? 'var(--error)' : 'var(--fg-faint)';
+
           requestAnimationFrame(tick);
         }
 
         function finishStream() {
           bubble.classList.remove('streaming');
+          finalizeAssistantBubble(bubble, assistantText);
 
-          // Save completed assistant response to history
           const finalText = assistantText ||
             (!tokenizer ? '(load a tokenizer to see decoded text)' : '');
           if (chatMode && finalText) {
@@ -896,17 +1579,15 @@
             bubble.textContent = `${count} token(s) generated. Load a tokenizer (step 2) to see decoded text.`;
           }
 
-          // Show final performance summary line
           try {
             const s = JSON.parse(engine.performance_summary());
-            $perf.textContent =
-              `✓ ${s.tokens_generated} token${s.tokens_generated === 1 ? '' : 's'} | ` +
-              `TTFT: ${s.prefill_ms.toFixed(0)} ms | ` +
+            finalizePerfDashboard(s);
+            $genStats.textContent =
+              `${s.tokens_generated} tokens | TTFT: ${s.prefill_ms.toFixed(0)}ms | ` +
               `${s.tokens_per_second.toFixed(1)} tok/s`;
           } catch (_) {
-            $perf.textContent = `✓ ${count} tokens generated`;
+            $genStats.textContent = `${count} tokens generated`;
           }
-          $genStats.textContent = chatMode ? `template: ${engine.chat_template_name}` : '';
 
           $generate.disabled = false;
           $stop.disabled = true;
@@ -921,7 +1602,7 @@
       }
     });
 
-    // Live token counter — updates as the user types
+    // Live token counter
     $promptIn.addEventListener('input', () => {
       if (!engine || !$promptIn.value) {
         $tokenCounter.textContent = '';
@@ -929,11 +1610,11 @@
       }
       const count = engine.count_tokens($promptIn.value);
       const max   = engine.max_seq_len;
-      $tokenCounter.textContent = `${count} / ${max} tokens`;
-      $tokenCounter.style.color = count > max * 0.85 ? '#c00' : '#888';
+      $tokenCounter.textContent = `${count} / ${max}`;
+      $tokenCounter.style.color = count > max * 0.85 ? 'var(--error)' : 'var(--fg-faint)';
     });
 
-    // Allow Ctrl+Enter / Cmd+Enter to send
+    // Ctrl+Enter / Cmd+Enter to send
     $promptIn.addEventListener('keydown', e => {
       if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
         e.preventDefault();
