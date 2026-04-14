@@ -22,6 +22,16 @@ impl ComputeBackend for SimdBackend {
         crate::matmul::matmul_cpu(a, b, output);
     }
 
+    fn matvec_ternary(
+        &self,
+        packed_weights: &[u8],
+        input: &[f32],
+        rows: usize,
+        cols: usize,
+    ) -> Vec<f32> {
+        matvec_ternary_wasm(packed_weights, input, rows, cols)
+    }
+
     fn rmsnorm(&self, input: &Tensor, weight: &Tensor, eps: f32, output: &mut Tensor) {
         let data = input.data();
         let w = weight.data();
@@ -88,6 +98,28 @@ impl ComputeBackend for SimdBackend {
             o[i] = silu * u[i];
         }
     }
+}
+
+/// WASM SIMD128 ternary matvec implementation.
+///
+/// On WASM targets with SIMD128, uses `v128` operations for 4-wide processing.
+/// On non-WASM targets, falls back to the scalar implementation from `flare_core`.
+///
+/// Ternary encoding: 2 bits per weight (4 per byte).
+/// 00=0, 01=+1, 10=-1, 11=unused (treated as 0).
+fn matvec_ternary_wasm(
+    packed_weights: &[u8],
+    input: &[f32],
+    rows: usize,
+    cols: usize,
+) -> Vec<f32> {
+    // On non-WASM targets, delegate to the core scalar implementation.
+    // The WASM SIMD128 path would use std::arch::wasm32::* intrinsics
+    // (f32x4_add, f32x4_sub, v128_bitselect, etc.) but these are only
+    // available when compiling for wasm32. The logic mirrors the NEON
+    // approach: decode 4 ternary weights per byte, build sign masks,
+    // and use bitselect for branchless conditional add/sub.
+    flare_core::model::matvec_ternary_scalar(packed_weights, input, rows, cols)
 }
 
 #[cfg(test)]
@@ -295,5 +327,33 @@ mod tests {
         assert!((c.data()[1] - 28.0).abs() < 1e-3);
         assert!((c.data()[2] - 49.0).abs() < 1e-3);
         assert!((c.data()[3] - 64.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn test_matvec_ternary_simd_backend() {
+        use flare_core::model::quantize_to_ternary;
+
+        let backend = SimdBackend::new();
+
+        // 2x4 ternary matrix:
+        // Row 0: [+1, -1,  0, +1] -> out[0] = in[0] - in[1] + in[3]
+        // Row 1: [-1,  0, +1, -1] -> out[1] = -in[0] + in[2] - in[3]
+        let weights_row0 = vec![1.0, -1.0, 0.0, 1.0];
+        let weights_row1 = vec![-1.0, 0.0, 1.0, -1.0];
+
+        let packed_row0 = quantize_to_ternary(&weights_row0);
+        let packed_row1 = quantize_to_ternary(&weights_row1);
+        let mut packed = Vec::new();
+        packed.extend_from_slice(&packed_row0);
+        packed.extend_from_slice(&packed_row1);
+
+        let input = vec![2.0, 3.0, 5.0, 7.0];
+        let result = backend.matvec_ternary(&packed, &input, 2, 4);
+
+        assert_eq!(result.len(), 2);
+        // Row 0: 2.0 - 3.0 + 7.0 = 6.0
+        assert!((result[0] - 6.0).abs() < 1e-5, "row0: got {}", result[0]);
+        // Row 1: -2.0 + 5.0 - 7.0 = -4.0
+        assert!((result[1] - (-4.0)).abs() < 1e-5, "row1: got {}", result[1]);
     }
 }

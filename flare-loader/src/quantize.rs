@@ -23,6 +23,8 @@ pub enum QuantFormat {
     IQ3XXS,
     IQ2S,
     IQ1S,
+    /// BitNet b1.58 ternary: each weight is {-1, 0, +1}, packed 4 per byte (2 bits each).
+    Ternary,
     Unknown(u32),
 }
 
@@ -51,6 +53,8 @@ impl QuantFormat {
             21 => QuantFormat::IQ2S,
             22 => QuantFormat::IQ4XS,
             26 => QuantFormat::IQ3S,
+            // Reserve type_id 100 for ternary (not yet standardized in GGUF)
+            100 => QuantFormat::Ternary,
             other => QuantFormat::Unknown(other),
         }
     }
@@ -74,6 +78,7 @@ impl QuantFormat {
             QuantFormat::IQ3XXS => 3.0625, // 98 bytes per 256 weights
             QuantFormat::IQ2S => 2.5625, // 82 bytes per 256 weights
             QuantFormat::IQ1S => 1.5625, // 50 bytes per 256 weights
+            QuantFormat::Ternary => 2.0, // 2 bits per weight (4 weights per byte)
             QuantFormat::Unknown(_) => 32.0, // assume worst case
         }
     }
@@ -96,6 +101,7 @@ impl QuantFormat {
             | QuantFormat::IQ3XXS
             | QuantFormat::IQ2S
             | QuantFormat::IQ1S => 256,
+            QuantFormat::Ternary => 4, // 4 weights per byte
             QuantFormat::Unknown(_) => 1,
         }
     }
@@ -123,6 +129,7 @@ impl QuantFormat {
             QuantFormat::IQ3S => 110, // 2 (d) + 64 (qs) + 8 (qh) + 32 (signs) + 4 (scales)
             QuantFormat::IQ2S => 82, // 2 (d) + 32 (qs_lo) + 32 (signs) + 8 (qh) + 8 (scales)
             QuantFormat::IQ1S => 50, // 2 (d) + 32 (qs[32]) + 16 (qh[8] × u16)
+            QuantFormat::Ternary => 1, // 1 byte per 4 weights (2 bits each)
             QuantFormat::Unknown(_) => 4,
         }
     }

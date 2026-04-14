@@ -442,6 +442,7 @@ fn quant_to_weight_format(q: QuantFormat) -> Option<WeightFormat> {
         QuantFormat::IQ3XXS => Some(WeightFormat::IQ3XXS),
         QuantFormat::IQ2S => Some(WeightFormat::IQ2S),
         QuantFormat::IQ1S => Some(WeightFormat::IQ1S),
+        QuantFormat::Ternary => Some(WeightFormat::Ternary),
         _ => None,
     }
 }
@@ -559,6 +560,24 @@ pub(crate) fn dequantize_tensor(
         QuantFormat::Q6K => dequant_k_blocks(numel, 256, 210, raw, quantize::dequant_q6k_block),
         QuantFormat::Q4K => dequant_k_blocks(numel, 256, 144, raw, quantize::dequant_q4k_block),
         QuantFormat::Q5K => dequant_k_blocks(numel, 256, 176, raw, quantize::dequant_q5k_block),
+        QuantFormat::Ternary => {
+            // Ternary: 4 weights per byte, 2 bits each.
+            // Encoding: 00=0, 01=+1, 10=-1, 11=unused (treated as 0).
+            let mut data = vec![0.0f32; numel];
+            for i in 0..numel {
+                let byte_idx = i / 4;
+                let bit_shift = (i % 4) * 2;
+                if byte_idx < raw.len() {
+                    let bits = (raw[byte_idx] >> bit_shift) & 0b11;
+                    data[i] = match bits {
+                        0b01 => 1.0,
+                        0b10 => -1.0,
+                        _ => 0.0,
+                    };
+                }
+            }
+            Ok(data)
+        }
         other => Err(GgufError::UnsupportedQuant(other)),
     }
 }
