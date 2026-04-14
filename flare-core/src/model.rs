@@ -3622,8 +3622,15 @@ pub fn cpu_grouped_query_attention(
 ) -> Vec<f32> {
     let mut output = vec![0.0f32; num_heads * head_dim];
     cpu_grouped_query_attention_into(
-        q, k_cache, v_cache, num_heads, num_kv_heads, head_dim, seq_len,
-        attn_softcap, &mut output,
+        q,
+        k_cache,
+        v_cache,
+        num_heads,
+        num_kv_heads,
+        head_dim,
+        seq_len,
+        attn_softcap,
+        &mut output,
     );
     output
 }
@@ -4068,8 +4075,15 @@ pub fn cpu_grouped_query_attention_into(
     // with tanh capping since the cap distorts the score distribution).
     if attn_softcap > 0.0 {
         cpu_gqa_softcap(
-            q, k_cache, v_cache, num_heads, num_kv_heads, head_dim, seq_len,
-            attn_softcap, output,
+            q,
+            k_cache,
+            v_cache,
+            num_heads,
+            num_kv_heads,
+            head_dim,
+            seq_len,
+            attn_softcap,
+            output,
         );
         return;
     }
@@ -4089,16 +4103,16 @@ pub fn cpu_grouped_query_attention_into(
             // Handles all head_dim sizes: NEON for multiples of 4, scalar tail for remainder.
             unsafe {
                 fused_attention_head_neon(
-                    q, q_offset, k_cache, v_cache, output, out_offset,
-                    head_dim, seq_len, kv_stride, kv_head, scale,
+                    q, q_offset, k_cache, v_cache, output, out_offset, head_dim, seq_len,
+                    kv_stride, kv_head, scale,
                 );
             }
         }
         #[cfg(not(target_arch = "aarch64"))]
         {
             fused_attention_head_scalar(
-                q, q_offset, k_cache, v_cache, output, out_offset,
-                head_dim, seq_len, kv_stride, kv_head, scale,
+                q, q_offset, k_cache, v_cache, output, out_offset, head_dim, seq_len, kv_stride,
+                kv_head, scale,
             );
         }
     }
@@ -4300,7 +4314,10 @@ unsafe fn fused_attention_head_neon(
         let mut d = 0usize;
         while d < dim4 {
             let o = vld1q_f32(output.as_ptr().add(out_offset + d));
-            vst1q_f32(output.as_mut_ptr().add(out_offset + d), vmulq_f32(o, inv_sum_v));
+            vst1q_f32(
+                output.as_mut_ptr().add(out_offset + d),
+                vmulq_f32(o, inv_sum_v),
+            );
             d += 4;
         }
         while d < head_dim {
@@ -4344,8 +4361,15 @@ fn cpu_gqa_softcap(
         #[cfg(target_arch = "aarch64")]
         {
             attn_dot_scores_neon(
-                q, k_cache, &mut scores, q_offset, kv_head, head_dim,
-                kv_stride, seq_len, scale,
+                q,
+                k_cache,
+                &mut scores,
+                q_offset,
+                kv_head,
+                head_dim,
+                kv_stride,
+                seq_len,
+                scale,
             );
         }
         #[cfg(not(target_arch = "aarch64"))]
@@ -4559,8 +4583,12 @@ mod tests {
     fn test_fused_attention_matches_reference() {
         // Reference multi-pass implementation (the old code)
         fn reference_attention(
-            q: &[f32], k_cache: &[f32], v_cache: &[f32],
-            num_heads: usize, num_kv_heads: usize, head_dim: usize,
+            q: &[f32],
+            k_cache: &[f32],
+            v_cache: &[f32],
+            num_heads: usize,
+            num_kv_heads: usize,
+            head_dim: usize,
             seq_len: usize,
         ) -> Vec<f32> {
             let heads_per_kv = num_heads / num_kv_heads;
@@ -4580,14 +4608,19 @@ mod tests {
                     }
                     scores[t] = dot * scale;
                 }
-                let max_s = scores[..seq_len].iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+                let max_s = scores[..seq_len]
+                    .iter()
+                    .cloned()
+                    .fold(f32::NEG_INFINITY, f32::max);
                 let mut sum = 0.0f32;
                 for s in &mut scores[..seq_len] {
                     *s = (*s - max_s).exp();
                     sum += *s;
                 }
                 let inv = 1.0 / sum;
-                for s in &mut scores[..seq_len] { *s *= inv; }
+                for s in &mut scores[..seq_len] {
+                    *s *= inv;
+                }
                 let out_off = h * head_dim;
                 for t in 0..seq_len {
                     let w = scores[t];
@@ -4596,7 +4629,9 @@ mod tests {
                         output[out_off + d] += w * v_cache[v_off + d];
                     }
                 }
-                for s in &mut scores[..seq_len] { *s = 0.0; }
+                for s in &mut scores[..seq_len] {
+                    *s = 0.0;
+                }
             }
             output
         }
@@ -4608,20 +4643,26 @@ mod tests {
             (4, 2, 4, 10),
             (32, 8, 64, 20),
             (8, 4, 64, 1),
-            (1, 1, 3, 5),   // odd head_dim
+            (1, 1, 3, 5), // odd head_dim
         ];
 
         for &(nh, nkv, hd, sl) in &test_cases {
-            let q: Vec<f32> = (0..nh*hd).map(|i| ((i*7+3) as f32 * 0.1).sin()).collect();
+            let q: Vec<f32> = (0..nh * hd)
+                .map(|i| ((i * 7 + 3) as f32 * 0.1).sin())
+                .collect();
             let kv_stride = nkv * hd;
-            let k: Vec<f32> = (0..sl*kv_stride).map(|i| ((i*11+5) as f32 * 0.05).cos()).collect();
-            let v: Vec<f32> = (0..sl*kv_stride).map(|i| ((i*13+7) as f32 * 0.08).sin()).collect();
+            let k: Vec<f32> = (0..sl * kv_stride)
+                .map(|i| ((i * 11 + 5) as f32 * 0.05).cos())
+                .collect();
+            let v: Vec<f32> = (0..sl * kv_stride)
+                .map(|i| ((i * 13 + 7) as f32 * 0.08).sin())
+                .collect();
 
             let reference = reference_attention(&q, &k, &v, nh, nkv, hd, sl);
             let mut fused = vec![0.0f32; nh * hd];
             cpu_grouped_query_attention_into(&q, &k, &v, nh, nkv, hd, sl, 0.0, &mut fused);
 
-            for i in 0..nh*hd {
+            for i in 0..nh * hd {
                 let diff = (reference[i] - fused[i]).abs();
                 let tol = (reference[i].abs() * 1e-4).max(1e-5);
                 assert!(
@@ -4800,8 +4841,9 @@ mod tests {
         // The point is the logits should differ from a fresh model at pos 5.
         let mut model2 = {
             let config2 = model.config().clone();
-            let make_weights2 =
-                |size: usize| -> Vec<f32> { (0..size).map(|i| ((i % 7) as f32 - 3.0) * 0.1).collect() };
+            let make_weights2 = |size: usize| -> Vec<f32> {
+                (0..size).map(|i| ((i % 7) as f32 - 3.0) * 0.1).collect()
+            };
             let layer2 = LayerWeights {
                 attn_norm: Tensor::from_vec(vec![1.0; dim], &[dim]).unwrap(),
                 wq: Tensor::from_vec(make_weights2(nh * hd * dim), &[nh * hd * dim]).unwrap(),
@@ -4819,10 +4861,12 @@ mod tests {
                 post_ffn_norm: None,
             };
             let weights2 = ModelWeights {
-                token_embedding: Tensor::from_vec(make_weights2(vocab * dim), &[vocab * dim]).unwrap(),
+                token_embedding: Tensor::from_vec(make_weights2(vocab * dim), &[vocab * dim])
+                    .unwrap(),
                 layers: vec![layer2],
                 output_norm: Tensor::from_vec(vec![1.0; dim], &[dim]).unwrap(),
-                output_weight: Tensor::from_vec(make_weights2(vocab * dim), &[vocab * dim]).unwrap(),
+                output_weight: Tensor::from_vec(make_weights2(vocab * dim), &[vocab * dim])
+                    .unwrap(),
             };
             Model::new(config2, weights2)
         };
