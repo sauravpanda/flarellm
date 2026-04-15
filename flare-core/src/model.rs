@@ -90,6 +90,16 @@ pub struct RawLayerWeights {
     pub w_down: RawWeight,
 }
 
+/// Returns `true` if `CpuBackend::batched_dequant_matmul` has a fast path for
+/// this weight's format.  Mixed-format models (e.g. Q4_K_M with Q6_K tail
+/// layers) should check this per-weight and fall back to the f32 dispatch
+/// for unsupported formats rather than paying on-the-fly dequant cost in
+/// the hot prefill loop.
+#[inline]
+pub fn raw_weight_cpu_dispatchable(weight: &RawWeight) -> bool {
+    matches!(weight.format, WeightFormat::Q8_0 | WeightFormat::Q4K)
+}
+
 /// Fused Q8_0 weight data for projections that share the same input vector.
 ///
 /// Created once at model-load time by concatenating the raw Q8_0 bytes of
@@ -554,6 +564,87 @@ impl ComputeBackend for CpuBackend {
         let out = output.data_mut();
         for (i, (g, u)) in gate.data().iter().zip(up.data().iter()).enumerate() {
             out[i] = (g / (1.0 + (-g).exp())) * u;
+        }
+    }
+
+    /// CPU backend supports fused dequant matmul for Q8_0 and Q4_K.  Callers
+    /// must additionally gate on `raw_weight_cpu_dispatchable()` per-weight
+    /// to check whether the specific format is supported — mixed-format
+    /// models (e.g. Q4_K_M with Q6_K tail layers) fall back to the f32 path
+    /// for the unsupported weights.
+    fn supports_dequant_matmul(&self) -> bool {
+        true
+    }
+
+    /// Batched Q8_0 × Q8_0-input matmul for prefill / speculative verify.
+    ///
+    /// Quantizes each input row to Q8_0 once, then runs the existing fused
+    /// `matvec_q8_0_preq_into` / `matvec_q4k_q8_into` per batch item against
+    /// the raw quantized weight.  This is dramatically faster than the
+    /// generic `batched_matmul` fallback, which dequantizes every weight to
+    /// f32 and loops scalar `matvec` — ~4× less memory bandwidth on the Q8_0
+    /// path plus keeps the hot weight bytes in L2 across batch items.
+    ///
+    /// Supported formats: `Q8_0`, `Q4K`.  Other formats panic — callers must
+    /// gate on the model's actual weight format.
+    fn batched_dequant_matmul(
+        &self,
+        weight: &RawWeight,
+        input: &[f32],
+        batch: usize,
+    ) -> Vec<f32> {
+        let out_rows = weight.num_rows;
+        let blocks_per_row = weight.blocks_per_row;
+        let weights_per_block = weight.format.weights_per_block();
+        let in_cols = blocks_per_row * weights_per_block;
+
+        debug_assert_eq!(
+            input.len(),
+            batch * in_cols,
+            "input must be [batch × in_cols]"
+        );
+
+        match weight.format {
+            WeightFormat::Q8_0 => {
+                let mut output = vec![0.0f32; batch * out_rows];
+                // Reuse a single QuantizedInput scratch across batch items.
+                let mut preq = QuantizedInput {
+                    scales: vec![0.0f32; blocks_per_row],
+                    quants: vec![0i8; blocks_per_row * Q8_0_BLOCK_SIZE],
+                    blocks_per_row,
+                };
+                for b in 0..batch {
+                    let in_row = &input[b * in_cols..(b + 1) * in_cols];
+                    quantize_input_q8_0_into(in_row, &mut preq);
+                    let out_row = &mut output[b * out_rows..(b + 1) * out_rows];
+                    matvec_q8_0_preq_into(&weight.data, &preq, out_rows, out_row);
+                }
+                output
+            }
+            WeightFormat::Q4K => {
+                debug_assert_eq!(
+                    in_cols % Q8_0_BLOCK_SIZE,
+                    0,
+                    "Q4_K input cols must be multiple of Q8_0 block size"
+                );
+                let preq_blocks = in_cols / Q8_0_BLOCK_SIZE;
+                let mut output = vec![0.0f32; batch * out_rows];
+                let mut preq = QuantizedInput {
+                    scales: vec![0.0f32; preq_blocks],
+                    quants: vec![0i8; preq_blocks * Q8_0_BLOCK_SIZE],
+                    blocks_per_row: preq_blocks,
+                };
+                for b in 0..batch {
+                    let in_row = &input[b * in_cols..(b + 1) * in_cols];
+                    quantize_input_q8_0_into(in_row, &mut preq);
+                    let out_row = &mut output[b * out_rows..(b + 1) * out_rows];
+                    matvec_q4k_q8_into(&weight.data, &preq, out_rows, in_cols, out_row);
+                }
+                output
+            }
+            other => panic!(
+                "CpuBackend::batched_dequant_matmul: unsupported weight format {other:?}"
+            ),
         }
     }
 }
@@ -1335,7 +1426,15 @@ impl Model {
         let offset = token_id as usize * dim;
         let mut x = Tensor::from_vec(embed_data[offset..offset + dim].to_vec(), &[dim]).unwrap();
 
-        let use_raw = self.backend.supports_dequant_matmul() && self.raw_weights.is_some();
+        // `forward_layers` is the single-token decode path.  Even though
+        // `CpuBackend` now supports `batched_dequant_matmul`, it's strictly a
+        // multi-batch optimisation for prefill / speculative verify; for
+        // batch = 1 the fused single-token kernels below (fused QKV Q8_0,
+        // direct Q4_K) are faster.  Keep `use_raw` as a strict "GPU-resident
+        // single-token" flag here.
+        let use_raw = self.backend.supports_dequant_matmul()
+            && self.backend.has_gpu_weights()
+            && self.raw_weights.is_some();
 
         // Base Q8_0 eligibility: raw weights present and in Q8_0 format.
         let has_q8 = !use_raw
@@ -2005,9 +2104,17 @@ impl Model {
                     .map(|t| t.data().to_vec());
 
                 // Three GPU dispatches instead of 3 × seq_len individual matvec calls.
-                // Use fused dequant+matvec when raw quantized weights are available.
-                let q_proj = if use_raw {
-                    let rw = &self.raw_weights.as_ref().unwrap()[layer_idx];
+                // Use fused dequant+matvec when raw quantized weights are available
+                // *and* the specific weight's format is dispatchable by the backend
+                // (mixed-format models like Q4_K_M fall back per-weight).
+                let raw_layer = if use_raw {
+                    Some(&self.raw_weights.as_ref().unwrap()[layer_idx])
+                } else {
+                    None
+                };
+                let q_proj = if let Some(rw) =
+                    raw_layer.filter(|l| raw_weight_cpu_dispatchable(&l.wq))
+                {
                     self.backend
                         .batched_dequant_matmul(&rw.wq, &normed_batch, seq_len)
                 } else {
@@ -2015,8 +2122,9 @@ impl Model {
                     self.backend
                         .batched_matmul(&wq, &normed_batch, q_dim, dim, seq_len)
                 };
-                let k_proj = if use_raw {
-                    let rw = &self.raw_weights.as_ref().unwrap()[layer_idx];
+                let k_proj = if let Some(rw) =
+                    raw_layer.filter(|l| raw_weight_cpu_dispatchable(&l.wk))
+                {
                     self.backend
                         .batched_dequant_matmul(&rw.wk, &normed_batch, seq_len)
                 } else {
@@ -2024,8 +2132,9 @@ impl Model {
                     self.backend
                         .batched_matmul(&wk, &normed_batch, kv_dim, dim, seq_len)
                 };
-                let v_proj = if use_raw {
-                    let rw = &self.raw_weights.as_ref().unwrap()[layer_idx];
+                let v_proj = if let Some(rw) =
+                    raw_layer.filter(|l| raw_weight_cpu_dispatchable(&l.wv))
+                {
                     self.backend
                         .batched_dequant_matmul(&rw.wv, &normed_batch, seq_len)
                 } else {
@@ -2110,8 +2219,14 @@ impl Model {
                     .map(|t| t.data().to_vec());
 
                 // Single batched dispatch replaces one matvec per token.
-                let proj_batch = if use_raw {
-                    let rw = &self.raw_weights.as_ref().unwrap()[layer_idx];
+                let raw_layer = if use_raw {
+                    Some(&self.raw_weights.as_ref().unwrap()[layer_idx])
+                } else {
+                    None
+                };
+                let proj_batch = if let Some(rw) =
+                    raw_layer.filter(|l| raw_weight_cpu_dispatchable(&l.wo))
+                {
                     self.backend
                         .batched_dequant_matmul(&rw.wo, &attn_out_batch, seq_len)
                 } else {
@@ -2169,8 +2284,14 @@ impl Model {
                     // Dense FFN path (non-MoE)
 
                     // Single batched dispatch for gate and up projections.
-                    let gate_batch = if use_raw {
-                        let rw = &self.raw_weights.as_ref().unwrap()[layer_idx];
+                    let raw_layer = if use_raw {
+                        Some(&self.raw_weights.as_ref().unwrap()[layer_idx])
+                    } else {
+                        None
+                    };
+                    let gate_batch = if let Some(rw) =
+                        raw_layer.filter(|l| raw_weight_cpu_dispatchable(&l.w_gate))
+                    {
                         self.backend
                             .batched_dequant_matmul(&rw.w_gate, &normed_batch2, seq_len)
                     } else {
@@ -2179,8 +2300,9 @@ impl Model {
                         self.backend
                             .batched_matmul(&w_gate, &normed_batch2, inter, dim, seq_len)
                     };
-                    let up_batch = if use_raw {
-                        let rw = &self.raw_weights.as_ref().unwrap()[layer_idx];
+                    let up_batch = if let Some(rw) =
+                        raw_layer.filter(|l| raw_weight_cpu_dispatchable(&l.w_up))
+                    {
                         self.backend
                             .batched_dequant_matmul(&rw.w_up, &normed_batch2, seq_len)
                     } else {
@@ -2203,8 +2325,9 @@ impl Model {
                         .collect();
 
                     // Single batched dispatch for the down projection.
-                    if use_raw {
-                        let rw = &self.raw_weights.as_ref().unwrap()[layer_idx];
+                    if let Some(rw) = raw_layer
+                        .filter(|l| raw_weight_cpu_dispatchable(&l.w_down))
+                    {
                         self.backend
                             .batched_dequant_matmul(&rw.w_down, &ffn_hidden_batch, seq_len)
                     } else {
@@ -2403,7 +2526,13 @@ impl Model {
         let offset = token_id as usize * dim;
         let mut x = Tensor::from_vec(embed_data[offset..offset + dim].to_vec(), &[dim]).unwrap();
 
-        let use_raw = self.backend.supports_dequant_matmul() && self.raw_weights.is_some();
+        // Single-token decode: `use_raw` is reserved for GPU-resident weights.
+        // CPU `batched_dequant_matmul` is strictly a prefill/multi-batch
+        // optimisation; for batch = 1 the fused Q8_0 / direct Q4_K kernels
+        // below are faster.
+        let use_raw = self.backend.supports_dequant_matmul()
+            && self.backend.has_gpu_weights()
+            && self.raw_weights.is_some();
 
         // Base Q8_0 eligibility: raw weights present and in Q8_0 format.
         let has_q8 = !use_raw
@@ -3040,7 +3169,13 @@ impl Model {
         let offset = token_id as usize * dim;
         let mut x = Tensor::from_vec(embed_data[offset..offset + dim].to_vec(), &[dim]).unwrap();
 
-        let use_raw = self.backend.supports_dequant_matmul() && self.raw_weights.is_some();
+        // Single-token decode: `use_raw` is reserved for GPU-resident weights.
+        // CPU `batched_dequant_matmul` is strictly a prefill/multi-batch
+        // optimisation; for batch = 1 the fused Q8_0 / direct Q4_K kernels
+        // below are faster.
+        let use_raw = self.backend.supports_dequant_matmul()
+            && self.backend.has_gpu_weights()
+            && self.raw_weights.is_some();
 
         // Base Q8_0 eligibility: raw weights present and in Q8_0 format.
         let has_q8 = !use_raw
