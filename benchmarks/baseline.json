@@ -1,0 +1,8 @@
+{
+  "_comment": "Baseline performance numbers for the continuous benchmark CI workflow. Numbers are placeholders captured on the GitHub Actions macos-14 runner (not Apple Silicon on the free tier) and will need to be refreshed once we have a stable reading. The PR workflow treats mismatches as informational and does not fail CI. See .github/workflows/benchmark-pr.yml and .github/scripts/check_perf_regression.py.",
+  "smollm2-135m-q8_0": {
+    "decode_16": 35.0,
+    "sustained_512": 25.0,
+    "prefill_peak": 120.0
+  }
+}
