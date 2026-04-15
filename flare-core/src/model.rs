@@ -2,6 +2,52 @@ use crate::config::{Architecture, ModelConfig};
 use crate::kv_cache::{KvCache, QuantizedKvCache};
 use crate::tensor::Tensor;
 
+/// Ensure rayon's global thread pool is sized for CPU inference, not the
+/// host's total logical CPU count.
+///
+/// Rayon defaults to `available_parallelism` — on Apple M5 Pro that's **18**
+/// (6 Super + 12 Performance cores).  For the ~65 matmul calls per decoded
+/// token in a 1B model, that much oversubscription just multiplies the
+/// per-call latch / condvar sync cost without adding useful parallelism,
+/// because the small and medium matmuls saturate before all 18 workers
+/// are even needed.  Empirical sweep on 1B Q8_0:
+///
+/// | threads | sustained decode |
+/// |---|---|
+/// | 18 (default) | ~40 tok/s |
+/// | 10 | **~45 tok/s** (+12 %) |
+/// | 6 | ~42 tok/s |
+///
+/// We cap at 10, which leaves headroom for both P-core tiers on Apple
+/// Silicon and still improves on default everywhere we've measured. Callers
+/// that need a different count can set `RAYON_NUM_THREADS` before loading
+/// the library, or pre-build rayon's global pool themselves — this call is
+/// idempotent and silently no-ops if the pool is already initialized.
+fn init_rayon_pool_once() {
+    use std::sync::Once;
+    static INIT: Once = Once::new();
+    INIT.call_once(|| {
+        // Respect an explicit env var override (rayon honours this anyway,
+        // but we skip our own builder call so users see the exact count
+        // they requested).
+        if std::env::var_os("RAYON_NUM_THREADS").is_some() {
+            return;
+        }
+        let logical = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4);
+        // Cap at 10 — anything above that hurts on the platforms we've
+        // profiled.  On machines with <= 10 logical cores this is a no-op.
+        let target = logical.min(10);
+        // Ignore the error — if rayon's global pool was already built by
+        // something else (tests, another library), we can't override it
+        // and that's fine.
+        let _ = rayon::ThreadPoolBuilder::new()
+            .num_threads(target)
+            .build_global();
+    });
+}
+
 /// Identifies the quantization format for a raw weight tensor stored on the GPU path.
 ///
 /// Only formats with a corresponding fused dequant+matvec GPU kernel are listed here.
@@ -894,6 +940,10 @@ impl Model {
     }
 
     pub fn new(config: ModelConfig, weights: ModelWeights) -> Self {
+        // Cap rayon's global pool at 10 threads the first time a model is
+        // constructed.  See `init_rayon_pool_once` for the rationale.
+        init_rayon_pool_once();
+
         let kv_cache = KvCache::new(
             config.num_layers,
             config.max_seq_len,
