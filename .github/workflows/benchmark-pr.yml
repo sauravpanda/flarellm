@@ -1,0 +1,160 @@
+name: Benchmark (PR)
+
+# Continuous benchmark for pull requests. Runs the full e2e benchmark against
+# the baseline model and posts results as a PR comment.
+#
+# Currently informational only — results are compared against a baseline file
+# but regressions will NOT fail the CI. Once we have a stable baseline on the
+# CI runner hardware, the check script can be flipped to fail on regression.
+#
+# The existing workflow in benchmark.yml handles manual/nightly runs.
+
+on:
+  pull_request:
+    paths:
+      - 'flare-core/**'
+      - 'flare-loader/**'
+      - 'flare-simd/**'
+      - 'flare-server/examples/e2e_bench.rs'
+      - 'benchmarks/**'
+      - '.github/workflows/benchmark-pr.yml'
+      - '.github/scripts/check_perf_regression.py'
+
+# Only keep the latest run per PR to avoid wasting runner minutes on rapid
+# pushes.
+concurrency:
+  group: benchmark-pr-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  benchmark:
+    name: E2E benchmark — SmolLM2-135M Q8_0
+    runs-on: macos-14
+    permissions:
+      contents: read
+      pull-requests: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: bench-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            bench-${{ runner.os }}-
+
+      - name: Download baseline model
+        run: bash scripts/download_baseline_model.sh
+
+      - name: Build benchmark
+        run: cargo build --release -p flarellm-server --example e2e_bench
+
+      - name: Run benchmark
+        id: bench
+        run: |
+          cargo run --release -p flarellm-server --example e2e_bench -- --json > bench-result.json
+          echo "--- bench-result.json ---"
+          cat bench-result.json
+
+      - name: Compare against baseline (informational)
+        id: compare
+        continue-on-error: true
+        run: |
+          python3 .github/scripts/check_perf_regression.py \
+            bench-result.json \
+            benchmarks/baseline.json \
+            > bench-compare.txt
+          echo "--- bench-compare.txt ---"
+          cat bench-compare.txt
+
+      - name: Upload benchmark JSON
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-${{ github.event.pull_request.number }}-${{ github.sha }}
+          path: |
+            bench-result.json
+            bench-compare.txt
+          retention-days: 30
+
+      - name: Post results as PR comment
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+
+            const result = JSON.parse(fs.readFileSync('bench-result.json', 'utf8'));
+            let compare = '';
+            try {
+              compare = fs.readFileSync('bench-compare.txt', 'utf8');
+            } catch (e) {
+              compare = '(baseline comparison unavailable)';
+            }
+
+            const gen = Array.isArray(result.generation) ? result.generation : [];
+            const rows = gen.map(g =>
+              `| ${g.gen_count} | ${Number(g.prefill_tok_s).toFixed(1)} | ${Number(g.decode_tok_s).toFixed(1)} |`
+            ).join('\n');
+
+            const sustained = Number(result.sustained_512_tok_s || 0).toFixed(1);
+            const loadSecs = Number(result.load_secs || 0).toFixed(2);
+
+            const body = [
+              '## Benchmark results',
+              '',
+              '_Informational only — regressions do not fail CI yet._',
+              '',
+              `- **Model**: \`${result.model || 'unknown'}\``,
+              `- **Backend**: \`${result.backend || 'unknown'}\``,
+              `- **Hardware**: \`${result.hardware || 'unknown'}\``,
+              `- **Commit**: \`${result.commit || 'unknown'}\``,
+              `- **Load time**: ${loadSecs}s`,
+              '',
+              '### Generation speed (greedy)',
+              '',
+              '| gen tokens | prefill (tok/s) | decode (tok/s) |',
+              '|---:|---:|---:|',
+              rows || '| — | — | — |',
+              '',
+              `**Sustained decode (512 tokens)**: ${sustained} tok/s`,
+              '',
+              '### Baseline comparison',
+              '',
+              '```',
+              compare.trim() || '(no output)',
+              '```',
+              '',
+              `<sub>Workflow: \`benchmark-pr.yml\` — commit ${context.sha.substring(0, 7)}</sub>`,
+            ].join('\n');
+
+            const marker = '<!-- flare-benchmark-pr-comment -->';
+            const fullBody = `${marker}\n${body}`;
+
+            const { owner, repo } = context.repo;
+            const issue_number = context.issue.number;
+
+            const existing = await github.paginate(
+              github.rest.issues.listComments,
+              { owner, repo, issue_number, per_page: 100 },
+            );
+            const prior = existing.find(c =>
+              c.user && c.user.type === 'Bot' && c.body && c.body.includes(marker)
+            );
+
+            if (prior) {
+              await github.rest.issues.updateComment({
+                owner, repo, comment_id: prior.id, body: fullBody,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner, repo, issue_number, body: fullBody,
+              });
+            }
