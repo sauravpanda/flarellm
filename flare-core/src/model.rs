@@ -4780,6 +4780,29 @@ unsafe fn dot_q8_0_q8_0_neon(
     vaddvq_f32(vaddq_f32(vaddq_f32(sumv0, sumv1), vaddq_f32(sumv2, sumv3)))
 }
 
+/// Compute an optimal rayon chunk size based on matrix rows and available threads.
+///
+/// Aims for ~3x oversubscription of the rayon thread pool so load is balanced
+/// without incurring excessive per-task dispatch overhead. Chunk sizes are
+/// clamped to [32, 1024] rows:
+///
+/// - Small matrices (e.g. 2048-row Q/K/V/O): ~48 rows/chunk → ~42 tasks on a
+///   14-thread pool, fully utilizing cores that would otherwise sit idle under
+///   a fixed 256-row split.
+/// - Medium matrices (e.g. 8192-row gate/up/down): ~195 rows/chunk → ~42 tasks.
+/// - Large matrices (e.g. 128256-row output projection): clamped to 1024
+///   rows/chunk → ~125 tasks instead of 501, cutting dispatch overhead.
+#[cfg(not(target_arch = "wasm32"))]
+#[inline]
+fn adaptive_matvec_chunk_size(rows: usize) -> usize {
+    let num_threads = rayon::current_num_threads().max(1);
+    let target_chunks = num_threads * 3; // 3x oversubscription
+    let chunk_size = rows / target_chunks;
+    // Clamp to reasonable bounds: too small → dispatch overhead dominates,
+    // too large → some threads finish while others still have work.
+    chunk_size.clamp(32, 1024)
+}
+
 /// ARM NEON Q8_0 x Q8_0 integer dot product matvec with rayon parallelism.
 ///
 /// Quantizes the f32 input vector to Q8_0 once, then computes int8*int8 dot
@@ -4803,29 +4826,36 @@ fn matvec_q8_0_neon(weight_data: &[u8], input: &[f32], rows: usize, cols: usize)
 
     // Step 2: Compute int8 x int8 dot product for each row
     const PARALLEL_THRESHOLD: usize = 5_000_000;
-    const CHUNK_ROWS: usize = 256;
     let total_work = rows * cols;
 
     #[cfg(not(target_arch = "wasm32"))]
-    if total_work >= PARALLEL_THRESHOLD && rows >= CHUNK_ROWS * 2 {
-        use rayon::prelude::*;
-        let mut output = vec![0.0f32; rows];
-        output
-            .par_chunks_mut(CHUNK_ROWS)
-            .enumerate()
-            .for_each(|(chunk_idx, out_chunk)| {
-                let row_start = chunk_idx * CHUNK_ROWS;
-                for (local_i, out) in out_chunk.iter_mut().enumerate() {
-                    let i = row_start + local_i;
-                    let start = i * bytes_per_row;
-                    let row_bytes = &weight_data[start..start + bytes_per_row];
-                    // SAFETY: NEON always available on aarch64
-                    *out = unsafe {
-                        dot_q8_0_q8_0_neon(row_bytes, &input_scales, &input_quants, blocks_per_row)
-                    };
-                }
-            });
-        return output;
+    {
+        let chunk_rows = adaptive_matvec_chunk_size(rows);
+        if total_work >= PARALLEL_THRESHOLD && rows >= chunk_rows * 2 {
+            use rayon::prelude::*;
+            let mut output = vec![0.0f32; rows];
+            output
+                .par_chunks_mut(chunk_rows)
+                .enumerate()
+                .for_each(|(chunk_idx, out_chunk)| {
+                    let row_start = chunk_idx * chunk_rows;
+                    for (local_i, out) in out_chunk.iter_mut().enumerate() {
+                        let i = row_start + local_i;
+                        let start = i * bytes_per_row;
+                        let row_bytes = &weight_data[start..start + bytes_per_row];
+                        // SAFETY: NEON always available on aarch64
+                        *out = unsafe {
+                            dot_q8_0_q8_0_neon(
+                                row_bytes,
+                                &input_scales,
+                                &input_quants,
+                                blocks_per_row,
+                            )
+                        };
+                    }
+                });
+            return output;
+        }
     }
 
     let mut output = vec![0.0f32; rows];
@@ -6063,13 +6093,13 @@ fn matvec_q8_0_neon_into(
     let total_work = rows * cols;
     if total_work >= 2_000_000 {
         use rayon::prelude::*;
-        const CHUNK: usize = 256;
+        let chunk_rows = adaptive_matvec_chunk_size(rows);
         output
-            .par_chunks_mut(CHUNK)
+            .par_chunks_mut(chunk_rows)
             .enumerate()
             .for_each(|(chunk_idx, chunk)| {
                 for (local_idx, out) in chunk.iter_mut().enumerate() {
-                    let row = chunk_idx * CHUNK + local_idx;
+                    let row = chunk_idx * chunk_rows + local_idx;
                     let start = row * bytes_per_row;
                     let row_bytes = &weight_data[start..start + bytes_per_row];
                     *out = unsafe {
@@ -6109,12 +6139,12 @@ pub fn matvec_q8_0_preq_into(
         let total_work = rows * (blocks_per_row * Q8_0_BLOCK_SIZE);
         if total_work >= 2_000_000 {
             use rayon::prelude::*;
-            const CHUNK_ROWS: usize = 256;
+            let chunk_rows = adaptive_matvec_chunk_size(rows);
             output
-                .par_chunks_mut(CHUNK_ROWS)
+                .par_chunks_mut(chunk_rows)
                 .enumerate()
                 .for_each(|(chunk_idx, chunk)| {
-                    let base_row = chunk_idx * CHUNK_ROWS;
+                    let base_row = chunk_idx * chunk_rows;
                     let len = chunk.len();
                     // Process pairs of rows to keep preq data in L1 cache
                     let pairs = len / 2;
@@ -6231,13 +6261,13 @@ pub fn matvec_argmax_q8_0_preq(
         let total_work = rows * (blocks_per_row * Q8_0_BLOCK_SIZE);
         if total_work >= 2_000_000 {
             use rayon::prelude::*;
-            const CHUNK_ROWS: usize = 256;
-            let num_chunks = rows.div_ceil(CHUNK_ROWS);
+            let chunk_rows = adaptive_matvec_chunk_size(rows);
+            let num_chunks = rows.div_ceil(chunk_rows);
             (0..num_chunks)
                 .into_par_iter()
                 .map(|chunk_idx| {
-                    let start_row = chunk_idx * CHUNK_ROWS;
-                    let end_row = (start_row + CHUNK_ROWS).min(rows);
+                    let start_row = chunk_idx * chunk_rows;
+                    let end_row = (start_row + chunk_rows).min(rows);
                     let mut local_best_idx = start_row;
                     let mut local_best_val = f32::NEG_INFINITY;
                     for row in start_row..end_row {
@@ -6573,13 +6603,13 @@ pub fn matvec_q4k_into(
     {
         if _total_work >= 2_000_000 {
             use rayon::prelude::*;
-            const CHUNK_ROWS: usize = 32;
+            let chunk_rows = adaptive_matvec_chunk_size(rows);
             output
-                .par_chunks_mut(CHUNK_ROWS)
+                .par_chunks_mut(chunk_rows)
                 .enumerate()
                 .for_each(|(chunk_idx, chunk)| {
                     for (local_idx, out) in chunk.iter_mut().enumerate() {
-                        let row = chunk_idx * CHUNK_ROWS + local_idx;
+                        let row = chunk_idx * chunk_rows + local_idx;
                         let start = row * bytes_per_row;
                         let row_bytes = &weight_data[start..start + bytes_per_row];
                         #[cfg(target_arch = "aarch64")]
