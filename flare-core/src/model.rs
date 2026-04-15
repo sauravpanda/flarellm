@@ -1265,31 +1265,19 @@ impl Model {
         let vocab_size = self.config.vocab_size;
 
         // Fused argmax output projection — no logits buffer allocation.
-        // For Q4K we fall back to full matvec + argmax since there is no
-        // fused Q4K argmax kernel yet.
         let (best_idx, mut best_val) = if let Some(ref row) = self.raw_output_weight {
             if row.format == WeightFormat::Q4K && use_cpu_q4k {
-                // No fused Q4K argmax yet — compute full logits then scan.
+                // Fused Q4_K × Q8_0 argmax: no logits buffer write, no scan.
                 quantize_input_q8_0_into(
                     &self.forward_buffers.final_normed,
                     &mut self.forward_buffers.output_q8,
                 );
-                matvec_q4k_q8_into(
+                matvec_argmax_q4k_q8_preq(
                     &row.data,
                     &self.forward_buffers.output_q8,
                     row.num_rows,
                     dim,
-                    &mut self.forward_buffers.logits,
-                );
-                let mut bi = 0usize;
-                let mut bv = f32::NEG_INFINITY;
-                for (i, &v) in self.forward_buffers.logits.iter().enumerate() {
-                    if v > bv {
-                        bv = v;
-                        bi = i;
-                    }
-                }
-                (bi, bv)
+                )
             } else if row.format == WeightFormat::Q8_0 && use_q8_output {
                 quantize_input_q8_0_into(
                     &self.forward_buffers.final_normed,
@@ -6429,6 +6417,113 @@ pub fn matvec_argmax_q8_0_preq(
     }
 }
 
+/// Compute the argmax of a Q4_K × Q8_0-input matrix-vector product without
+/// materializing the full output vector.
+///
+/// Functionally equivalent to `matvec_q4k_q8_into` followed by a linear argmax
+/// scan over the resulting logits, but avoids writing ~`rows * 4` bytes of
+/// cache-polluting logit values and the separate scan pass. This is the Q4_K
+/// counterpart of `matvec_argmax_q8_0_preq` — greedy decoding on a Q4_K model
+/// no longer allocates the 128K-entry logits buffer at all.
+///
+/// Returns `(argmax_index, max_logit_value)`.
+pub fn matvec_argmax_q4k_q8_preq(
+    weight_data: &[u8],
+    preq: &QuantizedInput,
+    rows: usize,
+    cols: usize,
+) -> (usize, f32) {
+    debug_assert_eq!(
+        cols % Q4K_BLOCK_VALUES,
+        0,
+        "cols must be multiple of 256 for Q4_K"
+    );
+    debug_assert_eq!(
+        preq.blocks_per_row * Q8_0_BLOCK_SIZE,
+        cols,
+        "QuantizedInput must cover exactly `cols` elements"
+    );
+
+    let blocks_per_row = cols / Q4K_BLOCK_VALUES;
+    let bytes_per_row = blocks_per_row * Q4K_BLOCK_BYTES;
+
+    #[cfg(target_arch = "aarch64")]
+    {
+        let total_work = rows * cols;
+        if total_work >= 2_000_000 {
+            use rayon::prelude::*;
+            let chunk_rows = adaptive_matvec_chunk_size(rows);
+            let num_chunks = rows.div_ceil(chunk_rows);
+            (0..num_chunks)
+                .into_par_iter()
+                .map(|chunk_idx| {
+                    let start_row = chunk_idx * chunk_rows;
+                    let end_row = (start_row + chunk_rows).min(rows);
+                    let mut local_best_idx = start_row;
+                    let mut local_best_val = f32::NEG_INFINITY;
+                    for row in start_row..end_row {
+                        let start = row * bytes_per_row;
+                        let row_bytes = &weight_data[start..start + bytes_per_row];
+                        let val = unsafe {
+                            dot_q4k_q8_0_neon(
+                                row_bytes,
+                                &preq.scales,
+                                &preq.quants,
+                                blocks_per_row,
+                            )
+                        };
+                        if val > local_best_val {
+                            local_best_val = val;
+                            local_best_idx = row;
+                        }
+                    }
+                    (local_best_idx, local_best_val)
+                })
+                .reduce(
+                    || (0, f32::NEG_INFINITY),
+                    |(ai, av), (bi, bv)| {
+                        if bv > av {
+                            (bi, bv)
+                        } else {
+                            (ai, av)
+                        }
+                    },
+                )
+        } else {
+            let mut best_idx = 0usize;
+            let mut best_val = f32::NEG_INFINITY;
+            for row in 0..rows {
+                let start = row * bytes_per_row;
+                let row_bytes = &weight_data[start..start + bytes_per_row];
+                let val = unsafe {
+                    dot_q4k_q8_0_neon(row_bytes, &preq.scales, &preq.quants, blocks_per_row)
+                };
+                if val > best_val {
+                    best_val = val;
+                    best_idx = row;
+                }
+            }
+            (best_idx, best_val)
+        }
+    }
+
+    #[cfg(not(target_arch = "aarch64"))]
+    {
+        let mut best_idx = 0usize;
+        let mut best_val = f32::NEG_INFINITY;
+        for row in 0..rows {
+            let start = row * bytes_per_row;
+            let row_bytes = &weight_data[start..start + bytes_per_row];
+            let val = dot_q4k_q8_0_scalar(row_bytes, &preq.scales, &preq.quants, blocks_per_row);
+            if val > best_val {
+                best_val = val;
+                best_idx = row;
+            }
+        }
+        (best_idx, best_val)
+    }
+}
+
 /// Compute the argmax of an f32 matrix-vector product without materializing
 /// the full output vector.
 ///
@@ -9306,6 +9401,50 @@ mod tests {
                 rel
             );
         }
+    }
+
+    #[test]
+    fn test_matvec_argmax_q4k_q8_preq_matches_full_matvec() {
+        let rows = 16;
+        let cols = 512;
+
+        let mut rng_state = 123u64;
+        let mut next_f32 = || -> f32 {
+            rng_state = rng_state.wrapping_mul(6364136223846793005).wrapping_add(1);
+            ((rng_state >> 33) as f32 / (1u64 << 31) as f32) - 0.5
+        };
+
+        let weights: Vec<f32> = (0..rows * cols).map(|_| next_f32()).collect();
+        let input: Vec<f32> = (0..cols).map(|_| next_f32() * 0.1).collect();
+
+        let q4k_data = quantize_f32_to_q4k(&weights, rows, cols);
+        let preq = quantize_input_q8_0(&input);
+
+        // Full matvec + scan argmax.
+        let mut full = vec![0.0f32; rows];
+        matvec_q4k_q8_into(&q4k_data, &preq, rows, cols, &mut full);
+        let mut full_best_idx = 0usize;
+        let mut full_best_val = f32::NEG_INFINITY;
+        for (i, &v) in full.iter().enumerate() {
+            if v > full_best_val {
+                full_best_val = v;
+                full_best_idx = i;
+            }
+        }
+
+        // Fused argmax.
+        let (fused_idx, fused_val) =
+            matvec_argmax_q4k_q8_preq(&q4k_data, &preq, rows, cols);
+
+        assert_eq!(
+            fused_idx, full_best_idx,
+            "fused Q4K argmax index must match full matvec argmax"
+        );
+        let rel = (fused_val - full_best_val).abs() / full_best_val.abs().max(1e-3);
+        assert!(
+            rel < 1e-5,
+            "fused Q4K argmax value mismatch: fused={fused_val}, full={full_best_val}, rel={rel}"
+        );
     }
 
     #[test]
