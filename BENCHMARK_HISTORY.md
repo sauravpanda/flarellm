@@ -936,3 +936,34 @@ Baseline model: SmolLM2-135M-Instruct Q8_0 (138MB, 30 layers, dim=576).
 | Decode (256 tok) | 205.4 |
 | Sustained (512 tok) | **178.3** |
 
+### 2026-04-14 17:52 — `7f4c2cd` Llama-3.2-1B Q4_K_M first run (issue #441)
+
+**Hardware:** Apple M5 Pro, ARM64 (NEON SIMD)  
+**Model:** Llama, ~1498M params, 16 layers, dim=2048, **Q4_K_M** (785MB on disk)  
+**Load time:** 1.01s  
+**Notes:** First end-to-end run with a real Q4_K_M model (downloaded via
+`scripts/download_q4k_model.sh`). Q4_K layer weights activate the
+`use_cpu_q4k` path (direct 4-bit x f32 NEON matvec). Output projection stays
+on the dequantized f32 path because `output.weight` is tied to `token_embd`
+in this model (warning: "could not load raw output weight"). Inference is
+numerically healthy (no garbage, no NaN).
+
+For comparison, the same model at Q8_0 (1.3GB, tied-embedding same warning)
+sustains 37.2 tok/s on this hardware — so Q4_K_M is currently ~2x slower
+than Q8_0 despite having roughly half the weight-memory bandwidth. This
+reflects the current scalar-ish state of the Q4_K NEON matvec vs the highly
+tuned Q8_0 fused-rmsnorm path; Q4_K is functionally correct but is not yet
+bandwidth-bound and has clear headroom for SIMD tuning.
+
+| Metric | tok/s |
+|---|---|
+| Decode (16 tok) | 19.0 |
+| Decode (64 tok) | 17.4 |
+| Decode (256 tok) | 18.5 |
+| Sustained (512 tok) | **17.9** |
+
+| Format | Size | Sustained decode |
+|---|---|---|
+| Llama-3.2-1B Q8_0  | 1.3GB | 37.2 tok/s |
+| Llama-3.2-1B Q4_K_M | 785MB | 17.9 tok/s |
+
