@@ -1412,17 +1412,23 @@ impl Model {
 
                 if use_raw {
                     let rw = &self.raw_weights.as_ref().unwrap()[layer_idx];
-                    let q_tmp =
-                        self.backend
-                            .batched_dequant_matmul(&rw.wq, &self.forward_buffers.normed, 1);
+                    let q_tmp = self.backend.batched_dequant_matmul(
+                        &rw.wq,
+                        &self.forward_buffers.normed,
+                        1,
+                    );
                     self.forward_buffers.q_data.copy_from_slice(&q_tmp);
-                    let k_tmp =
-                        self.backend
-                            .batched_dequant_matmul(&rw.wk, &self.forward_buffers.normed, 1);
+                    let k_tmp = self.backend.batched_dequant_matmul(
+                        &rw.wk,
+                        &self.forward_buffers.normed,
+                        1,
+                    );
                     self.forward_buffers.k_data.copy_from_slice(&k_tmp);
-                    let v_tmp =
-                        self.backend
-                            .batched_dequant_matmul(&rw.wv, &self.forward_buffers.normed, 1);
+                    let v_tmp = self.backend.batched_dequant_matmul(
+                        &rw.wv,
+                        &self.forward_buffers.normed,
+                        1,
+                    );
                     self.forward_buffers.v_data.copy_from_slice(&v_tmp);
                 } else if use_cpu_q4k {
                     let rw = &self.raw_weights.as_ref().unwrap()[layer_idx];
@@ -1664,7 +1670,7 @@ impl Model {
             // When the Q8_0 FFN path is active (non-MoE), defer RMSNorm so we
             // can fuse it with quantization below. All other paths compute the
             // f32 normed vector up front.
-            if !(use_q8_ffn && !config.moe) {
+            if !use_q8_ffn || config.moe {
                 rmsnorm_into(
                     x.data(),
                     layer.ffn_norm.data(),
@@ -2451,17 +2457,23 @@ impl Model {
                 // QKV projections — fused into a single matvec where possible.
                 if use_raw {
                     let rw = &self.raw_weights.as_ref().unwrap()[layer_idx];
-                    let q_tmp =
-                        self.backend
-                            .batched_dequant_matmul(&rw.wq, &self.forward_buffers.normed, 1);
+                    let q_tmp = self.backend.batched_dequant_matmul(
+                        &rw.wq,
+                        &self.forward_buffers.normed,
+                        1,
+                    );
                     self.forward_buffers.q_data.copy_from_slice(&q_tmp);
-                    let k_tmp =
-                        self.backend
-                            .batched_dequant_matmul(&rw.wk, &self.forward_buffers.normed, 1);
+                    let k_tmp = self.backend.batched_dequant_matmul(
+                        &rw.wk,
+                        &self.forward_buffers.normed,
+                        1,
+                    );
                     self.forward_buffers.k_data.copy_from_slice(&k_tmp);
-                    let v_tmp =
-                        self.backend
-                            .batched_dequant_matmul(&rw.wv, &self.forward_buffers.normed, 1);
+                    let v_tmp = self.backend.batched_dequant_matmul(
+                        &rw.wv,
+                        &self.forward_buffers.normed,
+                        1,
+                    );
                     self.forward_buffers.v_data.copy_from_slice(&v_tmp);
                 } else if use_cpu_q4k {
                     let rw = &self.raw_weights.as_ref().unwrap()[layer_idx];
@@ -2768,27 +2780,27 @@ impl Model {
                         &mut self.forward_buffers.up,
                     );
                 } else if let Some(ref fused_gu) = self.fused_f32_gate_up {
-                matvec_into(
-                    &fused_gu[layer_idx],
-                    &self.forward_buffers.ffn_normed,
-                    inter_dim * 2,
-                    dim,
-                    &mut self.forward_buffers.gate_up,
-                );
-                self.forward_buffers
-                    .gate
-                    .copy_from_slice(&self.forward_buffers.gate_up[..inter_dim]);
-                self.forward_buffers
-                    .up
-                    .copy_from_slice(&self.forward_buffers.gate_up[inter_dim..]);
-            } else {
-                matvec_into(
-                    layer.w_gate.data(),
-                    &self.forward_buffers.ffn_normed,
-                    inter_dim,
-                    dim,
-                    &mut self.forward_buffers.gate,
-                );
+                    matvec_into(
+                        &fused_gu[layer_idx],
+                        &self.forward_buffers.ffn_normed,
+                        inter_dim * 2,
+                        dim,
+                        &mut self.forward_buffers.gate_up,
+                    );
+                    self.forward_buffers
+                        .gate
+                        .copy_from_slice(&self.forward_buffers.gate_up[..inter_dim]);
+                    self.forward_buffers
+                        .up
+                        .copy_from_slice(&self.forward_buffers.gate_up[inter_dim..]);
+                } else {
+                    matvec_into(
+                        layer.w_gate.data(),
+                        &self.forward_buffers.ffn_normed,
+                        inter_dim,
+                        dim,
+                        &mut self.forward_buffers.gate,
+                    );
                     matvec_into(
                         layer.w_up.data(),
                         &self.forward_buffers.ffn_normed,
@@ -3060,17 +3072,23 @@ impl Model {
                 // QKV projections
                 if use_raw {
                     let rw = &self.raw_weights.as_ref().unwrap()[layer_idx];
-                    let q_tmp =
-                        self.backend
-                            .batched_dequant_matmul(&rw.wq, &self.forward_buffers.normed, 1);
+                    let q_tmp = self.backend.batched_dequant_matmul(
+                        &rw.wq,
+                        &self.forward_buffers.normed,
+                        1,
+                    );
                     self.forward_buffers.q_data.copy_from_slice(&q_tmp);
-                    let k_tmp =
-                        self.backend
-                            .batched_dequant_matmul(&rw.wk, &self.forward_buffers.normed, 1);
+                    let k_tmp = self.backend.batched_dequant_matmul(
+                        &rw.wk,
+                        &self.forward_buffers.normed,
+                        1,
+                    );
                     self.forward_buffers.k_data.copy_from_slice(&k_tmp);
-                    let v_tmp =
-                        self.backend
-                            .batched_dequant_matmul(&rw.wv, &self.forward_buffers.normed, 1);
+                    let v_tmp = self.backend.batched_dequant_matmul(
+                        &rw.wv,
+                        &self.forward_buffers.normed,
+                        1,
+                    );
                     self.forward_buffers.v_data.copy_from_slice(&v_tmp);
                 } else if use_cpu_q4k {
                     let rw = &self.raw_weights.as_ref().unwrap()[layer_idx];
@@ -4285,12 +4303,7 @@ pub fn rmsnorm_quantize_q8_0_into(
 }
 
 #[cfg(not(target_arch = "aarch64"))]
-fn rmsnorm_quantize_q8_0_scalar(
-    x: &[f32],
-    weight: &[f32],
-    eps: f32,
-    output: &mut QuantizedInput,
-) {
+fn rmsnorm_quantize_q8_0_scalar(x: &[f32], weight: &[f32], eps: f32, output: &mut QuantizedInput) {
     let dim = x.len();
     let blocks = dim / Q8_0_BLOCK_SIZE;
 
@@ -4374,14 +4387,59 @@ unsafe fn rmsnorm_quantize_q8_0_neon(
         let start = b * Q8_0_BLOCK_SIZE;
 
         // Normalize 8 float4 vectors: normed = x * weight * inv_rms
-        let n0 = vmulq_f32(vmulq_f32(vld1q_f32(x_ptr.add(start)), vld1q_f32(w_ptr.add(start))), inv_rms_v);
-        let n1 = vmulq_f32(vmulq_f32(vld1q_f32(x_ptr.add(start + 4)), vld1q_f32(w_ptr.add(start + 4))), inv_rms_v);
-        let n2 = vmulq_f32(vmulq_f32(vld1q_f32(x_ptr.add(start + 8)), vld1q_f32(w_ptr.add(start + 8))), inv_rms_v);
-        let n3 = vmulq_f32(vmulq_f32(vld1q_f32(x_ptr.add(start + 12)), vld1q_f32(w_ptr.add(start + 12))), inv_rms_v);
-        let n4 = vmulq_f32(vmulq_f32(vld1q_f32(x_ptr.add(start + 16)), vld1q_f32(w_ptr.add(start + 16))), inv_rms_v);
-        let n5 = vmulq_f32(vmulq_f32(vld1q_f32(x_ptr.add(start + 20)), vld1q_f32(w_ptr.add(start + 20))), inv_rms_v);
-        let n6 = vmulq_f32(vmulq_f32(vld1q_f32(x_ptr.add(start + 24)), vld1q_f32(w_ptr.add(start + 24))), inv_rms_v);
-        let n7 = vmulq_f32(vmulq_f32(vld1q_f32(x_ptr.add(start + 28)), vld1q_f32(w_ptr.add(start + 28))), inv_rms_v);
+        let n0 = vmulq_f32(
+            vmulq_f32(vld1q_f32(x_ptr.add(start)), vld1q_f32(w_ptr.add(start))),
+            inv_rms_v,
+        );
+        let n1 = vmulq_f32(
+            vmulq_f32(
+                vld1q_f32(x_ptr.add(start + 4)),
+                vld1q_f32(w_ptr.add(start + 4)),
+            ),
+            inv_rms_v,
+        );
+        let n2 = vmulq_f32(
+            vmulq_f32(
+                vld1q_f32(x_ptr.add(start + 8)),
+                vld1q_f32(w_ptr.add(start + 8)),
+            ),
+            inv_rms_v,
+        );
+        let n3 = vmulq_f32(
+            vmulq_f32(
+                vld1q_f32(x_ptr.add(start + 12)),
+                vld1q_f32(w_ptr.add(start + 12)),
+            ),
+            inv_rms_v,
+        );
+        let n4 = vmulq_f32(
+            vmulq_f32(
+                vld1q_f32(x_ptr.add(start + 16)),
+                vld1q_f32(w_ptr.add(start + 16)),
+            ),
+            inv_rms_v,
+        );
+        let n5 = vmulq_f32(
+            vmulq_f32(
+                vld1q_f32(x_ptr.add(start + 20)),
+                vld1q_f32(w_ptr.add(start + 20)),
+            ),
+            inv_rms_v,
+        );
+        let n6 = vmulq_f32(
+            vmulq_f32(
+                vld1q_f32(x_ptr.add(start + 24)),
+                vld1q_f32(w_ptr.add(start + 24)),
+            ),
+            inv_rms_v,
+        );
+        let n7 = vmulq_f32(
+            vmulq_f32(
+                vld1q_f32(x_ptr.add(start + 28)),
+                vld1q_f32(w_ptr.add(start + 28)),
+            ),
+            inv_rms_v,
+        );
 
         // Find absolute max across all 32 normed values
         let abs01 = vmaxq_f32(vabsq_f32(n0), vabsq_f32(n1));
@@ -4416,8 +4474,8 @@ unsafe fn rmsnorm_quantize_q8_0_neon(
         let b0 = vcombine_s8(vqmovn_s16(s01), vqmovn_s16(s23));
         let b1 = vcombine_s8(vqmovn_s16(s45), vqmovn_s16(s67));
 
-        vst1q_s8(q_ptr.add(start) as *mut i8, b0);
-        vst1q_s8(q_ptr.add(start + 16) as *mut i8, b1);
+        vst1q_s8(q_ptr.add(start), b0);
+        vst1q_s8(q_ptr.add(start + 16), b1);
     }
 }
 
@@ -8998,12 +9056,7 @@ mod tests {
                 two_step.scales.len(),
                 "dim={dim}: scales len mismatch"
             );
-            for (b, (fs, ts)) in fused
-                .scales
-                .iter()
-                .zip(two_step.scales.iter())
-                .enumerate()
-            {
+            for (b, (fs, ts)) in fused.scales.iter().zip(two_step.scales.iter()).enumerate() {
                 assert!(
                     (fs - ts).abs() < 1e-6,
                     "dim={dim} block={b}: scale mismatch {fs} vs {ts}"
@@ -9014,12 +9067,7 @@ mod tests {
                 two_step.quants.len(),
                 "dim={dim}: quants len mismatch"
             );
-            for (j, (fq, tq)) in fused
-                .quants
-                .iter()
-                .zip(two_step.quants.iter())
-                .enumerate()
-            {
+            for (j, (fq, tq)) in fused.quants.iter().zip(two_step.quants.iter()).enumerate() {
                 assert!(
                     (*fq as i32 - *tq as i32).abs() <= 1,
                     "dim={dim} idx={j}: quant mismatch {fq} vs {tq}"
