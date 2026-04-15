@@ -23,30 +23,26 @@ use crate::tensor::Tensor;
 /// that need a different count can set `RAYON_NUM_THREADS` before loading
 /// the library, or pre-build rayon's global pool themselves — this call is
 /// idempotent and silently no-ops if the pool is already initialized.
+#[cfg(any(not(target_arch = "wasm32"), feature = "wasm_threads"))]
 fn init_rayon_pool_once() {
     use std::sync::Once;
     static INIT: Once = Once::new();
     INIT.call_once(|| {
-        // Respect an explicit env var override (rayon honours this anyway,
-        // but we skip our own builder call so users see the exact count
-        // they requested).
         if std::env::var_os("RAYON_NUM_THREADS").is_some() {
             return;
         }
         let logical = std::thread::available_parallelism()
             .map(|n| n.get())
             .unwrap_or(4);
-        // Cap at 10 — anything above that hurts on the platforms we've
-        // profiled.  On machines with <= 10 logical cores this is a no-op.
         let target = logical.min(10);
-        // Ignore the error — if rayon's global pool was already built by
-        // something else (tests, another library), we can't override it
-        // and that's fine.
         let _ = rayon::ThreadPoolBuilder::new()
             .num_threads(target)
             .build_global();
     });
 }
+
+#[cfg(all(target_arch = "wasm32", not(feature = "wasm_threads")))]
+fn init_rayon_pool_once() {}
 
 /// Identifies the quantization format for a raw weight tensor stored on the GPU path.
 ///
