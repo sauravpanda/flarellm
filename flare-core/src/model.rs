@@ -4985,14 +4985,22 @@ unsafe fn dot_q8_0_q8_0_neon(
 #[cfg(not(target_arch = "wasm32"))]
 #[inline]
 fn adaptive_matvec_chunk_size(rows: usize) -> usize {
-    // Chunk size selection based on empirical benchmarking:
-    // - Small matrices (< 1024 rows): use 64-row chunks for good parallelism
-    // - Medium matrices (1024-8192 rows): 256-row chunks balance dispatch vs load
-    // - Large matrices (vocab projection): 1024-row chunks reduce task count
-    if rows < 1024 {
-        64
+    // Chunk size selection based on empirical profiling on Apple M5 Pro.
+    //
+    // Rayon's `par_chunks_mut().for_each()` incurs ~15-30 μs of latch /
+    // condvar wake overhead per call on macOS.  For medium matrices the
+    // crossover point where parallelism beats that overhead is higher than
+    // you'd expect, so we keep chunks fat and task counts low.  The profile
+    // before this tuning showed worker threads ~44% idle in
+    // `wait_until_cold` and main thread ~96% blocked in `pthread_cond_wait`
+    // — fewer tasks per call trade peak parallelism for better average
+    // utilisation.
+    if rows < 2048 {
+        rows.div_ceil(2).max(1)
+    } else if rows < 8192 {
+        rows.div_ceil(8).max(1)
     } else if rows < 32768 {
-        256
+        512
     } else {
         1024
     }
