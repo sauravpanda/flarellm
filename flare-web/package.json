@@ -1,6 +1,6 @@
 {
-  "name": "@aspect/flare",
-  "version": "0.1.0",
+  "name": "@sauravpanda/flare",
+  "version": "0.1.1",
   "description": "WASM-first LLM inference engine with WebGPU acceleration — run LLMs in the browser with zero server costs",
   "type": "module",
   "main": "pkg/flare_web.js",
@@ -13,7 +13,8 @@
     "pkg/flare_web.d.ts",
     "pkg/package.json",
     "js/",
-    "demo/"
+    "demo/",
+    "LICENSE"
   ],
   "scripts": {
     "build": "wasm-pack build --target web --out-dir pkg",

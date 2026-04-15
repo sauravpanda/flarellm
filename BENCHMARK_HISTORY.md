@@ -1058,3 +1058,42 @@ bandwidth-bound and has clear headroom for SIMD tuning.
 | Decode (256 tok) | 33.5 |
 | Sustained (512 tok) | **32.8** |
 
+### 2026-04-14 18:15 — `968a3fa Add Q4_K x Q8_0-input matvec path (decode 20 -> 34 tok/s ...`
+
+**Hardware:** Apple M5 Pro, ARM64 (NEON SIMD)  
+**Model:** Llama, ~1498M params, 16 layers, dim=2048  
+**Load time:** 1.08s
+
+| Metric | tok/s |
+|---|---|
+| Decode (16 tok) | 34.5 |
+| Decode (64 tok) | 33.3 |
+| Decode (256 tok) | 33.2 |
+| Sustained (512 tok) | **31.9** |
+
+### 2026-04-14 18:15 — `968a3fa Add Q4_K x Q8_0-input matvec path (decode 20 -> 34 tok/s ...`
+
+**Hardware:** Apple M5 Pro, ARM64 (NEON SIMD)  
+**Model:** Llama, ~1498M params, 16 layers, dim=2048  
+**Load time:** 1.00s
+
+| Metric | tok/s |
+|---|---|
+| Decode (16 tok) | 43.9 |
+| Decode (64 tok) | 37.5 |
+| Decode (256 tok) | 40.6 |
+| Sustained (512 tok) | **38.4** |
+
+### 2026-04-14 18:15 — `968a3fa Add Q4_K x Q8_0-input matvec path (decode 20 -> 34 tok/s ...`
+
+**Hardware:** Apple M5 Pro, ARM64 (NEON SIMD)  
+**Model:** Llama, ~162M params, 30 layers, dim=576  
+**Load time:** 0.12s
+
+| Metric | tok/s |
+|---|---|
+| Decode (16 tok) | 225.2 |
+| Decode (64 tok) | 221.2 |
+| Decode (256 tok) | 192.2 |
+| Sustained (512 tok) | **177.6** |
+
