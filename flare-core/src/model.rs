@@ -4795,12 +4795,17 @@ unsafe fn dot_q8_0_q8_0_neon(
 #[cfg(not(target_arch = "wasm32"))]
 #[inline]
 fn adaptive_matvec_chunk_size(rows: usize) -> usize {
-    let num_threads = rayon::current_num_threads().max(1);
-    let target_chunks = num_threads * 3; // 3x oversubscription
-    let chunk_size = rows / target_chunks;
-    // Clamp to reasonable bounds: too small → dispatch overhead dominates,
-    // too large → some threads finish while others still have work.
-    chunk_size.clamp(32, 1024)
+    // Chunk size selection based on empirical benchmarking:
+    // - Small matrices (< 1024 rows): use 64-row chunks for good parallelism
+    // - Medium matrices (1024-8192 rows): 256-row chunks balance dispatch vs load
+    // - Large matrices (vocab projection): 1024-row chunks reduce task count
+    if rows < 1024 {
+        64
+    } else if rows < 32768 {
+        256
+    } else {
+        1024
+    }
 }
 
 /// ARM NEON Q8_0 x Q8_0 integer dot product matvec with rayon parallelism.

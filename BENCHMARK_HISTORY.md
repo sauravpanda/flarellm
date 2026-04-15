@@ -967,3 +967,81 @@ bandwidth-bound and has clear headroom for SIMD tuning.
 | Llama-3.2-1B Q8_0  | 1.3GB | 37.2 tok/s |
 | Llama-3.2-1B Q4_K_M | 785MB | 17.9 tok/s |
 
+### 2026-04-14 17:55 — `b8a08fb Add Q4_K_M download script and first Llama-3.2-1B Q4_K_M ...`
+
+**Hardware:** Apple M5 Pro, ARM64 (NEON SIMD)  
+**Model:** Llama, ~1498M params, 16 layers, dim=2048  
+**Load time:** 1.10s
+
+| Metric | tok/s |
+|---|---|
+| Decode (16 tok) | 37.9 |
+| Decode (64 tok) | 39.2 |
+| Decode (256 tok) | 34.2 |
+| Sustained (512 tok) | **32.0** |
+
+### 2026-04-14 17:57 — `b8a08fb Add Q4_K_M download script and first Llama-3.2-1B Q4_K_M ...`
+
+**Hardware:** Apple M5 Pro, ARM64 (NEON SIMD)  
+**Model:** Llama, ~1498M params, 16 layers, dim=2048  
+**Load time:** 0.93s
+
+| Metric | tok/s |
+|---|---|
+| Decode (16 tok) | 44.2 |
+| Decode (64 tok) | 24.9 |
+| Decode (256 tok) | 40.0 |
+| Sustained (512 tok) | **35.1** |
+
+### 2026-04-14 17:58 — `b8a08fb Add Q4_K_M download script and first Llama-3.2-1B Q4_K_M ...`
+
+**Hardware:** Apple M5 Pro, ARM64 (NEON SIMD)  
+**Model:** Llama, ~1498M params, 16 layers, dim=2048  
+**Load time:** 0.91s
+
+| Metric | tok/s |
+|---|---|
+| Decode (16 tok) | 46.2 |
+| Decode (64 tok) | 44.0 |
+| Decode (256 tok) | 41.1 |
+| Sustained (512 tok) | **38.5** |
+
+### 2026-04-14 17:58 — `b8a08fb Add Q4_K_M download script and first Llama-3.2-1B Q4_K_M ...`
+
+**Hardware:** Apple M5 Pro, ARM64 (NEON SIMD)  
+**Model:** Llama, ~162M params, 30 layers, dim=576  
+**Load time:** 0.13s
+
+| Metric | tok/s |
+|---|---|
+| Decode (16 tok) | 163.3 |
+| Decode (64 tok) | 203.8 |
+| Decode (256 tok) | 190.1 |
+| Sustained (512 tok) | **137.5** |
+
+### 2026-04-14 17:59 — `b8a08fb Add Q4_K_M download script and first Llama-3.2-1B Q4_K_M ...`
+
+**Hardware:** Apple M5 Pro, ARM64 (NEON SIMD)  
+**Model:** Llama, ~162M params, 30 layers, dim=576  
+**Load time:** 0.11s
+
+| Metric | tok/s |
+|---|---|
+| Decode (16 tok) | 235.3 |
+| Decode (64 tok) | 228.5 |
+| Decode (256 tok) | 206.2 |
+| Sustained (512 tok) | **176.0** |
+
+### 2026-04-14 17:59 — `b8a08fb Add Q4_K_M download script and first Llama-3.2-1B Q4_K_M ...`
+
+**Hardware:** Apple M5 Pro, ARM64 (NEON SIMD)  
+**Model:** Llama, ~1498M params, 16 layers, dim=2048  
+**Load time:** 0.94s
+
+| Metric | tok/s |
+|---|---|
+| Decode (16 tok) | 46.6 |
+| Decode (64 tok) | 45.4 |
+| Decode (256 tok) | 37.0 |
+| Sustained (512 tok) | **33.5** |
+
