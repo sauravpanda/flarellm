@@ -271,6 +271,10 @@ wasm-pack build flare-web --target web
 
 # WASM with multi-threading support
 wasm-pack build flare-web --target web --features wasm_threads
+
+# Profile-guided optimization (PGO) build — squeezes ~5-10% on top of LTO.
+# Requires `rustup component add llvm-tools-preview`.
+./scripts/build_pgo.sh
 ```
 
 ## Contributing
