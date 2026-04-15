@@ -1045,3 +1045,16 @@ bandwidth-bound and has clear headroom for SIMD tuning.
 | Decode (256 tok) | 37.0 |
 | Sustained (512 tok) | **33.5** |
 
+### 2026-04-14 18:12 — `dbf01e9 Tune adaptive chunk size for matvec: 64/256/1024 tiers`
+
+**Hardware:** Apple M5 Pro, ARM64 (NEON SIMD)  
+**Model:** Llama, ~1498M params, 16 layers, dim=2048  
+**Load time:** 1.07s
+
+| Metric | tok/s |
+|---|---|
+| Decode (16 tok) | 34.1 |
+| Decode (64 tok) | 33.9 |
+| Decode (256 tok) | 33.5 |
+| Sustained (512 tok) | **32.8** |
+

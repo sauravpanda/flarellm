@@ -1173,9 +1173,13 @@ impl Model {
         // Use quantized path when raw output weight is available (bandwidth reduction).
         if let Some(ref row) = self.raw_output_weight {
             if row.format == WeightFormat::Q4K && use_cpu_q4k {
-                matvec_q4k_into(
-                    &row.data,
+                quantize_input_q8_0_into(
                     &self.forward_buffers.final_normed,
+                    &mut self.forward_buffers.output_q8,
+                );
+                matvec_q4k_q8_into(
+                    &row.data,
+                    &self.forward_buffers.output_q8,
                     row.num_rows,
                     dim,
                     &mut self.forward_buffers.logits,
@@ -1266,9 +1270,13 @@ impl Model {
         let (best_idx, mut best_val) = if let Some(ref row) = self.raw_output_weight {
             if row.format == WeightFormat::Q4K && use_cpu_q4k {
                 // No fused Q4K argmax yet — compute full logits then scan.
-                matvec_q4k_into(
-                    &row.data,
+                quantize_input_q8_0_into(
                     &self.forward_buffers.final_normed,
+                    &mut self.forward_buffers.output_q8,
+                );
+                matvec_q4k_q8_into(
+                    &row.data,
+                    &self.forward_buffers.output_q8,
                     row.num_rows,
                     dim,
                     &mut self.forward_buffers.logits,
@@ -1432,23 +1440,29 @@ impl Model {
                     self.forward_buffers.v_data.copy_from_slice(&v_tmp);
                 } else if use_cpu_q4k {
                     let rw = &self.raw_weights.as_ref().unwrap()[layer_idx];
-                    matvec_q4k_into(
-                        &rw.wq.data,
+                    // Quantize the f32 normed input to Q8_0 once and reuse it
+                    // across all three Q/K/V projections.
+                    quantize_input_q8_0_into(
                         &self.forward_buffers.normed,
+                        &mut self.forward_buffers.normed_q8,
+                    );
+                    matvec_q4k_q8_into(
+                        &rw.wq.data,
+                        &self.forward_buffers.normed_q8,
                         rw.wq.num_rows,
                         dim,
                         &mut self.forward_buffers.q_data,
                     );
-                    matvec_q4k_into(
+                    matvec_q4k_q8_into(
                         &rw.wk.data,
-                        &self.forward_buffers.normed,
+                        &self.forward_buffers.normed_q8,
                         rw.wk.num_rows,
                         dim,
                         &mut self.forward_buffers.k_data,
                     );
-                    matvec_q4k_into(
+                    matvec_q4k_q8_into(
                         &rw.wv.data,
-                        &self.forward_buffers.normed,
+                        &self.forward_buffers.normed_q8,
                         rw.wv.num_rows,
                         dim,
                         &mut self.forward_buffers.v_data,
@@ -1617,9 +1631,13 @@ impl Model {
                 self.forward_buffers.attn_proj.copy_from_slice(&tmp);
             } else if use_cpu_q4k {
                 let rw = &self.raw_weights.as_ref().unwrap()[layer_idx];
-                matvec_q4k_into(
-                    &rw.wo.data,
+                quantize_input_q8_0_into(
                     &self.forward_buffers.attn_output,
+                    &mut self.forward_buffers.attn_q8,
+                );
+                matvec_q4k_q8_into(
+                    &rw.wo.data,
+                    &self.forward_buffers.attn_q8,
                     rw.wo.num_rows,
                     num_heads * head_dim,
                     &mut self.forward_buffers.attn_proj,
@@ -1731,16 +1749,20 @@ impl Model {
                     self.forward_buffers.up.copy_from_slice(&up_tmp);
                 } else if use_cpu_q4k {
                     let rw = &self.raw_weights.as_ref().unwrap()[layer_idx];
-                    matvec_q4k_into(
-                        &rw.w_gate.data,
+                    quantize_input_q8_0_into(
                         &self.forward_buffers.ffn_normed,
+                        &mut self.forward_buffers.ffn_normed_q8,
+                    );
+                    matvec_q4k_q8_into(
+                        &rw.w_gate.data,
+                        &self.forward_buffers.ffn_normed_q8,
                         rw.w_gate.num_rows,
                         dim,
                         &mut self.forward_buffers.gate,
                     );
-                    matvec_q4k_into(
+                    matvec_q4k_q8_into(
                         &rw.w_up.data,
-                        &self.forward_buffers.ffn_normed,
+                        &self.forward_buffers.ffn_normed_q8,
                         rw.w_up.num_rows,
                         dim,
                         &mut self.forward_buffers.up,
@@ -1840,9 +1862,13 @@ impl Model {
                     self.forward_buffers.ffn_out.copy_from_slice(&tmp);
                 } else if use_cpu_q4k {
                     let rw = &self.raw_weights.as_ref().unwrap()[layer_idx];
-                    matvec_q4k_into(
-                        &rw.w_down.data,
+                    quantize_input_q8_0_into(
                         &self.forward_buffers.ffn_hidden,
+                        &mut self.forward_buffers.ffn_hidden_q8,
+                    );
+                    matvec_q4k_q8_into(
+                        &rw.w_down.data,
+                        &self.forward_buffers.ffn_hidden_q8,
                         rw.w_down.num_rows,
                         config.intermediate_dim,
                         &mut self.forward_buffers.ffn_out,
@@ -2263,7 +2289,8 @@ impl Model {
         let mut logits = if use_output_q4k {
             let row = self.raw_output_weight.as_ref().unwrap();
             let mut out = vec![0.0f32; config.vocab_size];
-            matvec_q4k_into(&row.data, &normed_final, row.num_rows, dim, &mut out);
+            let preq = quantize_input_q8_0(&normed_final);
+            matvec_q4k_q8_into(&row.data, &preq, row.num_rows, dim, &mut out);
             out
         } else if use_output_q8 {
             let row = self.raw_output_weight.as_ref().unwrap();
@@ -2477,23 +2504,27 @@ impl Model {
                     self.forward_buffers.v_data.copy_from_slice(&v_tmp);
                 } else if use_cpu_q4k {
                     let rw = &self.raw_weights.as_ref().unwrap()[layer_idx];
-                    matvec_q4k_into(
-                        &rw.wq.data,
+                    quantize_input_q8_0_into(
                         &self.forward_buffers.normed,
+                        &mut self.forward_buffers.normed_q8,
+                    );
+                    matvec_q4k_q8_into(
+                        &rw.wq.data,
+                        &self.forward_buffers.normed_q8,
                         rw.wq.num_rows,
                         dim,
                         &mut self.forward_buffers.q_data,
                     );
-                    matvec_q4k_into(
+                    matvec_q4k_q8_into(
                         &rw.wk.data,
-                        &self.forward_buffers.normed,
+                        &self.forward_buffers.normed_q8,
                         rw.wk.num_rows,
                         dim,
                         &mut self.forward_buffers.k_data,
                     );
-                    matvec_q4k_into(
+                    matvec_q4k_q8_into(
                         &rw.wv.data,
-                        &self.forward_buffers.normed,
+                        &self.forward_buffers.normed_q8,
                         rw.wv.num_rows,
                         dim,
                         &mut self.forward_buffers.v_data,
@@ -2659,9 +2690,13 @@ impl Model {
                 self.forward_buffers.attn_proj.copy_from_slice(&tmp);
             } else if use_cpu_q4k {
                 let rw = &self.raw_weights.as_ref().unwrap()[layer_idx];
-                matvec_q4k_into(
-                    &rw.wo.data,
+                quantize_input_q8_0_into(
                     &self.forward_buffers.attn_output,
+                    &mut self.forward_buffers.attn_q8,
+                );
+                matvec_q4k_q8_into(
+                    &rw.wo.data,
+                    &self.forward_buffers.attn_q8,
                     rw.wo.num_rows,
                     num_heads * head_dim,
                     &mut self.forward_buffers.attn_proj,
@@ -2765,16 +2800,20 @@ impl Model {
                     self.forward_buffers.up.copy_from_slice(&up_tmp);
                 } else if use_cpu_q4k {
                     let rw = &self.raw_weights.as_ref().unwrap()[layer_idx];
-                    matvec_q4k_into(
-                        &rw.w_gate.data,
+                    quantize_input_q8_0_into(
                         &self.forward_buffers.ffn_normed,
+                        &mut self.forward_buffers.ffn_normed_q8,
+                    );
+                    matvec_q4k_q8_into(
+                        &rw.w_gate.data,
+                        &self.forward_buffers.ffn_normed_q8,
                         rw.w_gate.num_rows,
                         dim,
                         &mut self.forward_buffers.gate,
                     );
-                    matvec_q4k_into(
+                    matvec_q4k_q8_into(
                         &rw.w_up.data,
-                        &self.forward_buffers.ffn_normed,
+                        &self.forward_buffers.ffn_normed_q8,
                         rw.w_up.num_rows,
                         dim,
                         &mut self.forward_buffers.up,
@@ -2849,9 +2888,13 @@ impl Model {
                 self.forward_buffers.ffn_out.copy_from_slice(&tmp);
             } else if use_cpu_q4k {
                 let rw = &self.raw_weights.as_ref().unwrap()[layer_idx];
-                matvec_q4k_into(
-                    &rw.w_down.data,
+                quantize_input_q8_0_into(
                     &self.forward_buffers.ffn_hidden,
+                    &mut self.forward_buffers.ffn_hidden_q8,
+                );
+                matvec_q4k_q8_into(
+                    &rw.w_down.data,
+                    &self.forward_buffers.ffn_hidden_q8,
                     rw.w_down.num_rows,
                     config.intermediate_dim,
                     &mut self.forward_buffers.ffn_out,
@@ -2913,9 +2956,13 @@ impl Model {
 
         if let Some(ref row) = self.raw_output_weight {
             if row.format == WeightFormat::Q4K && use_cpu_q4k {
-                matvec_q4k_into(
-                    &row.data,
+                quantize_input_q8_0_into(
                     &self.forward_buffers.final_normed,
+                    &mut self.forward_buffers.output_q8,
+                );
+                matvec_q4k_q8_into(
+                    &row.data,
+                    &self.forward_buffers.output_q8,
                     row.num_rows,
                     dim,
                     &mut self.forward_buffers.logits,
@@ -3092,23 +3139,27 @@ impl Model {
                     self.forward_buffers.v_data.copy_from_slice(&v_tmp);
                 } else if use_cpu_q4k {
                     let rw = &self.raw_weights.as_ref().unwrap()[layer_idx];
-                    matvec_q4k_into(
-                        &rw.wq.data,
+                    quantize_input_q8_0_into(
                         &self.forward_buffers.normed,
+                        &mut self.forward_buffers.normed_q8,
+                    );
+                    matvec_q4k_q8_into(
+                        &rw.wq.data,
+                        &self.forward_buffers.normed_q8,
                         rw.wq.num_rows,
                         dim,
                         &mut self.forward_buffers.q_data,
                     );
-                    matvec_q4k_into(
+                    matvec_q4k_q8_into(
                         &rw.wk.data,
-                        &self.forward_buffers.normed,
+                        &self.forward_buffers.normed_q8,
                         rw.wk.num_rows,
                         dim,
                         &mut self.forward_buffers.k_data,
                     );
-                    matvec_q4k_into(
+                    matvec_q4k_q8_into(
                         &rw.wv.data,
-                        &self.forward_buffers.normed,
+                        &self.forward_buffers.normed_q8,
                         rw.wv.num_rows,
                         dim,
                         &mut self.forward_buffers.v_data,
@@ -3275,9 +3326,13 @@ impl Model {
                 self.forward_buffers.attn_proj.copy_from_slice(&tmp);
             } else if use_cpu_q4k {
                 let rw = &self.raw_weights.as_ref().unwrap()[layer_idx];
-                matvec_q4k_into(
-                    &rw.wo.data,
+                quantize_input_q8_0_into(
                     &self.forward_buffers.attn_output,
+                    &mut self.forward_buffers.attn_q8,
+                );
+                matvec_q4k_q8_into(
+                    &rw.wo.data,
+                    &self.forward_buffers.attn_q8,
                     rw.wo.num_rows,
                     num_heads * head_dim,
                     &mut self.forward_buffers.attn_proj,
@@ -3379,16 +3434,20 @@ impl Model {
                     self.forward_buffers.up.copy_from_slice(&up_tmp);
                 } else if use_cpu_q4k {
                     let rw = &self.raw_weights.as_ref().unwrap()[layer_idx];
-                    matvec_q4k_into(
-                        &rw.w_gate.data,
+                    quantize_input_q8_0_into(
                         &self.forward_buffers.ffn_normed,
+                        &mut self.forward_buffers.ffn_normed_q8,
+                    );
+                    matvec_q4k_q8_into(
+                        &rw.w_gate.data,
+                        &self.forward_buffers.ffn_normed_q8,
                         rw.w_gate.num_rows,
                         dim,
                         &mut self.forward_buffers.gate,
                     );
-                    matvec_q4k_into(
+                    matvec_q4k_q8_into(
                         &rw.w_up.data,
-                        &self.forward_buffers.ffn_normed,
+                        &self.forward_buffers.ffn_normed_q8,
                         rw.w_up.num_rows,
                         dim,
                         &mut self.forward_buffers.up,
@@ -3449,9 +3508,13 @@ impl Model {
                 self.forward_buffers.ffn_out.copy_from_slice(&tmp);
             } else if use_cpu_q4k {
                 let rw = &self.raw_weights.as_ref().unwrap()[layer_idx];
-                matvec_q4k_into(
-                    &rw.w_down.data,
+                quantize_input_q8_0_into(
                     &self.forward_buffers.ffn_hidden,
+                    &mut self.forward_buffers.ffn_hidden_q8,
+                );
+                matvec_q4k_q8_into(
+                    &rw.w_down.data,
+                    &self.forward_buffers.ffn_hidden_q8,
                     rw.w_down.num_rows,
                     config.intermediate_dim,
                     &mut self.forward_buffers.ffn_out,
@@ -3514,9 +3577,13 @@ impl Model {
         let vocab_size = config.vocab_size;
         if let Some(ref row) = self.raw_output_weight {
             if row.format == WeightFormat::Q4K && use_cpu_q4k {
-                matvec_q4k_into(
-                    &row.data,
+                quantize_input_q8_0_into(
                     &self.forward_buffers.final_normed,
+                    &mut self.forward_buffers.output_q8,
+                );
+                matvec_q4k_q8_into(
+                    &row.data,
+                    &self.forward_buffers.output_q8,
                     row.num_rows,
                     dim,
                     &mut self.forward_buffers.logits,
@@ -6645,6 +6712,308 @@ pub fn matvec_q4k_into(
     }
 }
 
+// ---------------------------------------------------------------------------
+// Q4_K weight × Q8_0 input matvec
+// ---------------------------------------------------------------------------
+//
+// Each Q4_K block has 256 weights split into 8 sub-blocks of 32 values
+// (sub 0..3 = low nibbles, sub 4..7 = high nibbles). These 8 sub-blocks line
+// up exactly with 8 consecutive Q8_0 input blocks of 32 values each.
+//
+// For sub-block `s` of Q4_K block `b`:
+//   w[i] = d * sc[s] * nibble[i] - dmin * mn[s]
+// where `d, dmin` are the block's f16 scales and `sc[s], mn[s]` are 6-bit
+// unpacked sub-block scales/mins.
+//
+// Against a Q8_0 input (scale S_b, int8 quants q[i]) the sub-block dot is:
+//   sum_i w[i] * S_{b*8+s} * q[i]
+//     = S_{b*8+s} * d * sc[s] * sum_i(nibble[i] * q[i])     // SDOT
+//     - S_{b*8+s} * dmin * mn[s] * sum_i(q[i])              // input-sum
+//
+// Both sub-block dot products are pure int8 ops: nibbles 0..15 fit cleanly in
+// signed int8, so SDOT works without sign adjustment. This replaces 4-byte
+// f32 input reads with 1-byte int8 reads (~4× less input bandwidth).
+
+/// Scalar reference implementation of Q4_K × Q8_0 dot product for one row.
+#[inline]
+#[allow(dead_code)]
+fn dot_q4k_q8_0_scalar(
+    row_bytes: &[u8],
+    input_q8_scales: &[f32],
+    input_q8_quants: &[i8],
+    blocks_per_row: usize,
+) -> f32 {
+    let mut sum = 0.0f32;
+
+    for block in 0..blocks_per_row {
+        let bstart = block * Q4K_BLOCK_BYTES;
+        let blk = &row_bytes[bstart..bstart + Q4K_BLOCK_BYTES];
+
+        let d = f16_to_f32_inline(u16::from_le_bytes([blk[0], blk[1]]));
+        let dmin = f16_to_f32_inline(u16::from_le_bytes([blk[2], blk[3]]));
+        let (sc, mn) = unpack_q4k_scales(&blk[4..16]);
+        let qs = &blk[16..144];
+
+        // The 8 Q8_0 input sub-blocks for this Q4_K block.
+        let iq_base = block * 8 * Q8_0_BLOCK_SIZE;
+        let is_base = block * 8;
+
+        // Sub-blocks 0..3: low nibbles of bytes[0..32], [32..64], [64..96], [96..128]
+        // Sub-blocks 4..7: high nibbles of the same byte groups -> weights 128..255
+        for sub in 0..4 {
+            let byte_off = sub * 32;
+            let in_off_lo = iq_base + sub * Q8_0_BLOCK_SIZE;
+            let in_off_hi = iq_base + (sub + 4) * Q8_0_BLOCK_SIZE;
+            let s_lo = input_q8_scales[is_base + sub];
+            let s_hi = input_q8_scales[is_base + sub + 4];
+
+            let mut dot_lo = 0i32;
+            let mut dot_hi = 0i32;
+            let mut qsum_lo = 0i32;
+            let mut qsum_hi = 0i32;
+            for k in 0..32 {
+                let byte = qs[byte_off + k];
+                let lo = (byte & 0x0F) as i32;
+                let hi = (byte >> 4) as i32;
+                let q_lo = input_q8_quants[in_off_lo + k] as i32;
+                let q_hi = input_q8_quants[in_off_hi + k] as i32;
+                dot_lo += lo * q_lo;
+                dot_hi += hi * q_hi;
+                qsum_lo += q_lo;
+                qsum_hi += q_hi;
+            }
+
+            let d_sc_lo = d * sc[sub] as f32;
+            let dmin_mn_lo = dmin * mn[sub] as f32;
+            let d_sc_hi = d * sc[sub + 4] as f32;
+            let dmin_mn_hi = dmin * mn[sub + 4] as f32;
+
+            sum += s_lo * (d_sc_lo * dot_lo as f32 - dmin_mn_lo * qsum_lo as f32);
+            sum += s_hi * (d_sc_hi * dot_hi as f32 - dmin_mn_hi * qsum_hi as f32);
+        }
+    }
+    sum
+}
+
+/// NEON-optimized Q4_K × Q8_0 dot product for a single row.
+///
+/// Uses the ARMv8.2 SDOT instruction to do 32×int8 dot products per sub-block
+/// with only 2 SDOTs. Input is read at int8 precision (1 byte / value) instead
+/// of f32 (4 bytes / value) — a 4× reduction in input-side memory traffic vs
+/// `dot_q4k_f32_neon`.
+#[cfg(target_arch = "aarch64")]
+#[inline]
+unsafe fn dot_q4k_q8_0_neon(
+    row_bytes: &[u8],
+    input_q8_scales: &[f32],
+    input_q8_quants: &[i8],
+    blocks_per_row: usize,
+) -> f32 {
+    use std::arch::aarch64::*;
+
+    let mask_0f = vdupq_n_u8(0x0F);
+    let mut acc = vdupq_n_f32(0.0);
+
+    let row_ptr = row_bytes.as_ptr();
+    let iq_ptr = input_q8_quants.as_ptr();
+    let is_ptr = input_q8_scales.as_ptr();
+
+    for block in 0..blocks_per_row {
+        let blk = row_ptr.add(block * Q4K_BLOCK_BYTES);
+
+        // Prefetch next block's weight data to keep the weight stream hot.
+        if block + 1 < blocks_per_row {
+            core::arch::asm!(
+                "prfm pldl1strm, [{addr}]",
+                addr = in(reg) row_ptr.add((block + 1) * Q4K_BLOCK_BYTES),
+                options(nostack, preserves_flags),
+            );
+        }
+
+        let d = f16_to_f32_inline(u16::from_le_bytes([*blk, *blk.add(1)]));
+        let dmin = f16_to_f32_inline(u16::from_le_bytes([*blk.add(2), *blk.add(3)]));
+        let scales_raw = std::slice::from_raw_parts(blk.add(4), 12);
+        let (sc, mn) = unpack_q4k_scales(scales_raw);
+        let qs_ptr = blk.add(16);
+
+        let iq_base = iq_ptr.add(block * 8 * Q8_0_BLOCK_SIZE);
+        let is_base = is_ptr.add(block * 8);
+
+        // Process the 4 byte-groups (each produces one low-nibble and one
+        // high-nibble sub-block = 2 Q8_0 input blocks).
+        for group in 0..4 {
+            // Load 32 weight bytes -> low/high nibbles (each sub-block = 32 weights)
+            let b0 = vld1q_u8(qs_ptr.add(group * 32));
+            let b1 = vld1q_u8(qs_ptr.add(group * 32 + 16));
+
+            let lo0 = vreinterpretq_s8_u8(vandq_u8(b0, mask_0f));
+            let lo1 = vreinterpretq_s8_u8(vandq_u8(b1, mask_0f));
+            let hi0 = vreinterpretq_s8_u8(vshrq_n_u8::<4>(b0));
+            let hi1 = vreinterpretq_s8_u8(vshrq_n_u8::<4>(b1));
+
+            // Load corresponding Q8_0 input quants
+            let il0 = vld1q_s8(iq_base.add(group * Q8_0_BLOCK_SIZE));
+            let il1 = vld1q_s8(iq_base.add(group * Q8_0_BLOCK_SIZE + 16));
+            let ih0 = vld1q_s8(iq_base.add((group + 4) * Q8_0_BLOCK_SIZE));
+            let ih1 = vld1q_s8(iq_base.add((group + 4) * Q8_0_BLOCK_SIZE + 16));
+
+            // Dot products: nibble * input_q  (SDOT → int32x4)
+            let dot_lo = vaddq_s32(
+                ggml_vdotq_s32(vdupq_n_s32(0), lo0, il0),
+                ggml_vdotq_s32(vdupq_n_s32(0), lo1, il1),
+            );
+            let dot_hi = vaddq_s32(
+                ggml_vdotq_s32(vdupq_n_s32(0), hi0, ih0),
+                ggml_vdotq_s32(vdupq_n_s32(0), hi1, ih1),
+            );
+
+            // Horizontal sums of the input quants for the min term.
+            // vpaddlq_s8: int8x16 -> int16x8 pairwise-add; then vaddvq_s16.
+            let qsum_lo_i32 =
+                vaddvq_s16(vaddq_s16(vpaddlq_s8(il0), vpaddlq_s8(il1))) as i32;
+            let qsum_hi_i32 =
+                vaddvq_s16(vaddq_s16(vpaddlq_s8(ih0), vpaddlq_s8(ih1))) as i32;
+
+            // Horizontal sum of the SDOT results -> i32 scalar
+            let dot_lo_i32 = vaddvq_s32(dot_lo);
+            let dot_hi_i32 = vaddvq_s32(dot_hi);
+
+            let s_lo = *is_base.add(group);
+            let s_hi = *is_base.add(group + 4);
+
+            let d_sc_lo = d * sc[group] as f32;
+            let dmin_mn_lo = dmin * mn[group] as f32;
+            let d_sc_hi = d * sc[group + 4] as f32;
+            let dmin_mn_hi = dmin * mn[group + 4] as f32;
+
+            // Accumulate as two (f32, f32) pairs packed into a single f32x4
+            // lane-multiply + fma sequence.
+            let term_lo = s_lo * (d_sc_lo * dot_lo_i32 as f32 - dmin_mn_lo * qsum_lo_i32 as f32);
+            let term_hi = s_hi * (d_sc_hi * dot_hi_i32 as f32 - dmin_mn_hi * qsum_hi_i32 as f32);
+
+            // Pack into lanes 0/1 of the accumulator; lanes 2/3 stay unused.
+            let lane01 = vsetq_lane_f32(term_hi, vsetq_lane_f32(term_lo, vdupq_n_f32(0.0), 0), 1);
+            acc = vaddq_f32(acc, lane01);
+        }
+    }
+
+    vaddvq_f32(acc)
+}
+
+/// Q4_K × Q8_0-input matvec writing into a pre-allocated output slice.
+///
+/// `weight_data`: raw Q4_K bytes (row-major, `rows * blocks_per_row * 144` bytes).
+/// `preq`: pre-quantized Q8_0 input produced by `quantize_input_q8_0_into`.
+///         Must cover exactly `cols = blocks_per_row * 256` input values,
+///         i.e. `preq.blocks_per_row * 32 == cols`.
+/// `rows`: number of output rows.
+/// `cols`: input dimension (must be a multiple of 256).
+/// `output`: pre-allocated slice of length `rows`.
+///
+/// This is the preferred Q4_K matvec path when the caller already has (or can
+/// cheaply compute) a Q8_0 representation of the input. It reduces input-side
+/// memory bandwidth by ~4× compared to `matvec_q4k_into` and uses the SDOT
+/// instruction for the inner loops, matching the Q8_0 × Q8_0 kernel shape.
+pub fn matvec_q4k_q8_into(
+    weight_data: &[u8],
+    preq: &QuantizedInput,
+    rows: usize,
+    cols: usize,
+    output: &mut [f32],
+) {
+    debug_assert_eq!(
+        cols % Q4K_BLOCK_VALUES,
+        0,
+        "cols must be multiple of 256 for Q4_K"
+    );
+    debug_assert_eq!(
+        preq.blocks_per_row * Q8_0_BLOCK_SIZE,
+        cols,
+        "QuantizedInput must cover exactly `cols` elements"
+    );
+    debug_assert_eq!(output.len(), rows);
+
+    let blocks_per_row = cols / Q4K_BLOCK_VALUES;
+    let bytes_per_row = blocks_per_row * Q4K_BLOCK_BYTES;
+
+    #[cfg(target_arch = "aarch64")]
+    {
+        let total_work = rows * cols;
+        if total_work >= 2_000_000 {
+            use rayon::prelude::*;
+            let chunk_rows = adaptive_matvec_chunk_size(rows);
+            output
+                .par_chunks_mut(chunk_rows)
+                .enumerate()
+                .for_each(|(chunk_idx, chunk)| {
+                    let base_row = chunk_idx * chunk_rows;
+                    let len = chunk.len();
+                    // Process pairs of rows to keep the Q8_0 input hot in L1.
+                    let pairs = len / 2;
+                    for p in 0..pairs {
+                        let r0 = base_row + p * 2;
+                        let r1 = r0 + 1;
+                        let s0 = r0 * bytes_per_row;
+                        let s1 = r1 * bytes_per_row;
+                        let rb0 = &weight_data[s0..s0 + bytes_per_row];
+                        let rb1 = &weight_data[s1..s1 + bytes_per_row];
+                        chunk[p * 2] = unsafe {
+                            dot_q4k_q8_0_neon(rb0, &preq.scales, &preq.quants, blocks_per_row)
+                        };
+                        chunk[p * 2 + 1] = unsafe {
+                            dot_q4k_q8_0_neon(rb1, &preq.scales, &preq.quants, blocks_per_row)
+                        };
+                    }
+                    if len % 2 != 0 {
+                        let row = base_row + len - 1;
+                        let start = row * bytes_per_row;
+                        let row_bytes = &weight_data[start..start + bytes_per_row];
+                        chunk[len - 1] = unsafe {
+                            dot_q4k_q8_0_neon(
+                                row_bytes,
+                                &preq.scales,
+                                &preq.quants,
+                                blocks_per_row,
+                            )
+                        };
+                    }
+                });
+            return;
+        }
+
+        // Sequential: still use 2-row pairs for cache friendliness.
+        let pairs = rows / 2;
+        for p in 0..pairs {
+            let r0 = p * 2;
+            let r1 = r0 + 1;
+            let s0 = r0 * bytes_per_row;
+            let s1 = r1 * bytes_per_row;
+            let rb0 = &weight_data[s0..s0 + bytes_per_row];
+            let rb1 = &weight_data[s1..s1 + bytes_per_row];
+            output[r0] =
+                unsafe { dot_q4k_q8_0_neon(rb0, &preq.scales, &preq.quants, blocks_per_row) };
+            output[r1] =
+                unsafe { dot_q4k_q8_0_neon(rb1, &preq.scales, &preq.quants, blocks_per_row) };
+        }
+        if rows & 1 != 0 {
+            let row = rows - 1;
+            let start = row * bytes_per_row;
+            let row_bytes = &weight_data[start..start + bytes_per_row];
+            output[row] =
+                unsafe { dot_q4k_q8_0_neon(row_bytes, &preq.scales, &preq.quants, blocks_per_row) };
+        }
+    }
+
+    #[cfg(not(target_arch = "aarch64"))]
+    {
+        for (i, out) in output.iter_mut().enumerate() {
+            let start = i * bytes_per_row;
+            let row_bytes = &weight_data[start..start + bytes_per_row];
+            *out = dot_q4k_q8_0_scalar(row_bytes, &preq.scales, &preq.quants, blocks_per_row);
+        }
+    }
+}
+
 /// SiLU(gate) * up writing into a pre-allocated output slice.
 #[inline]
 pub fn silu_mul_into(gate: &[f32], up: &[f32], output: &mut [f32]) {
@@ -8899,6 +9268,80 @@ mod tests {
         for (i, &v) in output.iter().enumerate() {
             assert!(v.abs() < 1e-6, "row {i}: expected ~0.0, got {v}");
         }
+    }
+
+    #[test]
+    fn test_matvec_q4k_q8_into_matches_f32_path() {
+        let rows = 8;
+        let cols = 512;
+
+        let mut rng_state = 99u64;
+        let mut next_f32 = || -> f32 {
+            rng_state = rng_state.wrapping_mul(6364136223846793005).wrapping_add(1);
+            ((rng_state >> 33) as f32 / (1u64 << 31) as f32) - 0.5
+        };
+
+        let weights: Vec<f32> = (0..rows * cols).map(|_| next_f32()).collect();
+        let input: Vec<f32> = (0..cols).map(|_| next_f32() * 0.1).collect();
+
+        let q4k_data = quantize_f32_to_q4k(&weights, rows, cols);
+        let preq = quantize_input_q8_0(&input);
+
+        let mut f32_out = vec![0.0f32; rows];
+        matvec_q4k_into(&q4k_data, &input, rows, cols, &mut f32_out);
+
+        let mut q8_out = vec![0.0f32; rows];
+        matvec_q4k_q8_into(&q4k_data, &preq, rows, cols, &mut q8_out);
+
+        // The Q8_0 input quantization adds ~0.4% noise per element, so we
+        // allow a loose tolerance relative to the magnitude of the result.
+        for i in 0..rows {
+            let rel =
+                ((f32_out[i] - q8_out[i]).abs()) / (f32_out[i].abs().max(1e-3));
+            assert!(
+                rel < 0.05,
+                "row {i}: f32={}, q8={}, rel={}",
+                f32_out[i],
+                q8_out[i],
+                rel
+            );
+        }
+    }
+
+    #[test]
+    fn test_dot_q4k_q8_0_scalar_matches_f32() {
+        // Directly compare scalar Q4_K × Q8_0 against scalar Q4_K × f32
+        // for a single row, using matched tolerance.
+        let cols = 256;
+
+        let mut rng_state = 7u64;
+        let mut next_f32 = || -> f32 {
+            rng_state = rng_state.wrapping_mul(6364136223846793005).wrapping_add(1);
+            ((rng_state >> 33) as f32 / (1u64 << 31) as f32) - 0.5
+        };
+        let mut weights = [0.0f32; 256];
+        for w in weights.iter_mut() {
+            *w = next_f32();
+        }
+        let input: Vec<f32> = (0..cols).map(|_| next_f32() * 0.1).collect();
+
+        let block = quantize_f32_to_q4k_block(&weights);
+        let preq = quantize_input_q8_0(&input);
+
+        let f32_result = dot_q4k_f32_scalar(&block, &input, 1);
+        let q8_result =
+            dot_q4k_q8_0_scalar(&block, &preq.scales, &preq.quants, 1);
+
+        // Q8_0 input adds ~0.4% per-element quantization noise. For a single
+        // Q4_K block this gives at most a few percent of the per-element
+        // magnitude times the accumulation length, not of the (potentially
+        // nearly-cancelling) dot product result. Use a combined abs+rel
+        // tolerance.
+        let tol = 0.01 * f32_result.abs().max(0.0) + 1e-3;
+        assert!(
+            (f32_result - q8_result).abs() < tol,
+            "f32={f32_result}, q8={q8_result}, tol={tol}"
+        );
     }
 
     #[test]
