@@ -3,10 +3,13 @@
 [![CI](https://github.com/sauravpanda/flarellm/actions/workflows/ci.yml/badge.svg)](https://github.com/sauravpanda/flarellm/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-stable-orange.svg)](https://www.rust-lang.org)
+[![npm](https://img.shields.io/npm/v/@sauravpanda/flare.svg)](https://www.npmjs.com/package/@sauravpanda/flare)
 
 A WASM-first LLM inference engine with WebGPU acceleration, built in pure Rust.
 
 Run large language models directly in the browser with zero server costs. Single codebase compiles to both native and WebAssembly — same WGSL shaders, same quantization kernels, same inference pipeline.
+
+**[→ Try the live browser demo](https://sauravpanda.github.io/flarellm/)** · **[npm: @sauravpanda/flare](https://www.npmjs.com/package/@sauravpanda/flare)**
 
 ## Performance
 
