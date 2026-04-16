@@ -538,6 +538,11 @@
       <p class="stats">Paste a direct URL to a GGUF file. Download progress shown in real time.</p>
       <input type="url" id="url-input" placeholder="https://example.com/model.gguf" disabled>
       <button id="url-load" disabled>Load from URL</button>
+      <p class="stats" style="margin-top:0.5rem;">
+        No GGUF file handy?
+        <a href="#" id="try-example">Try SmolLM2-135M (~138 MB)</a>
+        — fills in model + tokenizer URLs from HuggingFace.
+      </p>
     </div>
 
     <!-- Progress bar -->
@@ -1074,6 +1079,26 @@
         btn.classList.add('active');
         panel.querySelector('#tab-' + btn.dataset.tab).classList.add('active');
       });
+    });
+
+    // ---------- Example quick-fill: SmolLM2-135M Q8_0 ----------
+    // HuggingFace serves these paths with CORS enabled, so browser fetch works.
+    const EXAMPLE_MODEL_URL =
+      'https://huggingface.co/bartowski/SmolLM2-135M-Instruct-GGUF/resolve/main/SmolLM2-135M-Instruct-Q8_0.gguf';
+    const EXAMPLE_TOK_URL =
+      'https://huggingface.co/HuggingFaceTB/SmolLM2-135M-Instruct/resolve/main/tokenizer.json';
+    $('try-example')?.addEventListener('click', (ev) => {
+      ev.preventDefault();
+      $urlInput.value = EXAMPLE_MODEL_URL;
+      $tokUrlIn.value = EXAMPLE_TOK_URL;
+      // Switch both model- and tokenizer-panel tabs to "From URL" so the
+      // user can see what was filled in.
+      document.querySelectorAll('.tab-btn').forEach((btn) => {
+        if (btn.dataset.tab === 'url' || btn.dataset.tab === 'tok-url') {
+          btn.click();
+        }
+      });
+      $urlInput.focus();
     });
 
     // ---------- Progress bar ----------
