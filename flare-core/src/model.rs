@@ -649,49 +649,76 @@ impl ComputeBackend for CpuBackend {
         match weight.format {
             WeightFormat::Q8_0 => {
                 let mut output = vec![0.0f32; batch * out_rows];
-                // Two pre-quantized input scratches so we can process token pairs.
-                let mut preq0 = QuantizedInput {
+                let mk_preq = || QuantizedInput {
                     scales: vec![0.0f32; blocks_per_row],
                     quants: vec![0i8; blocks_per_row * Q8_0_BLOCK_SIZE],
                     blocks_per_row,
                 };
-                let mut preq1 = QuantizedInput {
-                    scales: vec![0.0f32; blocks_per_row],
-                    quants: vec![0i8; blocks_per_row * Q8_0_BLOCK_SIZE],
-                    blocks_per_row,
-                };
+                let mut preq0 = mk_preq();
+                let mut preq1 = mk_preq();
+                let mut preq2 = mk_preq();
+                let mut preq3 = mk_preq();
 
-                // Process tokens in pairs — streams weight data once per pair
-                // instead of once per token, halving memory bandwidth.
-                let pairs = batch / 2;
+                #[cfg(target_arch = "aarch64")]
+                let has_smmla = std::arch::is_aarch64_feature_detected!("i8mm");
+                #[cfg(not(target_arch = "aarch64"))]
+                let has_smmla = false;
+
                 #[cfg(target_arch = "aarch64")]
                 let mut pair_out = vec![0.0f32; 2 * out_rows];
-                for p in 0..pairs {
-                    let b0 = p * 2;
-                    let b1 = b0 + 1;
-                    quantize_input_q8_0_into(&input[b0 * in_cols..(b0 + 1) * in_cols], &mut preq0);
-                    quantize_input_q8_0_into(&input[b1 * in_cols..(b1 + 1) * in_cols], &mut preq1);
+                #[cfg(target_arch = "aarch64")]
+                let mut quad_out = vec![0.0f32; 4 * out_rows];
+
+                let mut b = 0usize;
+                // 4-token tiles (M2+ only, SMMLA-backed).  Streams weights once
+                // per 4 tokens instead of once per pair.
+                #[cfg(target_arch = "aarch64")]
+                if has_smmla {
+                    while b + 4 <= batch {
+                        quantize_input_q8_0_into(&input[(b + 0) * in_cols..(b + 1) * in_cols], &mut preq0);
+                        quantize_input_q8_0_into(&input[(b + 1) * in_cols..(b + 2) * in_cols], &mut preq1);
+                        quantize_input_q8_0_into(&input[(b + 2) * in_cols..(b + 3) * in_cols], &mut preq2);
+                        quantize_input_q8_0_into(&input[(b + 3) * in_cols..(b + 4) * in_cols], &mut preq3);
+                        matvec_q8_0_preq_quad_into(
+                            &weight.data,
+                            [&preq0, &preq1, &preq2, &preq3],
+                            out_rows,
+                            &mut quad_out,
+                        );
+                        for i in 0..4 {
+                            output[(b + i) * out_rows..(b + i + 1) * out_rows]
+                                .copy_from_slice(&quad_out[i * out_rows..(i + 1) * out_rows]);
+                        }
+                        b += 4;
+                    }
+                }
+
+                // 2-token tiles for the remainder.
+                while b + 2 <= batch {
+                    quantize_input_q8_0_into(&input[(b + 0) * in_cols..(b + 1) * in_cols], &mut preq0);
+                    quantize_input_q8_0_into(&input[(b + 1) * in_cols..(b + 2) * in_cols], &mut preq1);
                     #[cfg(target_arch = "aarch64")]
                     {
                         matvec_q8_0_preq_pair_into(
                             &weight.data, &preq0, &preq1, out_rows, &mut pair_out,
                         );
-                        output[b0 * out_rows..(b0 + 1) * out_rows]
+                        output[b * out_rows..(b + 1) * out_rows]
                             .copy_from_slice(&pair_out[..out_rows]);
-                        output[b1 * out_rows..(b1 + 1) * out_rows]
+                        output[(b + 1) * out_rows..(b + 2) * out_rows]
                             .copy_from_slice(&pair_out[out_rows..]);
                     }
                     #[cfg(not(target_arch = "aarch64"))]
                     {
                         matvec_q8_0_preq_into(&weight.data, &preq0, out_rows,
-                            &mut output[b0 * out_rows..(b0 + 1) * out_rows]);
+                            &mut output[b * out_rows..(b + 1) * out_rows]);
                         matvec_q8_0_preq_into(&weight.data, &preq1, out_rows,
-                            &mut output[b1 * out_rows..(b1 + 1) * out_rows]);
+                            &mut output[(b + 1) * out_rows..(b + 2) * out_rows]);
                     }
+                    b += 2;
                 }
-                // Handle trailing odd token
-                if batch & 1 != 0 {
-                    let b = batch - 1;
+
+                // Trailing single token (odd batch).
+                if b < batch {
                     quantize_input_q8_0_into(&input[b * in_cols..(b + 1) * in_cols], &mut preq0);
                     matvec_q8_0_preq_into(
                         &weight.data, &preq0, out_rows,
@@ -5265,6 +5292,192 @@ unsafe fn dot_q8_0_q8_0_2x2_smmla(
     let mut out = [0.0f32; 4];
     vst1q_f32(out.as_mut_ptr(), acc);
     out
+}
+
+/// 2-row × 4-token Q8_0 tile via SMMLA.  Halves weight bandwidth vs the 2×2 tile
+/// by reusing each loaded weight block across 2 token-pairs.
+///
+/// Returns 8 dot products:
+/// [r0·t0, r0·t1, r1·t0, r1·t1, r0·t2, r0·t3, r1·t2, r1·t3]
+/// (first 4 from (tok0,tok1) tile, last 4 from (tok2,tok3) tile)
+///
+/// # Safety
+/// Requires aarch64 with FEAT_I8MM.
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "i8mm")]
+unsafe fn dot_q8_0_q8_0_2x4_smmla(
+    row0_bytes: &[u8],
+    row1_bytes: &[u8],
+    t_scales: [&[f32]; 4],
+    t_quants: [&[i8]; 4],
+    blocks_per_row: usize,
+) -> [f32; 8] {
+    use std::arch::aarch64::*;
+
+    let mut acc01 = vdupq_n_f32(0.0);
+    let mut acc23 = vdupq_n_f32(0.0);
+
+    let r0 = row0_bytes.as_ptr();
+    let r1 = row1_bytes.as_ptr();
+    let q0 = t_quants[0].as_ptr();
+    let q1 = t_quants[1].as_ptr();
+    let q2 = t_quants[2].as_ptr();
+    let q3 = t_quants[3].as_ptr();
+
+    for blk in 0..blocks_per_row {
+        let off = blk * Q8_0_BLOCK_BYTES;
+        let qoff = blk * Q8_0_BLOCK_SIZE;
+
+        let w0p = r0.add(off);
+        let w0_scale = f16_to_f32_inline(u16::from_le_bytes([*w0p, *w0p.add(1)]));
+        let w1p = r1.add(off);
+        let w1_scale = f16_to_f32_inline(u16::from_le_bytes([*w1p, *w1p.add(1)]));
+
+        let s0 = *t_scales[0].get_unchecked(blk);
+        let s1 = *t_scales[1].get_unchecked(blk);
+        let s2 = *t_scales[2].get_unchecked(blk);
+        let s3 = *t_scales[3].get_unchecked(blk);
+
+        let cs01 = [w0_scale * s0, w0_scale * s1, w1_scale * s0, w1_scale * s1];
+        let cs23 = [w0_scale * s2, w0_scale * s3, w1_scale * s2, w1_scale * s3];
+        let cs01_vec = vld1q_f32(cs01.as_ptr());
+        let cs23_vec = vld1q_f32(cs23.as_ptr());
+
+        let w0_qs = w0p.add(2) as *const i8;
+        let w1_qs = w1p.add(2) as *const i8;
+
+        // Pre-load 4 A operands (one per 8-byte chunk).  Reusing these across
+        // both token-pair tiles is the bandwidth win.
+        let a0 = vcombine_s8(vld1_s8(w0_qs), vld1_s8(w1_qs));
+        let a1 = vcombine_s8(vld1_s8(w0_qs.add(8)), vld1_s8(w1_qs.add(8)));
+        let a2 = vcombine_s8(vld1_s8(w0_qs.add(16)), vld1_s8(w1_qs.add(16)));
+        let a3 = vcombine_s8(vld1_s8(w0_qs.add(24)), vld1_s8(w1_qs.add(24)));
+
+        // --- (t0, t1) tile ---
+        let mut isum01 = vdupq_n_s32(0);
+        isum01 = smmla_s32(isum01, a0, vcombine_s8(vld1_s8(q0.add(qoff)),     vld1_s8(q1.add(qoff))));
+        isum01 = smmla_s32(isum01, a1, vcombine_s8(vld1_s8(q0.add(qoff + 8)), vld1_s8(q1.add(qoff + 8))));
+        isum01 = smmla_s32(isum01, a2, vcombine_s8(vld1_s8(q0.add(qoff + 16)), vld1_s8(q1.add(qoff + 16))));
+        isum01 = smmla_s32(isum01, a3, vcombine_s8(vld1_s8(q0.add(qoff + 24)), vld1_s8(q1.add(qoff + 24))));
+        acc01 = vmlaq_f32(acc01, vcvtq_f32_s32(isum01), cs01_vec);
+
+        // --- (t2, t3) tile — reuses a0..a3 ---
+        let mut isum23 = vdupq_n_s32(0);
+        isum23 = smmla_s32(isum23, a0, vcombine_s8(vld1_s8(q2.add(qoff)),     vld1_s8(q3.add(qoff))));
+        isum23 = smmla_s32(isum23, a1, vcombine_s8(vld1_s8(q2.add(qoff + 8)), vld1_s8(q3.add(qoff + 8))));
+        isum23 = smmla_s32(isum23, a2, vcombine_s8(vld1_s8(q2.add(qoff + 16)), vld1_s8(q3.add(qoff + 16))));
+        isum23 = smmla_s32(isum23, a3, vcombine_s8(vld1_s8(q2.add(qoff + 24)), vld1_s8(q3.add(qoff + 24))));
+        acc23 = vmlaq_f32(acc23, vcvtq_f32_s32(isum23), cs23_vec);
+    }
+
+    let mut out01 = [0.0f32; 4];
+    let mut out23 = [0.0f32; 4];
+    vst1q_f32(out01.as_mut_ptr(), acc01);
+    vst1q_f32(out23.as_mut_ptr(), acc23);
+    [out01[0], out01[1], out01[2], out01[3], out23[0], out23[1], out23[2], out23[3]]
+}
+
+/// 4-token matvec: stream weight data once and compute outputs for 4 tokens.
+///
+/// `output` must have length `4 * rows`, laid out as
+/// [tok0_rows..., tok1_rows..., tok2_rows..., tok3_rows...].
+///
+/// Requires FEAT_I8MM at runtime.  Callers on M1 should fall back to two
+/// successive `matvec_q8_0_preq_pair_into` calls.
+#[cfg(target_arch = "aarch64")]
+pub fn matvec_q8_0_preq_quad_into(
+    weight_data: &[u8],
+    preqs: [&QuantizedInput; 4],
+    rows: usize,
+    output: &mut [f32],
+) {
+    debug_assert_eq!(output.len(), 4 * rows);
+    let blocks_per_row = preqs[0].blocks_per_row;
+    let bytes_per_row = blocks_per_row * Q8_0_BLOCK_BYTES;
+
+    let total_work = rows * (blocks_per_row * Q8_0_BLOCK_SIZE);
+    let (out01, out23) = output.split_at_mut(2 * rows);
+    let (out0, out1) = out01.split_at_mut(rows);
+    let (out2, out3) = out23.split_at_mut(rows);
+
+    let t_scales: [&[f32]; 4] = [
+        preqs[0].scales.as_slice(),
+        preqs[1].scales.as_slice(),
+        preqs[2].scales.as_slice(),
+        preqs[3].scales.as_slice(),
+    ];
+    let t_quants: [&[i8]; 4] = [
+        preqs[0].quants.as_slice(),
+        preqs[1].quants.as_slice(),
+        preqs[2].quants.as_slice(),
+        preqs[3].quants.as_slice(),
+    ];
+
+    if total_work >= 2_000_000 {
+        use rayon::prelude::*;
+        let chunk_rows = adaptive_matvec_chunk_size(rows);
+        let num_chunks = rows.div_ceil(chunk_rows);
+        // Per-chunk results: Vec<(row, v0, v1, v2, v3)>
+        let chunk_results: Vec<Vec<(usize, f32, f32, f32, f32)>> =
+            (0..num_chunks).into_par_iter().map(|ci| {
+                let base = ci * chunk_rows;
+                let end = (base + chunk_rows).min(rows);
+                let len = end - base;
+                let mut results = Vec::with_capacity(len);
+                let pairs = len / 2;
+                for p in 0..pairs {
+                    let r0 = base + p * 2;
+                    let r1 = r0 + 1;
+                    let rb0 = &weight_data[r0 * bytes_per_row..(r0 + 1) * bytes_per_row];
+                    let rb1 = &weight_data[r1 * bytes_per_row..(r1 + 1) * bytes_per_row];
+                    let d = unsafe {
+                        dot_q8_0_q8_0_2x4_smmla(rb0, rb1, t_scales, t_quants, blocks_per_row)
+                    };
+                    // d layout: [r0t0, r0t1, r1t0, r1t1, r0t2, r0t3, r1t2, r1t3]
+                    results.push((r0, d[0], d[1], d[4], d[5]));
+                    results.push((r1, d[2], d[3], d[6], d[7]));
+                }
+                if len & 1 != 0 {
+                    let row = base + len - 1;
+                    let rb = &weight_data[row * bytes_per_row..(row + 1) * bytes_per_row];
+                    let v0 = unsafe { dot_q8_0_q8_0_neon(rb, t_scales[0], t_quants[0], blocks_per_row) };
+                    let v1 = unsafe { dot_q8_0_q8_0_neon(rb, t_scales[1], t_quants[1], blocks_per_row) };
+                    let v2 = unsafe { dot_q8_0_q8_0_neon(rb, t_scales[2], t_quants[2], blocks_per_row) };
+                    let v3 = unsafe { dot_q8_0_q8_0_neon(rb, t_scales[3], t_quants[3], blocks_per_row) };
+                    results.push((row, v0, v1, v2, v3));
+                }
+                results
+            }).collect();
+        for chunk in chunk_results {
+            for (row, v0, v1, v2, v3) in chunk {
+                out0[row] = v0;
+                out1[row] = v1;
+                out2[row] = v2;
+                out3[row] = v3;
+            }
+        }
+    } else {
+        let pairs = rows / 2;
+        for p in 0..pairs {
+            let r0 = p * 2;
+            let r1 = r0 + 1;
+            let rb0 = &weight_data[r0 * bytes_per_row..(r0 + 1) * bytes_per_row];
+            let rb1 = &weight_data[r1 * bytes_per_row..(r1 + 1) * bytes_per_row];
+            let d = unsafe {
+                dot_q8_0_q8_0_2x4_smmla(rb0, rb1, t_scales, t_quants, blocks_per_row)
+            };
+            out0[r0] = d[0]; out1[r0] = d[1]; out2[r0] = d[4]; out3[r0] = d[5];
+            out0[r1] = d[2]; out1[r1] = d[3]; out2[r1] = d[6]; out3[r1] = d[7];
+        }
+        if rows & 1 != 0 {
+            let row = rows - 1;
+            let rb = &weight_data[row * bytes_per_row..(row + 1) * bytes_per_row];
+            out0[row] = unsafe { dot_q8_0_q8_0_neon(rb, t_scales[0], t_quants[0], blocks_per_row) };
+            out1[row] = unsafe { dot_q8_0_q8_0_neon(rb, t_scales[1], t_quants[1], blocks_per_row) };
+            out2[row] = unsafe { dot_q8_0_q8_0_neon(rb, t_scales[2], t_quants[2], blocks_per_row) };
+            out3[row] = unsafe { dot_q8_0_q8_0_neon(rb, t_scales[3], t_quants[3], blocks_per_row) };
+        }
+    }
 }
 
 /// 2-token matvec: stream weight data once and compute outputs for 2 tokens.
