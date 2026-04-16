@@ -1,0 +1,82 @@
+name: Deploy demo to GitHub Pages
+
+# Builds the flare-web WASM bundle and publishes the demo page to
+# GitHub Pages on every push to main (or on manual dispatch).
+#
+# The deployed site lives at https://<owner>.github.io/<repo>/ with the
+# demo HTML at root and the WASM package under /pkg/.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'flare-core/**'
+      - 'flare-loader/**'
+      - 'flare-simd/**'
+      - 'flare-gpu/**'
+      - 'flare-web/**'
+      - '.github/workflows/deploy-pages.yml'
+  workflow_dispatch:
+
+# Allow only one concurrent Pages deployment. Don't cancel in-progress runs
+# — let them finish so we don't leave the site in a half-deployed state.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build WASM + demo site
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Cache Rust build artefacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install wasm-pack
+        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+
+      - name: Build flare-web (release, target web)
+        run: wasm-pack build flare-web --target web --out-dir pkg --release
+
+      - name: Assemble _site
+        run: |
+          mkdir -p _site/pkg
+          # Copy demo HTML to site root, rewriting the relative import path
+          # so the demo at / can find the WASM module at /pkg/.
+          sed 's|../pkg/flare_web.js|./pkg/flare_web.js|g' \
+            flare-web/demo/index.html > _site/index.html
+          # Copy the built WASM package.
+          cp flare-web/pkg/flare_web.js        _site/pkg/
+          cp flare-web/pkg/flare_web.d.ts      _site/pkg/
+          cp flare-web/pkg/flare_web_bg.wasm   _site/pkg/
+          cp flare-web/pkg/flare_web_bg.wasm.d.ts _site/pkg/
+          cp flare-web/pkg/package.json        _site/pkg/
+          # Minimal 404 so deep links don't render the GitHub Pages 404 theme.
+          cp _site/index.html _site/404.html
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+  deploy:
+    name: Deploy to Pages
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy
+        id: deployment
+        uses: actions/deploy-pages@v4

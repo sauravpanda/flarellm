@@ -692,13 +692,19 @@
   </div>
 
   <script type="module">
-    import init, {
+    // Use a namespace import so the page doesn't fail hard when a named
+    // export is missing from the build (e.g. `init_thread_pool`, which is
+    // only compiled in when the `wasm_threads` Cargo feature is enabled).
+    import * as flare from '../pkg/flare_web.js';
+    const init = flare.default;
+    const {
       FlareEngine, FlareProgressiveLoader, FlareTokenizer,
-      webgpu_available, supports_webnn, supports_webtransport, init_thread_pool,
+      webgpu_available, supports_webnn, supports_webtransport,
       supports_speech_recognition, supports_speech_synthesis,
       is_model_cached, cache_model, load_cached_model,
-      delete_cached_model, list_cached_models, storage_estimate
-    } from '../pkg/flare_web.js';
+      delete_cached_model, list_cached_models, storage_estimate,
+    } = flare;
+    const init_thread_pool = flare.init_thread_pool; // may be undefined without wasm_threads
 
     const $ = id => document.getElementById(id);
     const $status      = $('status');

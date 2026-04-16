@@ -1097,3 +1097,29 @@ bandwidth-bound and has clear headroom for SIMD tuning.
 | Decode (256 tok) | 192.2 |
 | Sustained (512 tok) | **177.6** |
 
+### 2026-04-15 18:30 — `d409693 Release flare-web 0.1.1 on npm (#462)`
+
+**Hardware:** Apple M5 Pro, ARM64 (NEON SIMD)  
+**Model:** Llama, ~162M params, 30 layers, dim=576  
+**Load time:** 0.13s
+
+| Metric | tok/s |
+|---|---|
+| Decode (16 tok) | 202.5 |
+| Decode (64 tok) | 219.4 |
+| Decode (256 tok) | 198.9 |
+| Sustained (512 tok) | **174.9** |
+
+### 2026-04-15 18:31 — `d409693 Release flare-web 0.1.1 on npm (#462)`
+
+**Hardware:** Apple M5 Pro, ARM64 (NEON SIMD)  
+**Model:** Llama, ~1498M params, 16 layers, dim=2048  
+**Load time:** 1.44s
+
+| Metric | tok/s |
+|---|---|
+| Decode (16 tok) | 39.5 |
+| Decode (64 tok) | 52.0 |
+| Decode (256 tok) | 48.9 |
+| Sustained (512 tok) | **45.7** |
+
