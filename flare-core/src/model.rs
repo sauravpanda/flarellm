@@ -6359,8 +6359,8 @@ pub struct RopeTable {
 impl RopeTable {
     /// Build the table for the given model parameters.
     ///
-    /// `max_seq_len` is capped at [`ROPE_TABLE_MAX_SEQ_LEN`] to limit memory
-    /// usage. Positions beyond the cap must use [`apply_rope`] instead.
+    /// `max_seq_len` is capped at `ROPE_TABLE_MAX_SEQ_LEN` (private) to limit
+    /// memory usage. Positions beyond the cap must use [`apply_rope`] instead.
     pub fn new(head_dim: usize, max_seq_len: usize, rope_theta: f32) -> Self {
         let capped = max_seq_len.min(ROPE_TABLE_MAX_SEQ_LEN);
         let half = head_dim / 2;
