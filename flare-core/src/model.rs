@@ -719,10 +719,7 @@ impl ComputeBackend for CpuBackend {
                 // 2-token tiles for the remainder.  Available on aarch64
                 // (SDOT/SMMLA) and wasm32 + SIMD128.
                 while b + 2 <= batch {
-                    quantize_input_q8_0_into(
-                        &input[b * in_cols..(b + 1) * in_cols],
-                        &mut preq0,
-                    );
+                    quantize_input_q8_0_into(&input[b * in_cols..(b + 1) * in_cols], &mut preq0);
                     quantize_input_q8_0_into(
                         &input[(b + 1) * in_cols..(b + 2) * in_cols],
                         &mut preq1,
@@ -1344,11 +1341,10 @@ impl Model {
         // Cap GPU KV cache to fit within wgpu max_storage_buffer_binding_size
         // (128 MB). Each KV buffer is max_seq_len × num_kv_heads × head_dim × 4 bytes.
         let bytes_per_pos = self.config.num_kv_heads * self.config.head_dim * 4;
-        let max_gpu_seq = if bytes_per_pos > 0 {
-            (128 * 1024 * 1024 / bytes_per_pos).min(self.config.max_seq_len)
-        } else {
-            self.config.max_seq_len
-        };
+        let max_gpu_seq = (128usize * 1024 * 1024)
+            .checked_div(bytes_per_pos)
+            .unwrap_or(self.config.max_seq_len)
+            .min(self.config.max_seq_len);
         self.backend.init_gpu_kv_cache(
             self.config.num_layers,
             max_gpu_seq,
