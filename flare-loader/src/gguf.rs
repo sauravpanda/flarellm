@@ -345,6 +345,26 @@ impl GgufFile {
         reader: &mut R,
         tensor_info: &TensorInfo,
     ) -> Result<Tensor, GgufError> {
+        let (tensor, _raw) = self.read_tensor_data_with_raw(reader, tensor_info, false)?;
+        Ok(tensor)
+    }
+
+    /// Like `read_tensor_data` but also optionally returns the raw
+    /// pre-dequantization bytes as a `RawWeight`.  When `keep_raw` is `true`
+    /// and the tensor format maps to a supported `WeightFormat`, the raw
+    /// bytes are kept alongside the dequantized `Tensor`.
+    ///
+    /// This exists so callers that need BOTH the f32 Tensor (for code paths
+    /// that aren't SIMD-accelerated) AND the raw quantized bytes (for the
+    /// int8 SIMD matvec kernels) can get both in a single pass over the
+    /// tensor data — no second seek + read, and no double allocation of the
+    /// read buffer.
+    pub fn read_tensor_data_with_raw<R: Read + Seek>(
+        &self,
+        reader: &mut R,
+        tensor_info: &TensorInfo,
+        keep_raw: bool,
+    ) -> Result<(Tensor, Option<RawWeight>), GgufError> {
         let absolute_offset = self.tensor_data_offset + tensor_info.offset;
         reader.seek(SeekFrom::Start(absolute_offset))?;
 
@@ -355,9 +375,33 @@ impl GgufFile {
         let numel = tensor_info.numel() as usize;
         let f32_data = dequantize_tensor(&raw, tensor_info.dtype, numel)?;
 
+        let raw_weight = if keep_raw {
+            quant_to_weight_format(tensor_info.dtype).map(|format| {
+                let num_rows = tensor_info.dimensions.last().copied().unwrap_or(1) as usize;
+                let weights_per_block = format.weights_per_block();
+                let col_elements = tensor_info
+                    .dimensions
+                    .iter()
+                    .rev()
+                    .skip(1)
+                    .product::<u64>()
+                    .max(1) as usize;
+                let blocks_per_row = col_elements.div_ceil(weights_per_block);
+                RawWeight {
+                    data: raw,
+                    format,
+                    num_rows,
+                    blocks_per_row,
+                }
+            })
+        } else {
+            None
+        };
+
         let shape: Vec<usize> = tensor_info.dimensions.iter().map(|&d| d as usize).collect();
-        Tensor::from_vec(f32_data, &shape)
-            .map_err(|e| GgufError::Io(io::Error::new(io::ErrorKind::InvalidData, e.to_string())))
+        let tensor = Tensor::from_vec(f32_data, &shape)
+            .map_err(|e| GgufError::Io(io::Error::new(io::ErrorKind::InvalidData, e.to_string())))?;
+        Ok((tensor, raw_weight))
     }
 
     /// Load all tensor data from the file, returning a map of name → Tensor.
@@ -371,6 +415,31 @@ impl GgufFile {
             tensors.insert(info.name.clone(), tensor);
         }
         Ok(tensors)
+    }
+
+    /// Load all tensor data in a single pass, returning both the f32 Tensor
+    /// map (for non-SIMD code paths) and a raw quantized-weight map (for
+    /// int8 SIMD matvec kernels).
+    ///
+    /// Tensor bytes are read exactly once: dequantized to f32 for the Tensor
+    /// and, for formats that map to a supported `WeightFormat`, retained as
+    /// raw bytes for the SIMD path.  This is the path `flare-web` uses so
+    /// that loading a quantized model doesn't pay for two full passes over
+    /// the tensor data.
+    pub fn load_all_tensors_with_raw<R: Read + Seek>(
+        &self,
+        reader: &mut R,
+    ) -> Result<(HashMap<String, Tensor>, HashMap<String, RawWeight>), GgufError> {
+        let mut tensors = HashMap::new();
+        let mut raw_weights = HashMap::new();
+        for info in &self.tensors {
+            let (tensor, maybe_raw) = self.read_tensor_data_with_raw(reader, info, true)?;
+            if let Some(raw) = maybe_raw {
+                raw_weights.insert(info.name.clone(), raw);
+            }
+            tensors.insert(info.name.clone(), tensor);
+        }
+        Ok((tensors, raw_weights))
     }
 
     /// Read a single tensor's raw bytes without dequantizing, along with its
