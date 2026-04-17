@@ -12,7 +12,7 @@ on:
 
 jobs:
   publish:
-    name: Build WASM and publish @aspect/flare
+    name: Build WASM and publish @sauravpanda/flare
     runs-on: ubuntu-latest
     permissions:
       contents: read
