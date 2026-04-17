@@ -7033,7 +7033,18 @@ pub fn matvec_q8_0_preq_into(
         }
     }
 
-    #[cfg(not(target_arch = "aarch64"))]
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    {
+        for (i, out) in output.iter_mut().enumerate() {
+            let row_start = i * bytes_per_row;
+            let row_bytes = &weight_data[row_start..row_start + bytes_per_row];
+            *out = unsafe {
+                dot_q8_0_q8_0_wasm_simd(row_bytes, &preq.scales, &preq.quants, blocks_per_row)
+            };
+        }
+    }
+
+    #[cfg(all(not(target_arch = "aarch64"), not(all(target_arch = "wasm32", target_feature = "simd128"))))]
     {
         for (i, out) in output.iter_mut().enumerate() {
             let row_start = i * bytes_per_row;
@@ -7066,6 +7077,140 @@ pub fn matvec_q8_0_preq_into(
             *out = sum;
         }
     }
+}
+
+/// WASM SIMD128 dot product for one Q8_0 weight row against a pre-quantized
+/// Q8_0 input.  Mirrors the aarch64 `dot_q8_0_q8_0_neon` path.
+///
+/// Uses `i16x8_extmul_*_i8x16` to widen int8 × int8 → int16 products in 8 lanes,
+/// then `i32x4_extadd_pairwise_i16x8` to pairwise-accumulate to int32, giving
+/// 4 partial sums per 16-byte chunk (equivalent to SDOT on aarch64).
+///
+/// # Safety
+/// Requires `target_feature = "simd128"`.  All slices must be valid for
+/// `blocks_per_row`.
+#[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+unsafe fn dot_q8_0_q8_0_wasm_simd(
+    row_bytes: &[u8],
+    input_q8_scales: &[f32],
+    input_q8_quants: &[i8],
+    blocks_per_row: usize,
+) -> f32 {
+    use core::arch::wasm32::*;
+
+    // 4 independent float accumulators to hide SIMD pipeline latency.
+    let mut sumv0 = f32x4_splat(0.0);
+    let mut sumv1 = f32x4_splat(0.0);
+    let mut sumv2 = f32x4_splat(0.0);
+    let mut sumv3 = f32x4_splat(0.0);
+
+    let row_ptr = row_bytes.as_ptr();
+    let iq_ptr = input_q8_quants.as_ptr();
+
+    // Process 4 blocks per iteration (matches the aarch64 unrolling).
+    let quads = blocks_per_row / 4;
+    for i in 0..quads {
+        let ib0 = i * 4;
+
+        // --- Block ib0 ---
+        let w_ptr0 = row_ptr.add(ib0 * Q8_0_BLOCK_BYTES);
+        let w_scale0 = f16_to_f32_inline(u16::from_le_bytes([*w_ptr0, *w_ptr0.add(1)]));
+        let w_qs0 = w_ptr0.add(2);
+        let i_qs0 = iq_ptr.add(ib0 * Q8_0_BLOCK_SIZE);
+        let combined_scale0 = w_scale0 * *input_q8_scales.get_unchecked(ib0);
+        let sum0 = q8_chunk_dot(w_qs0, i_qs0);
+        sumv0 = f32x4_add(sumv0, f32x4_mul(i32_to_f32(sum0), f32x4_splat(combined_scale0)));
+
+        // --- Block ib0 + 1 ---
+        let w_ptr1 = row_ptr.add((ib0 + 1) * Q8_0_BLOCK_BYTES);
+        let w_scale1 = f16_to_f32_inline(u16::from_le_bytes([*w_ptr1, *w_ptr1.add(1)]));
+        let w_qs1 = w_ptr1.add(2);
+        let i_qs1 = iq_ptr.add((ib0 + 1) * Q8_0_BLOCK_SIZE);
+        let combined_scale1 = w_scale1 * *input_q8_scales.get_unchecked(ib0 + 1);
+        let sum1 = q8_chunk_dot(w_qs1, i_qs1);
+        sumv1 = f32x4_add(sumv1, f32x4_mul(i32_to_f32(sum1), f32x4_splat(combined_scale1)));
+
+        // --- Block ib0 + 2 ---
+        let w_ptr2 = row_ptr.add((ib0 + 2) * Q8_0_BLOCK_BYTES);
+        let w_scale2 = f16_to_f32_inline(u16::from_le_bytes([*w_ptr2, *w_ptr2.add(1)]));
+        let w_qs2 = w_ptr2.add(2);
+        let i_qs2 = iq_ptr.add((ib0 + 2) * Q8_0_BLOCK_SIZE);
+        let combined_scale2 = w_scale2 * *input_q8_scales.get_unchecked(ib0 + 2);
+        let sum2 = q8_chunk_dot(w_qs2, i_qs2);
+        sumv2 = f32x4_add(sumv2, f32x4_mul(i32_to_f32(sum2), f32x4_splat(combined_scale2)));
+
+        // --- Block ib0 + 3 ---
+        let w_ptr3 = row_ptr.add((ib0 + 3) * Q8_0_BLOCK_BYTES);
+        let w_scale3 = f16_to_f32_inline(u16::from_le_bytes([*w_ptr3, *w_ptr3.add(1)]));
+        let w_qs3 = w_ptr3.add(2);
+        let i_qs3 = iq_ptr.add((ib0 + 3) * Q8_0_BLOCK_SIZE);
+        let combined_scale3 = w_scale3 * *input_q8_scales.get_unchecked(ib0 + 3);
+        let sum3 = q8_chunk_dot(w_qs3, i_qs3);
+        sumv3 = f32x4_add(sumv3, f32x4_mul(i32_to_f32(sum3), f32x4_splat(combined_scale3)));
+    }
+
+    // Remaining 0-3 blocks.
+    let remainder_start = quads * 4;
+    for ib in remainder_start..blocks_per_row {
+        let w_ptr = row_ptr.add(ib * Q8_0_BLOCK_BYTES);
+        let w_scale = f16_to_f32_inline(u16::from_le_bytes([*w_ptr, *w_ptr.add(1)]));
+        let w_qs = w_ptr.add(2);
+        let i_qs = iq_ptr.add(ib * Q8_0_BLOCK_SIZE);
+        let combined_scale = w_scale * *input_q8_scales.get_unchecked(ib);
+        let sum = q8_chunk_dot(w_qs, i_qs);
+        sumv0 = f32x4_add(sumv0, f32x4_mul(i32_to_f32(sum), f32x4_splat(combined_scale)));
+    }
+
+    // Reduce 4 accumulators to one, then horizontal sum.
+    let sum_01 = f32x4_add(sumv0, sumv1);
+    let sum_23 = f32x4_add(sumv2, sumv3);
+    let sum_all = f32x4_add(sum_01, sum_23);
+    f32x4_extract_lane::<0>(sum_all)
+        + f32x4_extract_lane::<1>(sum_all)
+        + f32x4_extract_lane::<2>(sum_all)
+        + f32x4_extract_lane::<3>(sum_all)
+}
+
+/// Compute a Q8_0 block dot product (32 int8 × 32 int8 → int32x4 with 4 partial sums).
+///
+/// Returns a `v128` holding 4 int32 partial sums (same shape as aarch64's SDOT output).
+///
+/// # Safety
+/// `w_ptr` must point to ≥32 valid u8 weight bytes.  `i_ptr` must point to ≥32
+/// valid i8 input bytes.
+#[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+#[inline]
+unsafe fn q8_chunk_dot(w_ptr: *const u8, i_ptr: *const i8) -> core::arch::wasm32::v128 {
+    use core::arch::wasm32::*;
+
+    let w_lo = v128_load(w_ptr as *const v128);
+    let w_hi = v128_load(w_ptr.add(16) as *const v128);
+    let i_lo = v128_load(i_ptr as *const v128);
+    let i_hi = v128_load(i_ptr.add(16) as *const v128);
+
+    // i16 products (8 lanes per half × 2 halves = 32 products)
+    let prod_lo_lo = i16x8_extmul_low_i8x16(w_lo, i_lo);
+    let prod_lo_hi = i16x8_extmul_high_i8x16(w_lo, i_lo);
+    let prod_hi_lo = i16x8_extmul_low_i8x16(w_hi, i_hi);
+    let prod_hi_hi = i16x8_extmul_high_i8x16(w_hi, i_hi);
+
+    // Pairwise-accumulate i16 → i32 (4 lanes each).
+    let s0 = i32x4_extadd_pairwise_i16x8(prod_lo_lo);
+    let s1 = i32x4_extadd_pairwise_i16x8(prod_lo_hi);
+    let s2 = i32x4_extadd_pairwise_i16x8(prod_hi_lo);
+    let s3 = i32x4_extadd_pairwise_i16x8(prod_hi_hi);
+
+    // Sum all 4 partial-sum vectors: each lane holds a contribution from
+    // 8 of the 32 input-weight pairs, so the 4 output lanes together sum
+    // all 32 products.
+    i32x4_add(i32x4_add(s0, s1), i32x4_add(s2, s3))
+}
+
+/// Convert int32x4 lanes to f32x4 (WASM SIMD helper).
+#[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+#[inline]
+fn i32_to_f32(v: core::arch::wasm32::v128) -> core::arch::wasm32::v128 {
+    core::arch::wasm32::f32x4_convert_i32x4(v)
 }
 
 /// Compute the argmax of a Q8_0 matrix-vector product without materializing

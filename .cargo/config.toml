@@ -1,0 +1,10 @@
+# Workspace-wide Cargo config.
+#
+# Enable WASM SIMD128 for all wasm32 builds.  Without this flag Rust
+# produces no-SIMD output for the wasm32-unknown-unknown target, which
+# bypasses every SIMD-gated code path (e.g. the Q8_0 matvec kernels in
+# flare-core). Every modern browser that supports WebAssembly also
+# supports SIMD128 (Chrome 91+, Firefox 89+, Safari 16.4+), so this is
+# safe to enable by default.
+[target.wasm32-unknown-unknown]
+rustflags = ["-C", "target-feature=+simd128"]
