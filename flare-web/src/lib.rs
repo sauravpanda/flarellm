@@ -455,8 +455,36 @@ impl FlareEngine {
         let weights = load_model_weights(&gguf, &mut reader)
             .map_err(|e| JsError::new(&format!("Weight load error: {e}")))?;
 
+        let mut model = Model::new(config.clone(), weights);
+
+        // Auto-populate raw quantized weights so Q8_0 / Q4_K models take the
+        // hand-tuned WASM SIMD128 matvec paths by default.  This used to be
+        // opt-in via `load_raw_weights()`, which callers frequently forgot —
+        // the result was every model silently running on the f32 fallback.
+        // Failure here is non-fatal: f16 / unsupported-quant models stay on
+        // the f32 path.
+        let num_layers = config.num_layers;
+        let mut raw_layers = Vec::with_capacity(num_layers);
+        let mut all_ok = true;
+        for layer_idx in 0..num_layers {
+            match gguf.load_raw_layer_weights(&mut reader, layer_idx) {
+                Ok(Some(rw)) => raw_layers.push(rw),
+                _ => {
+                    all_ok = false;
+                    break;
+                }
+            }
+        }
+        if all_ok && raw_layers.len() == num_layers {
+            model.set_raw_weights(raw_layers);
+        } else {
+            web_sys::console::log_1(
+                &"flare: raw quantized weights not available, using f32 path".into(),
+            );
+        }
+
         Ok(FlareEngine {
-            model: Model::new(config, weights),
+            model,
             chat_template,
             gguf_vocab,
             eos_token_id,
