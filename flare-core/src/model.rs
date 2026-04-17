@@ -649,15 +649,19 @@ impl ComputeBackend for CpuBackend {
                     quants: vec![0i8; blocks_per_row * Q8_0_BLOCK_SIZE],
                     blocks_per_row,
                 };
+                // `preq0` / `preq1` are always used (at least by the single-token
+                // fallback on non-SIMD targets).  `preq2` / `preq3` are only used
+                // by the 4-token SMMLA tile on aarch64 with FEAT_I8MM; gate them
+                // so non-aarch64 CI builds (with `-D warnings`) don't flag them.
                 let mut preq0 = mk_preq();
                 let mut preq1 = mk_preq();
+                #[cfg(target_arch = "aarch64")]
                 let mut preq2 = mk_preq();
+                #[cfg(target_arch = "aarch64")]
                 let mut preq3 = mk_preq();
 
                 #[cfg(target_arch = "aarch64")]
                 let has_smmla = std::arch::is_aarch64_feature_detected!("i8mm");
-                #[cfg(not(target_arch = "aarch64"))]
-                let has_smmla = false;
 
                 #[cfg(any(
                     target_arch = "aarch64",
@@ -788,9 +792,15 @@ impl ComputeBackend for CpuBackend {
                     quants: vec![0i8; preq_blocks * Q8_0_BLOCK_SIZE],
                     blocks_per_row: preq_blocks,
                 };
+                // preq0 / preq1 drive the 2-token loop on all arches (non-aarch64
+                // falls back to two sequential single-token matvecs that both
+                // still need a pre-quantized input).  preq2 / preq3 are only
+                // used by the 4-token tile on aarch64.
                 let mut preq0 = mk_preq();
                 let mut preq1 = mk_preq();
+                #[cfg(target_arch = "aarch64")]
                 let mut preq2 = mk_preq();
+                #[cfg(target_arch = "aarch64")]
                 let mut preq3 = mk_preq();
 
                 #[cfg(target_arch = "aarch64")]
@@ -4509,6 +4519,7 @@ const PREFETCH_BYTES: usize = 8192;
 ///
 /// 16 MB is a conservative estimate for Apple M-series chips (~48 MB total L2)
 /// leaving headroom for activations, KV cache, and other working data.
+#[cfg(target_arch = "aarch64")]
 const Q8_MATRIX_BYTE_THRESHOLD: usize = 16 * 1024 * 1024;
 
 /// Decide whether a matvec with the given weight matrix dimensions should use
