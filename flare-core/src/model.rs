@@ -1617,7 +1617,7 @@ impl Model {
 
         // Base Q8_0 eligibility: raw weights present and in Q8_0 format.
         let has_q8 = !use_raw
-            && dim >= 1024
+            && use_quant_for_dim(dim)
             && self.raw_weights.is_some()
             && self
                 .raw_weights
@@ -1638,7 +1638,7 @@ impl Model {
         // memory bandwidth requirements compared to Q8_0.
         let use_cpu_q4k = !use_raw
             && !has_q8
-            && dim >= 1024
+            && use_quant_for_dim(dim)
             && self.raw_weights.is_some()
             && self
                 .raw_weights
@@ -2571,11 +2571,11 @@ impl Model {
         let use_output_q4k = self
             .raw_output_weight
             .as_ref()
-            .is_some_and(|rw| rw.format == WeightFormat::Q4K && dim >= 1024);
+            .is_some_and(|rw| rw.format == WeightFormat::Q4K && use_quant_for_dim(dim));
         let use_output_q8 = self
             .raw_output_weight
             .as_ref()
-            .is_some_and(|rw| rw.format == WeightFormat::Q8_0 && dim >= 1024);
+            .is_some_and(|rw| rw.format == WeightFormat::Q8_0 && use_quant_for_dim(dim));
         let mut logits = if use_output_q4k {
             let row = self.raw_output_weight.as_ref().unwrap();
             let mut out = vec![0.0f32; config.vocab_size];
@@ -2715,7 +2715,7 @@ impl Model {
 
         // Base Q8_0 eligibility: raw weights present and in Q8_0 format.
         let has_q8 = !use_raw
-            && dim >= 1024
+            && use_quant_for_dim(dim)
             && self.raw_weights.is_some()
             && self
                 .raw_weights
@@ -2731,7 +2731,7 @@ impl Model {
 
         let use_cpu_q4k = !use_raw
             && !has_q8
-            && dim >= 1024
+            && use_quant_for_dim(dim)
             && self.raw_weights.is_some()
             && self
                 .raw_weights
@@ -3358,7 +3358,7 @@ impl Model {
 
         // Base Q8_0 eligibility: raw weights present and in Q8_0 format.
         let has_q8 = !use_raw
-            && dim >= 1024
+            && use_quant_for_dim(dim)
             && self.raw_weights.is_some()
             && self
                 .raw_weights
@@ -3374,7 +3374,7 @@ impl Model {
 
         let use_cpu_q4k = !use_raw
             && !has_q8
-            && dim >= 1024
+            && use_quant_for_dim(dim)
             && self.raw_weights.is_some()
             && self
                 .raw_weights
@@ -4455,9 +4455,45 @@ const Q8_MATRIX_BYTE_THRESHOLD: usize = 16 * 1024 * 1024;
 /// Returns `true` when the matrix is too large for L2 cache (bandwidth-bound),
 /// meaning Q8_0's ~2x bandwidth reduction outweighs the AMX f32 throughput
 /// advantage.  For cache-resident matrices, f32 BLAS is faster.
+///
+/// On non-aarch64 targets (notably WASM), there is no AMX / Accelerate f32
+/// path — f32 matmul is plain SIMD or scalar — so Q8_0's int8 SIMD always wins
+/// and this always returns `true`.
 #[inline]
 fn should_use_q8_for_size(rows: usize, cols: usize) -> bool {
-    rows * cols * 4 > Q8_MATRIX_BYTE_THRESHOLD
+    #[cfg(target_arch = "aarch64")]
+    {
+        rows * cols * 4 > Q8_MATRIX_BYTE_THRESHOLD
+    }
+    #[cfg(not(target_arch = "aarch64"))]
+    {
+        let _ = (rows, cols);
+        true
+    }
+}
+
+/// Decide whether a given hidden dimension should route through the Q8_0 or
+/// Q4_K quantized path (vs the f32 path).
+///
+/// On aarch64, small matrices (dim < 1024) are L2-resident and the f32
+/// Accelerate/AMX path outperforms Q8_0's int8 SIMD — AMX matrix throughput
+/// dominates the ~2x bandwidth reduction.  On WASM and other non-AMX targets,
+/// there is no equivalent f32 acceleration, so Q8_0 int8 SIMD always wins for
+/// quantized models regardless of dim.
+///
+/// This helper replaces ad-hoc `dim >= 1024` checks so future dispatch changes
+/// stay consistent.
+#[inline]
+fn use_quant_for_dim(dim: usize) -> bool {
+    #[cfg(target_arch = "aarch64")]
+    {
+        dim >= 1024
+    }
+    #[cfg(not(target_arch = "aarch64"))]
+    {
+        let _ = dim;
+        true
+    }
 }
 
 /// Issue software prefetch hints for the first `PREFETCH_BYTES` of a byte slice.
