@@ -34,9 +34,7 @@ use flare_core::tokenizer::{BpeTokenizer, Tokenizer};
 use flare_gpu::WebGpuBackend;
 use flare_loader::gguf::{GgufFile, MetadataValue};
 use flare_loader::tokenizer::GgufVocab;
-use flare_loader::weights::{
-    load_model_weights, load_model_weights_with_progress, load_model_weights_with_raw,
-};
+use flare_loader::weights::{load_model_weights_with_progress, load_model_weights_with_raw};
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 
