@@ -1,3 +1,12 @@
+// This module is dense with block-wise index arithmetic (SIMD kernels,
+// Q8/Q4 block loops, KV-cache position indexing) where the explicit
+// `for i in 0..N` form is clearer than `.iter().enumerate().take(N)`.
+// Several intermediate results also have genuinely complex nested-tuple
+// types that are more readable spelled out than aliased.  Silence both
+// lints at module scope rather than sprinkling allows on every hot loop.
+#![allow(clippy::needless_range_loop)]
+#![allow(clippy::type_complexity)]
+
 use crate::config::{Architecture, ModelConfig};
 use crate::kv_cache::{KvCache, QuantizedKvCache};
 use crate::tensor::Tensor;
@@ -678,7 +687,7 @@ impl ComputeBackend for CpuBackend {
                 if has_smmla {
                     while b + 4 <= batch {
                         quantize_input_q8_0_into(
-                            &input[(b + 0) * in_cols..(b + 1) * in_cols],
+                            &input[b * in_cols..(b + 1) * in_cols],
                             &mut preq0,
                         );
                         quantize_input_q8_0_into(
@@ -711,7 +720,7 @@ impl ComputeBackend for CpuBackend {
                 // (SDOT/SMMLA) and wasm32 + SIMD128.
                 while b + 2 <= batch {
                     quantize_input_q8_0_into(
-                        &input[(b + 0) * in_cols..(b + 1) * in_cols],
+                        &input[b * in_cols..(b + 1) * in_cols],
                         &mut preq0,
                     );
                     quantize_input_q8_0_into(
