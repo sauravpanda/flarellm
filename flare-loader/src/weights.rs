@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::io::{Read, Seek};
 
 use flare_core::config::{Architecture, ModelConfig};
-use flare_core::model::{ExpertWeights, LayerWeights, ModelWeights, MoeLayerWeights};
+use flare_core::model::{ExpertWeights, LayerWeights, ModelWeights, MoeLayerWeights, RawLayerWeights, RawWeight};
 use flare_core::tensor::Tensor;
 
 use crate::gguf::{GgufError, GgufFile};
@@ -62,6 +62,80 @@ where
         layers,
         output_norm,
         output_weight,
+    })
+}
+
+/// Load ModelWeights AND per-layer raw quantized weights in a single pass
+/// over the tensor data.
+///
+/// Use this when the caller wants both the f32 Tensor representation (for
+/// code paths that aren't SIMD-accelerated) AND the raw quantized bytes (for
+/// the int8 SIMD matvec kernels).  `load_model_weights` does one pass, and
+/// before this existed callers that also wanted raw weights had to do a
+/// second full pass via `load_raw_layer_weights` — roughly doubling load
+/// time on a 100+MB model.
+///
+/// Returns `(weights, Some(raw_layers))` when every layer has the full set
+/// of 7 raw tensors in a supported format.  If any layer is missing a raw
+/// tensor (e.g. mixed-quant model with a Q6_K layer), raw_layers is `None`
+/// and the caller should fall back to the f32 path.
+pub fn load_model_weights_with_raw<R: Read + Seek>(
+    gguf: &GgufFile,
+    reader: &mut R,
+) -> Result<(ModelWeights, Option<Vec<RawLayerWeights>>), GgufError> {
+    let (tensors, mut raw_map) = gguf.load_all_tensors_with_raw(reader)?;
+    let config = gguf.to_model_config()?;
+
+    let token_embedding = find_tensor(
+        &tensors,
+        &["token_embd.weight", "model.embed_tokens.weight"],
+    )?;
+    let output_norm = find_tensor(&tensors, &["output_norm.weight", "model.norm.weight"])?;
+    let output_weight = find_tensor(&tensors, &["output.weight", "lm_head.weight"])
+        .unwrap_or_else(|_| token_embedding.clone());
+
+    let total = config.num_layers;
+    let mut layers = Vec::with_capacity(total);
+    let mut raw_layers: Option<Vec<RawLayerWeights>> = Some(Vec::with_capacity(total));
+
+    for i in 0..total {
+        let layer = load_layer_weights(&tensors, i, &config)?;
+        layers.push(layer);
+
+        if let Some(ref mut rl) = raw_layers {
+            // Take ownership from raw_map to avoid cloning the Vec<u8> data;
+            // each RawWeight is ~10-30 MB.
+            match assemble_raw_layer(&mut raw_map, i) {
+                Some(raw_layer) => rl.push(raw_layer),
+                None => raw_layers = None,
+            }
+        }
+    }
+
+    let weights = ModelWeights {
+        token_embedding,
+        layers,
+        output_norm,
+        output_weight,
+    };
+    Ok((weights, raw_layers))
+}
+
+/// Take ownership of the 7 per-layer raw weight tensors from the raw-weight
+/// map.  Returns `None` and leaves the map partially drained if any are
+/// missing (callers discard the drained entries).
+fn assemble_raw_layer(
+    raw_map: &mut HashMap<String, RawWeight>,
+    i: usize,
+) -> Option<RawLayerWeights> {
+    Some(RawLayerWeights {
+        wq: raw_map.remove(&format!("blk.{i}.attn_q.weight"))?,
+        wk: raw_map.remove(&format!("blk.{i}.attn_k.weight"))?,
+        wv: raw_map.remove(&format!("blk.{i}.attn_v.weight"))?,
+        wo: raw_map.remove(&format!("blk.{i}.attn_output.weight"))?,
+        w_gate: raw_map.remove(&format!("blk.{i}.ffn_gate.weight"))?,
+        w_up: raw_map.remove(&format!("blk.{i}.ffn_up.weight"))?,
+        w_down: raw_map.remove(&format!("blk.{i}.ffn_down.weight"))?,
     })
 }
 

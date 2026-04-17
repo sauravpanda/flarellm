@@ -34,7 +34,9 @@ use flare_core::tokenizer::{BpeTokenizer, Tokenizer};
 use flare_gpu::WebGpuBackend;
 use flare_loader::gguf::{GgufFile, MetadataValue};
 use flare_loader::tokenizer::GgufVocab;
-use flare_loader::weights::{load_model_weights, load_model_weights_with_progress};
+use flare_loader::weights::{
+    load_model_weights, load_model_weights_with_progress, load_model_weights_with_raw,
+};
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 
@@ -452,30 +454,16 @@ impl FlareEngine {
         let config = gguf
             .to_model_config()
             .map_err(|e| JsError::new(&format!("Model config error: {e}")))?;
-        let weights = load_model_weights(&gguf, &mut reader)
+        // Single-pass load: dequantized f32 tensors and raw quantized bytes
+        // come back from one read of the tensor data region, so quantized
+        // models light up the WASM SIMD128 matvec path without paying for a
+        // second full pass over weight bytes.
+        let (weights, raw_layers) = load_model_weights_with_raw(&gguf, &mut reader)
             .map_err(|e| JsError::new(&format!("Weight load error: {e}")))?;
 
         let mut model = Model::new(config.clone(), weights);
 
-        // Auto-populate raw quantized weights so Q8_0 / Q4_K models take the
-        // hand-tuned WASM SIMD128 matvec paths by default.  This used to be
-        // opt-in via `load_raw_weights()`, which callers frequently forgot —
-        // the result was every model silently running on the f32 fallback.
-        // Failure here is non-fatal: f16 / unsupported-quant models stay on
-        // the f32 path.
-        let num_layers = config.num_layers;
-        let mut raw_layers = Vec::with_capacity(num_layers);
-        let mut all_ok = true;
-        for layer_idx in 0..num_layers {
-            match gguf.load_raw_layer_weights(&mut reader, layer_idx) {
-                Ok(Some(rw)) => raw_layers.push(rw),
-                _ => {
-                    all_ok = false;
-                    break;
-                }
-            }
-        }
-        if all_ok && raw_layers.len() == num_layers {
+        if let Some(raw_layers) = raw_layers {
             model.set_raw_weights(raw_layers);
         } else {
             web_sys::console::log_1(
