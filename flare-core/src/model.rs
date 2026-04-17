@@ -735,46 +735,68 @@ impl ComputeBackend for CpuBackend {
                 );
                 let preq_blocks = in_cols / Q8_0_BLOCK_SIZE;
                 let mut output = vec![0.0f32; batch * out_rows];
-                let mut preq0 = QuantizedInput {
+                let mk_preq = || QuantizedInput {
                     scales: vec![0.0f32; preq_blocks],
                     quants: vec![0i8; preq_blocks * Q8_0_BLOCK_SIZE],
                     blocks_per_row: preq_blocks,
                 };
-                let mut preq1 = QuantizedInput {
-                    scales: vec![0.0f32; preq_blocks],
-                    quants: vec![0i8; preq_blocks * Q8_0_BLOCK_SIZE],
-                    blocks_per_row: preq_blocks,
-                };
+                let mut preq0 = mk_preq();
+                let mut preq1 = mk_preq();
+                let mut preq2 = mk_preq();
+                let mut preq3 = mk_preq();
 
-                let pairs = batch / 2;
                 #[cfg(target_arch = "aarch64")]
                 let mut pair_out = vec![0.0f32; 2 * out_rows];
-                for p in 0..pairs {
-                    let b0 = p * 2;
-                    let b1 = b0 + 1;
-                    quantize_input_q8_0_into(&input[b0 * in_cols..(b0 + 1) * in_cols], &mut preq0);
-                    quantize_input_q8_0_into(&input[b1 * in_cols..(b1 + 1) * in_cols], &mut preq1);
+                #[cfg(target_arch = "aarch64")]
+                let mut quad_out = vec![0.0f32; 4 * out_rows];
+
+                let mut b = 0usize;
+                // 4-token tile: amortizes per-block decode (6-bit scale unpack,
+                // 4-bit nibble unpack) across 4 tokens and halves weight bandwidth
+                // again vs the 2-token tile.
+                #[cfg(target_arch = "aarch64")]
+                while b + 4 <= batch {
+                    quantize_input_q8_0_into(&input[b * in_cols..(b + 1) * in_cols], &mut preq0);
+                    quantize_input_q8_0_into(&input[(b + 1) * in_cols..(b + 2) * in_cols], &mut preq1);
+                    quantize_input_q8_0_into(&input[(b + 2) * in_cols..(b + 3) * in_cols], &mut preq2);
+                    quantize_input_q8_0_into(&input[(b + 3) * in_cols..(b + 4) * in_cols], &mut preq3);
+                    matvec_q4k_q8_quad_into(
+                        &weight.data,
+                        [&preq0, &preq1, &preq2, &preq3],
+                        out_rows, in_cols, &mut quad_out,
+                    );
+                    for i in 0..4 {
+                        output[(b + i) * out_rows..(b + i + 1) * out_rows]
+                            .copy_from_slice(&quad_out[i * out_rows..(i + 1) * out_rows]);
+                    }
+                    b += 4;
+                }
+
+                while b + 2 <= batch {
+                    quantize_input_q8_0_into(&input[b * in_cols..(b + 1) * in_cols], &mut preq0);
+                    quantize_input_q8_0_into(&input[(b + 1) * in_cols..(b + 2) * in_cols], &mut preq1);
                     #[cfg(target_arch = "aarch64")]
                     {
                         matvec_q4k_q8_pair_into(
                             &weight.data, &preq0, &preq1, out_rows, in_cols, &mut pair_out,
                         );
-                        output[b0 * out_rows..(b0 + 1) * out_rows]
+                        output[b * out_rows..(b + 1) * out_rows]
                             .copy_from_slice(&pair_out[..out_rows]);
-                        output[b1 * out_rows..(b1 + 1) * out_rows]
+                        output[(b + 1) * out_rows..(b + 2) * out_rows]
                             .copy_from_slice(&pair_out[out_rows..]);
                     }
                     #[cfg(not(target_arch = "aarch64"))]
                     {
                         matvec_q4k_q8_into(&weight.data, &preq0, out_rows, in_cols,
-                            &mut output[b0 * out_rows..(b0 + 1) * out_rows]);
+                            &mut output[b * out_rows..(b + 1) * out_rows]);
                         matvec_q4k_q8_into(&weight.data, &preq1, out_rows, in_cols,
-                            &mut output[b1 * out_rows..(b1 + 1) * out_rows]);
+                            &mut output[(b + 1) * out_rows..(b + 2) * out_rows]);
                     }
+                    b += 2;
                 }
-                // Trailing odd token
-                if batch & 1 != 0 {
-                    let b = batch - 1;
+
+                // Trailing single token
+                if b < batch {
                     quantize_input_q8_0_into(&input[b * in_cols..(b + 1) * in_cols], &mut preq0);
                     matvec_q4k_q8_into(
                         &weight.data, &preq0, out_rows, in_cols,
@@ -7877,6 +7899,200 @@ unsafe fn dot_q4k_q8_0_2tok_neon(
     }
 
     [vaddvq_f32(acc0), vaddvq_f32(acc1)]
+}
+
+/// 4-token Q4_K × Q8_0 dot product: stream one weight row once, compute against 4 tokens.
+///
+/// Extends `dot_q4k_q8_0_2tok_neon` to 4 tokens per weight-block load.  The
+/// per-block decode work (6-bit scale unpack, 4-bit nibble unpack) is amortized
+/// across 4 tokens instead of 2, and weight memory bandwidth is halved again.
+///
+/// Returns [row·tok0, row·tok1, row·tok2, row·tok3].
+///
+/// # Safety
+/// Requires aarch64 NEON.  All slices must be valid for `blocks_per_row`.
+#[cfg(target_arch = "aarch64")]
+unsafe fn dot_q4k_q8_0_4tok_neon(
+    row_bytes: &[u8],
+    t_scales: [&[f32]; 4],
+    t_quants: [&[i8]; 4],
+    blocks_per_row: usize,
+) -> [f32; 4] {
+    use std::arch::aarch64::*;
+
+    let mask_0f = vdupq_n_u8(0x0F);
+    let mut acc = [
+        vdupq_n_f32(0.0),
+        vdupq_n_f32(0.0),
+        vdupq_n_f32(0.0),
+        vdupq_n_f32(0.0),
+    ];
+
+    let row_ptr = row_bytes.as_ptr();
+    let iq_ptrs: [*const i8; 4] = [
+        t_quants[0].as_ptr(),
+        t_quants[1].as_ptr(),
+        t_quants[2].as_ptr(),
+        t_quants[3].as_ptr(),
+    ];
+    let is_ptrs: [*const f32; 4] = [
+        t_scales[0].as_ptr(),
+        t_scales[1].as_ptr(),
+        t_scales[2].as_ptr(),
+        t_scales[3].as_ptr(),
+    ];
+
+    for block in 0..blocks_per_row {
+        let blk = row_ptr.add(block * Q4K_BLOCK_BYTES);
+
+        if block + 1 < blocks_per_row {
+            core::arch::asm!(
+                "prfm pldl1strm, [{addr}]",
+                addr = in(reg) row_ptr.add((block + 1) * Q4K_BLOCK_BYTES),
+                options(nostack, preserves_flags),
+            );
+        }
+
+        let d = f16_to_f32_inline(u16::from_le_bytes([*blk, *blk.add(1)]));
+        let dmin = f16_to_f32_inline(u16::from_le_bytes([*blk.add(2), *blk.add(3)]));
+        let scales_raw = std::slice::from_raw_parts(blk.add(4), 12);
+        let (sc, mn) = unpack_q4k_scales(scales_raw);
+        let qs_ptr = blk.add(16);
+
+        for group in 0..4 {
+            // Decode weight nibbles once per group, reuse across all 4 tokens.
+            let b0 = vld1q_u8(qs_ptr.add(group * 32));
+            let b1 = vld1q_u8(qs_ptr.add(group * 32 + 16));
+
+            let lo0 = vreinterpretq_s8_u8(vandq_u8(b0, mask_0f));
+            let lo1 = vreinterpretq_s8_u8(vandq_u8(b1, mask_0f));
+            let hi0 = vreinterpretq_s8_u8(vshrq_n_u8::<4>(b0));
+            let hi1 = vreinterpretq_s8_u8(vshrq_n_u8::<4>(b1));
+
+            let d_sc_lo = d * sc[group] as f32;
+            let dmin_mn_lo = dmin * mn[group] as f32;
+            let d_sc_hi = d * sc[group + 4] as f32;
+            let dmin_mn_hi = dmin * mn[group + 4] as f32;
+
+            for ti in 0..4 {
+                let iq_base = iq_ptrs[ti].add(block * 8 * Q8_0_BLOCK_SIZE);
+                let is_base = is_ptrs[ti].add(block * 8);
+
+                let il0 = vld1q_s8(iq_base.add(group * Q8_0_BLOCK_SIZE));
+                let il1 = vld1q_s8(iq_base.add(group * Q8_0_BLOCK_SIZE + 16));
+                let ih0 = vld1q_s8(iq_base.add((group + 4) * Q8_0_BLOCK_SIZE));
+                let ih1 = vld1q_s8(iq_base.add((group + 4) * Q8_0_BLOCK_SIZE + 16));
+
+                let dot_lo = vaddq_s32(
+                    ggml_vdotq_s32(vdupq_n_s32(0), lo0, il0),
+                    ggml_vdotq_s32(vdupq_n_s32(0), lo1, il1),
+                );
+                let dot_hi = vaddq_s32(
+                    ggml_vdotq_s32(vdupq_n_s32(0), hi0, ih0),
+                    ggml_vdotq_s32(vdupq_n_s32(0), hi1, ih1),
+                );
+                let qsum_lo =
+                    vaddvq_s16(vaddq_s16(vpaddlq_s8(il0), vpaddlq_s8(il1))) as i32;
+                let qsum_hi =
+                    vaddvq_s16(vaddq_s16(vpaddlq_s8(ih0), vpaddlq_s8(ih1))) as i32;
+
+                let s_lo = *is_base.add(group);
+                let s_hi = *is_base.add(group + 4);
+
+                let term_lo =
+                    s_lo * (d_sc_lo * vaddvq_s32(dot_lo) as f32 - dmin_mn_lo * qsum_lo as f32);
+                let term_hi =
+                    s_hi * (d_sc_hi * vaddvq_s32(dot_hi) as f32 - dmin_mn_hi * qsum_hi as f32);
+
+                let lane01 =
+                    vsetq_lane_f32(term_hi, vsetq_lane_f32(term_lo, vdupq_n_f32(0.0), 0), 1);
+                acc[ti] = vaddq_f32(acc[ti], lane01);
+            }
+        }
+    }
+
+    [
+        vaddvq_f32(acc[0]),
+        vaddvq_f32(acc[1]),
+        vaddvq_f32(acc[2]),
+        vaddvq_f32(acc[3]),
+    ]
+}
+
+/// 4-token Q4_K × Q8_0 matvec: stream weights once, compute outputs for 4 tokens.
+///
+/// `output` must have length `4 * rows`, laid out as
+/// [tok0_rows..., tok1_rows..., tok2_rows..., tok3_rows...].
+#[cfg(target_arch = "aarch64")]
+pub fn matvec_q4k_q8_quad_into(
+    weight_data: &[u8],
+    preqs: [&QuantizedInput; 4],
+    rows: usize,
+    cols: usize,
+    output: &mut [f32],
+) {
+    debug_assert_eq!(cols % Q4K_BLOCK_VALUES, 0);
+    debug_assert_eq!(output.len(), 4 * rows);
+
+    let blocks_per_row = cols / Q4K_BLOCK_VALUES;
+    let bytes_per_row = blocks_per_row * Q4K_BLOCK_BYTES;
+
+    let t_scales: [&[f32]; 4] = [
+        preqs[0].scales.as_slice(),
+        preqs[1].scales.as_slice(),
+        preqs[2].scales.as_slice(),
+        preqs[3].scales.as_slice(),
+    ];
+    let t_quants: [&[i8]; 4] = [
+        preqs[0].quants.as_slice(),
+        preqs[1].quants.as_slice(),
+        preqs[2].quants.as_slice(),
+        preqs[3].quants.as_slice(),
+    ];
+
+    let (out01, out23) = output.split_at_mut(2 * rows);
+    let (out0, out1) = out01.split_at_mut(rows);
+    let (out2, out3) = out23.split_at_mut(rows);
+
+    let total_work = rows * cols;
+    if total_work >= 2_000_000 {
+        use rayon::prelude::*;
+        let chunk_rows = adaptive_matvec_chunk_size(rows);
+        let num_chunks = rows.div_ceil(chunk_rows);
+        let chunk_results: Vec<Vec<(usize, f32, f32, f32, f32)>> =
+            (0..num_chunks).into_par_iter().map(|ci| {
+                let base = ci * chunk_rows;
+                let end = (base + chunk_rows).min(rows);
+                let mut results = Vec::with_capacity(end - base);
+                for row in base..end {
+                    let rb = &weight_data[row * bytes_per_row..(row + 1) * bytes_per_row];
+                    let [v0, v1, v2, v3] = unsafe {
+                        dot_q4k_q8_0_4tok_neon(rb, t_scales, t_quants, blocks_per_row)
+                    };
+                    results.push((row, v0, v1, v2, v3));
+                }
+                results
+            }).collect();
+        for chunk in chunk_results {
+            for (row, v0, v1, v2, v3) in chunk {
+                out0[row] = v0;
+                out1[row] = v1;
+                out2[row] = v2;
+                out3[row] = v3;
+            }
+        }
+    } else {
+        for row in 0..rows {
+            let rb = &weight_data[row * bytes_per_row..(row + 1) * bytes_per_row];
+            let [v0, v1, v2, v3] = unsafe {
+                dot_q4k_q8_0_4tok_neon(rb, t_scales, t_quants, blocks_per_row)
+            };
+            out0[row] = v0;
+            out1[row] = v1;
+            out2[row] = v2;
+            out3[row] = v3;
+        }
+    }
 }
 
 /// 2-token Q4_K × Q8_0 matvec: stream weights once, compute outputs for 2 tokens.
