@@ -7909,6 +7909,134 @@ unsafe fn dot_q4k_q8_0_neon(
     vaddvq_f32(acc)
 }
 
+/// WASM SIMD128 Q4_K × Q8_0 dot product for one row.  Mirrors
+/// `dot_q4k_q8_0_neon`: per-block scalar header (d/dmin/scales), per-group
+/// vectorized nibble unpack + SDOT-equivalent int8 dot product + qsum
+/// for the dmin correction.
+///
+/// # Safety
+/// Requires `target_feature = "simd128"`.  `row_bytes` must cover
+/// `blocks_per_row` Q4_K super-blocks.  The input slices must cover
+/// `blocks_per_row * 8` Q8_0 sub-blocks.
+#[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+unsafe fn dot_q4k_q8_0_wasm_simd(
+    row_bytes: &[u8],
+    input_q8_scales: &[f32],
+    input_q8_quants: &[i8],
+    blocks_per_row: usize,
+) -> f32 {
+    use core::arch::wasm32::*;
+
+    let mut acc: f32 = 0.0;
+
+    let row_ptr = row_bytes.as_ptr();
+    let iq_ptr = input_q8_quants.as_ptr();
+    let is_ptr = input_q8_scales.as_ptr();
+
+    // Mask for extracting low nibbles.  Applied lane-wise via v128_and.
+    let mask_0f = i8x16_splat(0x0F);
+
+    for block in 0..blocks_per_row {
+        let blk = row_ptr.add(block * Q4K_BLOCK_BYTES);
+
+        let d = f16_to_f32_inline(u16::from_le_bytes([*blk, *blk.add(1)]));
+        let dmin = f16_to_f32_inline(u16::from_le_bytes([*blk.add(2), *blk.add(3)]));
+        let scales_raw = std::slice::from_raw_parts(blk.add(4), 12);
+        let (sc, mn) = unpack_q4k_scales(scales_raw);
+        let qs_ptr = blk.add(16);
+
+        let iq_base = iq_ptr.add(block * 8 * Q8_0_BLOCK_SIZE);
+        let is_base = is_ptr.add(block * 8);
+
+        for group in 0..4 {
+            // Load 32 weight bytes (two v128s) and unpack nibbles.
+            let b0 = v128_load(qs_ptr.add(group * 32) as *const v128);
+            let b1 = v128_load(qs_ptr.add(group * 32 + 16) as *const v128);
+
+            let lo0 = v128_and(b0, mask_0f);
+            let lo1 = v128_and(b1, mask_0f);
+            let hi0 = u8x16_shr(b0, 4);
+            let hi1 = u8x16_shr(b1, 4);
+
+            // Load the matching 32-byte Q8 input chunks for both the
+            // low-nibble sub-block (group) and the high-nibble sub-block
+            // (group + 4).
+            let il0 = v128_load(iq_base.add(group * Q8_0_BLOCK_SIZE) as *const v128);
+            let il1 = v128_load(iq_base.add(group * Q8_0_BLOCK_SIZE + 16) as *const v128);
+            let ih0 = v128_load(iq_base.add((group + 4) * Q8_0_BLOCK_SIZE) as *const v128);
+            let ih1 = v128_load(iq_base.add((group + 4) * Q8_0_BLOCK_SIZE + 16) as *const v128);
+
+            // --- SDOT-equivalent: 32 int8 × int8 -> 4 int32 partial sums ---
+            // For each 16-byte chunk: extmul gives 8 int16 products; pairwise-add
+            // to int32x4; then sum all 4 lanes to a scalar.
+            let dot_lo_vec = i32x4_add(
+                i32x4_extadd_pairwise_i16x8(i16x8_extmul_low_i8x16(lo0, il0)),
+                i32x4_extadd_pairwise_i16x8(i16x8_extmul_high_i8x16(lo0, il0)),
+            );
+            let dot_lo_vec = i32x4_add(
+                dot_lo_vec,
+                i32x4_add(
+                    i32x4_extadd_pairwise_i16x8(i16x8_extmul_low_i8x16(lo1, il1)),
+                    i32x4_extadd_pairwise_i16x8(i16x8_extmul_high_i8x16(lo1, il1)),
+                ),
+            );
+            let dot_hi_vec = i32x4_add(
+                i32x4_extadd_pairwise_i16x8(i16x8_extmul_low_i8x16(hi0, ih0)),
+                i32x4_extadd_pairwise_i16x8(i16x8_extmul_high_i8x16(hi0, ih0)),
+            );
+            let dot_hi_vec = i32x4_add(
+                dot_hi_vec,
+                i32x4_add(
+                    i32x4_extadd_pairwise_i16x8(i16x8_extmul_low_i8x16(hi1, ih1)),
+                    i32x4_extadd_pairwise_i16x8(i16x8_extmul_high_i8x16(hi1, ih1)),
+                ),
+            );
+
+            let dot_lo_i32 = i32x4_extract_lane::<0>(dot_lo_vec)
+                + i32x4_extract_lane::<1>(dot_lo_vec)
+                + i32x4_extract_lane::<2>(dot_lo_vec)
+                + i32x4_extract_lane::<3>(dot_lo_vec);
+            let dot_hi_i32 = i32x4_extract_lane::<0>(dot_hi_vec)
+                + i32x4_extract_lane::<1>(dot_hi_vec)
+                + i32x4_extract_lane::<2>(dot_hi_vec)
+                + i32x4_extract_lane::<3>(dot_hi_vec);
+
+            // --- qsum for dmin correction: horizontal sum of all 32 i8 inputs ---
+            // extadd_pairwise_i8x16_s: i8x16 -> i16x8 (pairs added).
+            // Repeat extadd_pairwise to get i32x4, then sum the 4 lanes.
+            let qsum_lo_vec = i32x4_add(
+                i32x4_extadd_pairwise_i16x8(i16x8_extadd_pairwise_i8x16(il0)),
+                i32x4_extadd_pairwise_i16x8(i16x8_extadd_pairwise_i8x16(il1)),
+            );
+            let qsum_hi_vec = i32x4_add(
+                i32x4_extadd_pairwise_i16x8(i16x8_extadd_pairwise_i8x16(ih0)),
+                i32x4_extadd_pairwise_i16x8(i16x8_extadd_pairwise_i8x16(ih1)),
+            );
+            let qsum_lo_i32 = i32x4_extract_lane::<0>(qsum_lo_vec)
+                + i32x4_extract_lane::<1>(qsum_lo_vec)
+                + i32x4_extract_lane::<2>(qsum_lo_vec)
+                + i32x4_extract_lane::<3>(qsum_lo_vec);
+            let qsum_hi_i32 = i32x4_extract_lane::<0>(qsum_hi_vec)
+                + i32x4_extract_lane::<1>(qsum_hi_vec)
+                + i32x4_extract_lane::<2>(qsum_hi_vec)
+                + i32x4_extract_lane::<3>(qsum_hi_vec);
+
+            // Scale fold (scalar).
+            let s_lo = *is_base.add(group);
+            let s_hi = *is_base.add(group + 4);
+            let d_sc_lo = d * sc[group] as f32;
+            let dmin_mn_lo = dmin * mn[group] as f32;
+            let d_sc_hi = d * sc[group + 4] as f32;
+            let dmin_mn_hi = dmin * mn[group + 4] as f32;
+
+            acc += s_lo * (d_sc_lo * dot_lo_i32 as f32 - dmin_mn_lo * qsum_lo_i32 as f32);
+            acc += s_hi * (d_sc_hi * dot_hi_i32 as f32 - dmin_mn_hi * qsum_hi_i32 as f32);
+        }
+    }
+
+    acc
+}
+
 /// 2-token Q4_K × Q8_0 dot product: stream one weight row once, compute against 2 tokens.
 ///
 /// Returns [row·tok0, row·tok1]. By decoding the Q4_K weight block (scales,
@@ -8413,7 +8541,18 @@ pub fn matvec_q4k_q8_into(
         }
     }
 
-    #[cfg(not(target_arch = "aarch64"))]
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    {
+        for (i, out) in output.iter_mut().enumerate() {
+            let start = i * bytes_per_row;
+            let row_bytes = &weight_data[start..start + bytes_per_row];
+            *out = unsafe {
+                dot_q4k_q8_0_wasm_simd(row_bytes, &preq.scales, &preq.quants, blocks_per_row)
+            };
+        }
+    }
+
+    #[cfg(all(not(target_arch = "aarch64"), not(all(target_arch = "wasm32", target_feature = "simd128"))))]
     {
         for (i, out) in output.iter_mut().enumerate() {
             let start = i * bytes_per_row;
