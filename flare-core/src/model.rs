@@ -664,7 +664,7 @@ impl ComputeBackend for CpuBackend {
                 #[cfg(not(target_arch = "aarch64"))]
                 let has_smmla = false;
 
-                #[cfg(target_arch = "aarch64")]
+                #[cfg(any(target_arch = "aarch64", all(target_arch = "wasm32", target_feature = "simd128")))]
                 let mut pair_out = vec![0.0f32; 2 * out_rows];
                 #[cfg(target_arch = "aarch64")]
                 let mut quad_out = vec![0.0f32; 4 * out_rows];
@@ -693,7 +693,8 @@ impl ComputeBackend for CpuBackend {
                     }
                 }
 
-                // 2-token tiles for the remainder.
+                // 2-token tiles for the remainder.  Available on aarch64
+                // (SDOT/SMMLA) and wasm32 + SIMD128.
                 while b + 2 <= batch {
                     quantize_input_q8_0_into(&input[(b + 0) * in_cols..(b + 1) * in_cols], &mut preq0);
                     quantize_input_q8_0_into(&input[(b + 1) * in_cols..(b + 2) * in_cols], &mut preq1);
@@ -707,7 +708,18 @@ impl ComputeBackend for CpuBackend {
                         output[(b + 1) * out_rows..(b + 2) * out_rows]
                             .copy_from_slice(&pair_out[out_rows..]);
                     }
-                    #[cfg(not(target_arch = "aarch64"))]
+                    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+                    {
+                        matvec_q8_0_preq_pair_into_wasm(
+                            &weight.data, &preq0, &preq1, out_rows, &mut pair_out,
+                        );
+                        output[b * out_rows..(b + 1) * out_rows]
+                            .copy_from_slice(&pair_out[..out_rows]);
+                        output[(b + 1) * out_rows..(b + 2) * out_rows]
+                            .copy_from_slice(&pair_out[out_rows..]);
+                    }
+                    #[cfg(all(not(target_arch = "aarch64"),
+                              not(all(target_arch = "wasm32", target_feature = "simd128"))))]
                     {
                         matvec_q8_0_preq_into(&weight.data, &preq0, out_rows,
                             &mut output[b * out_rows..(b + 1) * out_rows]);
@@ -7211,6 +7223,180 @@ unsafe fn q8_chunk_dot(w_ptr: *const u8, i_ptr: *const i8) -> core::arch::wasm32
 #[inline]
 fn i32_to_f32(v: core::arch::wasm32::v128) -> core::arch::wasm32::v128 {
     core::arch::wasm32::f32x4_convert_i32x4(v)
+}
+
+/// WASM SIMD128 2-row × 2-token Q8_0 tile.
+///
+/// Computes 4 dot products per (weight-row-pair, token-pair):
+/// [row0·tok0, row0·tok1, row1·tok0, row1·tok1].
+///
+/// By loading each weight block's bytes once and feeding them through 4
+/// independent int8 dot products (one per row-token pair), this halves
+/// weight memory bandwidth vs calling `dot_q8_0_q8_0_wasm_simd` four times.
+/// Mirror of the aarch64 `dot_q8_0_q8_0_2x2_sdot` kernel.
+///
+/// # Safety
+/// Requires `target_feature = "simd128"`.  Row byte slices must cover
+/// `blocks_per_row` Q8_0 blocks.  Input slices must cover `blocks_per_row`
+/// pre-quantized Q8_0 blocks each.
+#[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+unsafe fn dot_q8_0_q8_0_2x2_wasm_simd(
+    row0_bytes: &[u8],
+    row1_bytes: &[u8],
+    t0_scales: &[f32],
+    t0_quants: &[i8],
+    t1_scales: &[f32],
+    t1_quants: &[i8],
+    blocks_per_row: usize,
+) -> [f32; 4] {
+    use core::arch::wasm32::*;
+
+    // One float accumulator per (row, token) pair.  Each holds 4 lanes of
+    // partial sums; we reduce to a scalar at the end.
+    let mut acc00 = f32x4_splat(0.0);
+    let mut acc01 = f32x4_splat(0.0);
+    let mut acc10 = f32x4_splat(0.0);
+    let mut acc11 = f32x4_splat(0.0);
+
+    let r0 = row0_bytes.as_ptr();
+    let r1 = row1_bytes.as_ptr();
+    let q0 = t0_quants.as_ptr();
+    let q1 = t1_quants.as_ptr();
+
+    for blk in 0..blocks_per_row {
+        let off = blk * Q8_0_BLOCK_BYTES;
+        let qoff = blk * Q8_0_BLOCK_SIZE;
+
+        // Weight scales (scalar).
+        let w0p = r0.add(off);
+        let w0_scale = f16_to_f32_inline(u16::from_le_bytes([*w0p, *w0p.add(1)]));
+        let w1p = r1.add(off);
+        let w1_scale = f16_to_f32_inline(u16::from_le_bytes([*w1p, *w1p.add(1)]));
+
+        // Weight bytes — load each row's 32 bytes once, reuse across both tokens.
+        let w0_lo = v128_load(w0p.add(2) as *const v128);
+        let w0_hi = v128_load(w0p.add(18) as *const v128);
+        let w1_lo = v128_load(w1p.add(2) as *const v128);
+        let w1_hi = v128_load(w1p.add(18) as *const v128);
+
+        // Token bytes — load each token's 32 bytes once, reuse across both rows.
+        let t0_lo = v128_load(q0.add(qoff) as *const v128);
+        let t0_hi = v128_load(q0.add(qoff + 16) as *const v128);
+        let t1_lo = v128_load(q1.add(qoff) as *const v128);
+        let t1_hi = v128_load(q1.add(qoff + 16) as *const v128);
+
+        // 4 dot products per block, one per (row, token) pair.
+        let d00 = dot_32_i8(w0_lo, w0_hi, t0_lo, t0_hi);
+        let d01 = dot_32_i8(w0_lo, w0_hi, t1_lo, t1_hi);
+        let d10 = dot_32_i8(w1_lo, w1_hi, t0_lo, t0_hi);
+        let d11 = dot_32_i8(w1_lo, w1_hi, t1_lo, t1_hi);
+
+        // Scale-fold: acc += float(d) * (w_scale * t_scale)
+        let s0 = *t0_scales.get_unchecked(blk);
+        let s1 = *t1_scales.get_unchecked(blk);
+        acc00 = f32x4_add(acc00, f32x4_mul(i32_to_f32(d00), f32x4_splat(w0_scale * s0)));
+        acc01 = f32x4_add(acc01, f32x4_mul(i32_to_f32(d01), f32x4_splat(w0_scale * s1)));
+        acc10 = f32x4_add(acc10, f32x4_mul(i32_to_f32(d10), f32x4_splat(w1_scale * s0)));
+        acc11 = f32x4_add(acc11, f32x4_mul(i32_to_f32(d11), f32x4_splat(w1_scale * s1)));
+    }
+
+    [
+        reduce_f32x4(acc00),
+        reduce_f32x4(acc01),
+        reduce_f32x4(acc10),
+        reduce_f32x4(acc11),
+    ]
+}
+
+/// 32-byte int8 × int8 dot product with 4 int32 partial sums.
+///
+/// Takes two 16-byte halves of each operand and returns the sum of the 4
+/// `extmul + extadd_pairwise` pairs as a v128 (int32x4).
+#[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+#[inline]
+unsafe fn dot_32_i8(
+    w_lo: core::arch::wasm32::v128,
+    w_hi: core::arch::wasm32::v128,
+    i_lo: core::arch::wasm32::v128,
+    i_hi: core::arch::wasm32::v128,
+) -> core::arch::wasm32::v128 {
+    use core::arch::wasm32::*;
+    let p0 = i16x8_extmul_low_i8x16(w_lo, i_lo);
+    let p1 = i16x8_extmul_high_i8x16(w_lo, i_lo);
+    let p2 = i16x8_extmul_low_i8x16(w_hi, i_hi);
+    let p3 = i16x8_extmul_high_i8x16(w_hi, i_hi);
+    let s01 = i32x4_add(
+        i32x4_extadd_pairwise_i16x8(p0),
+        i32x4_extadd_pairwise_i16x8(p1),
+    );
+    let s23 = i32x4_add(
+        i32x4_extadd_pairwise_i16x8(p2),
+        i32x4_extadd_pairwise_i16x8(p3),
+    );
+    i32x4_add(s01, s23)
+}
+
+/// Horizontal sum of a float32x4.
+#[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+#[inline]
+fn reduce_f32x4(v: core::arch::wasm32::v128) -> f32 {
+    use core::arch::wasm32::*;
+    f32x4_extract_lane::<0>(v)
+        + f32x4_extract_lane::<1>(v)
+        + f32x4_extract_lane::<2>(v)
+        + f32x4_extract_lane::<3>(v)
+}
+
+/// WASM SIMD 2-token matvec: stream weight data once, compute outputs for 2 tokens.
+///
+/// `output` must have length `2 * rows`, laid out as
+/// `[tok0_rows..., tok1_rows...]`.
+///
+/// Sequential (no rayon — WASM builds are single-threaded by default).
+#[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+pub fn matvec_q8_0_preq_pair_into_wasm(
+    weight_data: &[u8],
+    preq0: &QuantizedInput,
+    preq1: &QuantizedInput,
+    rows: usize,
+    output: &mut [f32],
+) {
+    debug_assert_eq!(output.len(), 2 * rows);
+    debug_assert_eq!(preq0.blocks_per_row, preq1.blocks_per_row);
+    let blocks_per_row = preq0.blocks_per_row;
+    let bytes_per_row = blocks_per_row * Q8_0_BLOCK_BYTES;
+
+    let (out0, out1) = output.split_at_mut(rows);
+
+    let pairs = rows / 2;
+    for p in 0..pairs {
+        let r0 = p * 2;
+        let r1 = r0 + 1;
+        let rb0 = &weight_data[r0 * bytes_per_row..(r0 + 1) * bytes_per_row];
+        let rb1 = &weight_data[r1 * bytes_per_row..(r1 + 1) * bytes_per_row];
+        let [d00, d01, d10, d11] = unsafe {
+            dot_q8_0_q8_0_2x2_wasm_simd(
+                rb0, rb1,
+                &preq0.scales, &preq0.quants,
+                &preq1.scales, &preq1.quants,
+                blocks_per_row,
+            )
+        };
+        out0[r0] = d00;
+        out0[r1] = d10;
+        out1[r0] = d01;
+        out1[r1] = d11;
+    }
+    if rows & 1 != 0 {
+        let row = rows - 1;
+        let rb = &weight_data[row * bytes_per_row..(row + 1) * bytes_per_row];
+        out0[row] = unsafe {
+            dot_q8_0_q8_0_wasm_simd(rb, &preq0.scales, &preq0.quants, blocks_per_row)
+        };
+        out1[row] = unsafe {
+            dot_q8_0_q8_0_wasm_simd(rb, &preq1.scales, &preq1.quants, blocks_per_row)
+        };
+    }
 }
 
 /// Compute the argmax of a Q8_0 matrix-vector product without materializing
