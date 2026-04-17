@@ -1,3 +1,8 @@
+// `read_tensor_data_with_raw` returns a `Result<(Tensor, Option<RawWeight>)>`
+// which trips clippy's type_complexity — the tuple is clear in context and
+// changing it to a named alias would hurt readability.
+#![allow(clippy::type_complexity)]
+
 use byteorder::{LittleEndian, ReadBytesExt};
 use std::collections::HashMap;
 use std::io::{self, Read, Seek, SeekFrom};
