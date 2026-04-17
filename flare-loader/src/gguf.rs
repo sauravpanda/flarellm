@@ -399,8 +399,9 @@ impl GgufFile {
         };
 
         let shape: Vec<usize> = tensor_info.dimensions.iter().map(|&d| d as usize).collect();
-        let tensor = Tensor::from_vec(f32_data, &shape)
-            .map_err(|e| GgufError::Io(io::Error::new(io::ErrorKind::InvalidData, e.to_string())))?;
+        let tensor = Tensor::from_vec(f32_data, &shape).map_err(|e| {
+            GgufError::Io(io::Error::new(io::ErrorKind::InvalidData, e.to_string()))
+        })?;
         Ok((tensor, raw_weight))
     }
 

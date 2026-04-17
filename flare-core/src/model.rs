@@ -629,12 +629,7 @@ impl ComputeBackend for CpuBackend {
     ///
     /// Supported formats: `Q8_0`, `Q4K`.  Other formats panic — callers must
     /// gate on the model's actual weight format.
-    fn batched_dequant_matmul(
-        &self,
-        weight: &RawWeight,
-        input: &[f32],
-        batch: usize,
-    ) -> Vec<f32> {
+    fn batched_dequant_matmul(&self, weight: &RawWeight, input: &[f32], batch: usize) -> Vec<f32> {
         let out_rows = weight.num_rows;
         let blocks_per_row = weight.blocks_per_row;
         let weights_per_block = weight.format.weights_per_block();
@@ -664,7 +659,10 @@ impl ComputeBackend for CpuBackend {
                 #[cfg(not(target_arch = "aarch64"))]
                 let has_smmla = false;
 
-                #[cfg(any(target_arch = "aarch64", all(target_arch = "wasm32", target_feature = "simd128")))]
+                #[cfg(any(
+                    target_arch = "aarch64",
+                    all(target_arch = "wasm32", target_feature = "simd128")
+                ))]
                 let mut pair_out = vec![0.0f32; 2 * out_rows];
                 #[cfg(target_arch = "aarch64")]
                 let mut quad_out = vec![0.0f32; 4 * out_rows];
@@ -675,10 +673,22 @@ impl ComputeBackend for CpuBackend {
                 #[cfg(target_arch = "aarch64")]
                 if has_smmla {
                     while b + 4 <= batch {
-                        quantize_input_q8_0_into(&input[(b + 0) * in_cols..(b + 1) * in_cols], &mut preq0);
-                        quantize_input_q8_0_into(&input[(b + 1) * in_cols..(b + 2) * in_cols], &mut preq1);
-                        quantize_input_q8_0_into(&input[(b + 2) * in_cols..(b + 3) * in_cols], &mut preq2);
-                        quantize_input_q8_0_into(&input[(b + 3) * in_cols..(b + 4) * in_cols], &mut preq3);
+                        quantize_input_q8_0_into(
+                            &input[(b + 0) * in_cols..(b + 1) * in_cols],
+                            &mut preq0,
+                        );
+                        quantize_input_q8_0_into(
+                            &input[(b + 1) * in_cols..(b + 2) * in_cols],
+                            &mut preq1,
+                        );
+                        quantize_input_q8_0_into(
+                            &input[(b + 2) * in_cols..(b + 3) * in_cols],
+                            &mut preq2,
+                        );
+                        quantize_input_q8_0_into(
+                            &input[(b + 3) * in_cols..(b + 4) * in_cols],
+                            &mut preq3,
+                        );
                         matvec_q8_0_preq_quad_into(
                             &weight.data,
                             [&preq0, &preq1, &preq2, &preq3],
@@ -696,12 +706,22 @@ impl ComputeBackend for CpuBackend {
                 // 2-token tiles for the remainder.  Available on aarch64
                 // (SDOT/SMMLA) and wasm32 + SIMD128.
                 while b + 2 <= batch {
-                    quantize_input_q8_0_into(&input[(b + 0) * in_cols..(b + 1) * in_cols], &mut preq0);
-                    quantize_input_q8_0_into(&input[(b + 1) * in_cols..(b + 2) * in_cols], &mut preq1);
+                    quantize_input_q8_0_into(
+                        &input[(b + 0) * in_cols..(b + 1) * in_cols],
+                        &mut preq0,
+                    );
+                    quantize_input_q8_0_into(
+                        &input[(b + 1) * in_cols..(b + 2) * in_cols],
+                        &mut preq1,
+                    );
                     #[cfg(target_arch = "aarch64")]
                     {
                         matvec_q8_0_preq_pair_into(
-                            &weight.data, &preq0, &preq1, out_rows, &mut pair_out,
+                            &weight.data,
+                            &preq0,
+                            &preq1,
+                            out_rows,
+                            &mut pair_out,
                         );
                         output[b * out_rows..(b + 1) * out_rows]
                             .copy_from_slice(&pair_out[..out_rows]);
@@ -711,20 +731,34 @@ impl ComputeBackend for CpuBackend {
                     #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
                     {
                         matvec_q8_0_preq_pair_into_wasm(
-                            &weight.data, &preq0, &preq1, out_rows, &mut pair_out,
+                            &weight.data,
+                            &preq0,
+                            &preq1,
+                            out_rows,
+                            &mut pair_out,
                         );
                         output[b * out_rows..(b + 1) * out_rows]
                             .copy_from_slice(&pair_out[..out_rows]);
                         output[(b + 1) * out_rows..(b + 2) * out_rows]
                             .copy_from_slice(&pair_out[out_rows..]);
                     }
-                    #[cfg(all(not(target_arch = "aarch64"),
-                              not(all(target_arch = "wasm32", target_feature = "simd128"))))]
+                    #[cfg(all(
+                        not(target_arch = "aarch64"),
+                        not(all(target_arch = "wasm32", target_feature = "simd128"))
+                    ))]
                     {
-                        matvec_q8_0_preq_into(&weight.data, &preq0, out_rows,
-                            &mut output[b * out_rows..(b + 1) * out_rows]);
-                        matvec_q8_0_preq_into(&weight.data, &preq1, out_rows,
-                            &mut output[(b + 1) * out_rows..(b + 2) * out_rows]);
+                        matvec_q8_0_preq_into(
+                            &weight.data,
+                            &preq0,
+                            out_rows,
+                            &mut output[b * out_rows..(b + 1) * out_rows],
+                        );
+                        matvec_q8_0_preq_into(
+                            &weight.data,
+                            &preq1,
+                            out_rows,
+                            &mut output[(b + 1) * out_rows..(b + 2) * out_rows],
+                        );
                     }
                     b += 2;
                 }
@@ -733,7 +767,9 @@ impl ComputeBackend for CpuBackend {
                 if b < batch {
                     quantize_input_q8_0_into(&input[b * in_cols..(b + 1) * in_cols], &mut preq0);
                     matvec_q8_0_preq_into(
-                        &weight.data, &preq0, out_rows,
+                        &weight.data,
+                        &preq0,
+                        out_rows,
                         &mut output[b * out_rows..(b + 1) * out_rows],
                     );
                 }
@@ -769,13 +805,24 @@ impl ComputeBackend for CpuBackend {
                 #[cfg(target_arch = "aarch64")]
                 while b + 4 <= batch {
                     quantize_input_q8_0_into(&input[b * in_cols..(b + 1) * in_cols], &mut preq0);
-                    quantize_input_q8_0_into(&input[(b + 1) * in_cols..(b + 2) * in_cols], &mut preq1);
-                    quantize_input_q8_0_into(&input[(b + 2) * in_cols..(b + 3) * in_cols], &mut preq2);
-                    quantize_input_q8_0_into(&input[(b + 3) * in_cols..(b + 4) * in_cols], &mut preq3);
+                    quantize_input_q8_0_into(
+                        &input[(b + 1) * in_cols..(b + 2) * in_cols],
+                        &mut preq1,
+                    );
+                    quantize_input_q8_0_into(
+                        &input[(b + 2) * in_cols..(b + 3) * in_cols],
+                        &mut preq2,
+                    );
+                    quantize_input_q8_0_into(
+                        &input[(b + 3) * in_cols..(b + 4) * in_cols],
+                        &mut preq3,
+                    );
                     matvec_q4k_q8_quad_into(
                         &weight.data,
                         [&preq0, &preq1, &preq2, &preq3],
-                        out_rows, in_cols, &mut quad_out,
+                        out_rows,
+                        in_cols,
+                        &mut quad_out,
                     );
                     for i in 0..4 {
                         output[(b + i) * out_rows..(b + i + 1) * out_rows]
@@ -786,11 +833,19 @@ impl ComputeBackend for CpuBackend {
 
                 while b + 2 <= batch {
                     quantize_input_q8_0_into(&input[b * in_cols..(b + 1) * in_cols], &mut preq0);
-                    quantize_input_q8_0_into(&input[(b + 1) * in_cols..(b + 2) * in_cols], &mut preq1);
+                    quantize_input_q8_0_into(
+                        &input[(b + 1) * in_cols..(b + 2) * in_cols],
+                        &mut preq1,
+                    );
                     #[cfg(target_arch = "aarch64")]
                     {
                         matvec_q4k_q8_pair_into(
-                            &weight.data, &preq0, &preq1, out_rows, in_cols, &mut pair_out,
+                            &weight.data,
+                            &preq0,
+                            &preq1,
+                            out_rows,
+                            in_cols,
+                            &mut pair_out,
                         );
                         output[b * out_rows..(b + 1) * out_rows]
                             .copy_from_slice(&pair_out[..out_rows]);
@@ -799,10 +854,20 @@ impl ComputeBackend for CpuBackend {
                     }
                     #[cfg(not(target_arch = "aarch64"))]
                     {
-                        matvec_q4k_q8_into(&weight.data, &preq0, out_rows, in_cols,
-                            &mut output[b * out_rows..(b + 1) * out_rows]);
-                        matvec_q4k_q8_into(&weight.data, &preq1, out_rows, in_cols,
-                            &mut output[(b + 1) * out_rows..(b + 2) * out_rows]);
+                        matvec_q4k_q8_into(
+                            &weight.data,
+                            &preq0,
+                            out_rows,
+                            in_cols,
+                            &mut output[b * out_rows..(b + 1) * out_rows],
+                        );
+                        matvec_q4k_q8_into(
+                            &weight.data,
+                            &preq1,
+                            out_rows,
+                            in_cols,
+                            &mut output[(b + 1) * out_rows..(b + 2) * out_rows],
+                        );
                     }
                     b += 2;
                 }
@@ -811,15 +876,18 @@ impl ComputeBackend for CpuBackend {
                 if b < batch {
                     quantize_input_q8_0_into(&input[b * in_cols..(b + 1) * in_cols], &mut preq0);
                     matvec_q4k_q8_into(
-                        &weight.data, &preq0, out_rows, in_cols,
+                        &weight.data,
+                        &preq0,
+                        out_rows,
+                        in_cols,
                         &mut output[b * out_rows..(b + 1) * out_rows],
                     );
                 }
                 output
             }
-            other => panic!(
-                "CpuBackend::batched_dequant_matmul: unsupported weight format {other:?}"
-            ),
+            other => {
+                panic!("CpuBackend::batched_dequant_matmul: unsupported weight format {other:?}")
+            }
         }
     }
 }
@@ -2291,36 +2359,33 @@ impl Model {
                 } else {
                     None
                 };
-                let q_proj = if let Some(rw) =
-                    raw_layer.filter(|l| raw_weight_cpu_dispatchable(&l.wq))
-                {
-                    self.backend
-                        .batched_dequant_matmul(&rw.wq, &normed_batch, seq_len)
-                } else {
-                    let wq: Vec<f32> = self.weights.layers[layer_idx].wq.data().to_vec();
-                    self.backend
-                        .batched_matmul(&wq, &normed_batch, q_dim, dim, seq_len)
-                };
-                let k_proj = if let Some(rw) =
-                    raw_layer.filter(|l| raw_weight_cpu_dispatchable(&l.wk))
-                {
-                    self.backend
-                        .batched_dequant_matmul(&rw.wk, &normed_batch, seq_len)
-                } else {
-                    let wk: Vec<f32> = self.weights.layers[layer_idx].wk.data().to_vec();
-                    self.backend
-                        .batched_matmul(&wk, &normed_batch, kv_dim, dim, seq_len)
-                };
-                let v_proj = if let Some(rw) =
-                    raw_layer.filter(|l| raw_weight_cpu_dispatchable(&l.wv))
-                {
-                    self.backend
-                        .batched_dequant_matmul(&rw.wv, &normed_batch, seq_len)
-                } else {
-                    let wv: Vec<f32> = self.weights.layers[layer_idx].wv.data().to_vec();
-                    self.backend
-                        .batched_matmul(&wv, &normed_batch, kv_dim, dim, seq_len)
-                };
+                let q_proj =
+                    if let Some(rw) = raw_layer.filter(|l| raw_weight_cpu_dispatchable(&l.wq)) {
+                        self.backend
+                            .batched_dequant_matmul(&rw.wq, &normed_batch, seq_len)
+                    } else {
+                        let wq: Vec<f32> = self.weights.layers[layer_idx].wq.data().to_vec();
+                        self.backend
+                            .batched_matmul(&wq, &normed_batch, q_dim, dim, seq_len)
+                    };
+                let k_proj =
+                    if let Some(rw) = raw_layer.filter(|l| raw_weight_cpu_dispatchable(&l.wk)) {
+                        self.backend
+                            .batched_dequant_matmul(&rw.wk, &normed_batch, seq_len)
+                    } else {
+                        let wk: Vec<f32> = self.weights.layers[layer_idx].wk.data().to_vec();
+                        self.backend
+                            .batched_matmul(&wk, &normed_batch, kv_dim, dim, seq_len)
+                    };
+                let v_proj =
+                    if let Some(rw) = raw_layer.filter(|l| raw_weight_cpu_dispatchable(&l.wv)) {
+                        self.backend
+                            .batched_dequant_matmul(&rw.wv, &normed_batch, seq_len)
+                    } else {
+                        let wv: Vec<f32> = self.weights.layers[layer_idx].wv.data().to_vec();
+                        self.backend
+                            .batched_matmul(&wv, &normed_batch, kv_dim, dim, seq_len)
+                    };
 
                 // Apply biases in-place (CPU broadcast, cheap; rare in most models).
                 let mut q_proj = q_proj;
@@ -2403,16 +2468,15 @@ impl Model {
                 } else {
                     None
                 };
-                let proj_batch = if let Some(rw) =
-                    raw_layer.filter(|l| raw_weight_cpu_dispatchable(&l.wo))
-                {
-                    self.backend
-                        .batched_dequant_matmul(&rw.wo, &attn_out_batch, seq_len)
-                } else {
-                    let wo: Vec<f32> = self.weights.layers[layer_idx].wo.data().to_vec();
-                    self.backend
-                        .batched_matmul(&wo, &attn_out_batch, dim, q_dim, seq_len)
-                };
+                let proj_batch =
+                    if let Some(rw) = raw_layer.filter(|l| raw_weight_cpu_dispatchable(&l.wo)) {
+                        self.backend
+                            .batched_dequant_matmul(&rw.wo, &attn_out_batch, seq_len)
+                    } else {
+                        let wo: Vec<f32> = self.weights.layers[layer_idx].wo.data().to_vec();
+                        self.backend
+                            .batched_matmul(&wo, &attn_out_batch, dim, q_dim, seq_len)
+                    };
 
                 for t in 0..seq_len {
                     let proj = proj_batch[t * dim..(t + 1) * dim].to_vec();
@@ -2504,9 +2568,7 @@ impl Model {
                         .collect();
 
                     // Single batched dispatch for the down projection.
-                    if let Some(rw) = raw_layer
-                        .filter(|l| raw_weight_cpu_dispatchable(&l.w_down))
-                    {
+                    if let Some(rw) = raw_layer.filter(|l| raw_weight_cpu_dispatchable(&l.w_down)) {
                         self.backend
                             .batched_dequant_matmul(&rw.w_down, &ffn_hidden_batch, seq_len)
                     } else {
@@ -5270,16 +5332,28 @@ unsafe fn dot_q8_0_q8_0_2x2_sdot(
         // 8 SDOTs: 2 per (row, token) pair × 4 pairs
         let zero = vdupq_n_s32(0);
 
-        let d00 = vaddq_s32(ggml_vdotq_s32(zero, w0_lo, t0_lo), ggml_vdotq_s32(zero, w0_hi, t0_hi));
+        let d00 = vaddq_s32(
+            ggml_vdotq_s32(zero, w0_lo, t0_lo),
+            ggml_vdotq_s32(zero, w0_hi, t0_hi),
+        );
         acc00 = vmlaq_n_f32(acc00, vcvtq_f32_s32(d00), w0_scale * s0);
 
-        let d01 = vaddq_s32(ggml_vdotq_s32(zero, w0_lo, t1_lo), ggml_vdotq_s32(zero, w0_hi, t1_hi));
+        let d01 = vaddq_s32(
+            ggml_vdotq_s32(zero, w0_lo, t1_lo),
+            ggml_vdotq_s32(zero, w0_hi, t1_hi),
+        );
         acc01 = vmlaq_n_f32(acc01, vcvtq_f32_s32(d01), w0_scale * s1);
 
-        let d10 = vaddq_s32(ggml_vdotq_s32(zero, w1_lo, t0_lo), ggml_vdotq_s32(zero, w1_hi, t0_hi));
+        let d10 = vaddq_s32(
+            ggml_vdotq_s32(zero, w1_lo, t0_lo),
+            ggml_vdotq_s32(zero, w1_hi, t0_hi),
+        );
         acc10 = vmlaq_n_f32(acc10, vcvtq_f32_s32(d10), w1_scale * s0);
 
-        let d11 = vaddq_s32(ggml_vdotq_s32(zero, w1_lo, t1_lo), ggml_vdotq_s32(zero, w1_hi, t1_hi));
+        let d11 = vaddq_s32(
+            ggml_vdotq_s32(zero, w1_lo, t1_lo),
+            ggml_vdotq_s32(zero, w1_hi, t1_hi),
+        );
         acc11 = vmlaq_n_f32(acc11, vcvtq_f32_s32(d11), w1_scale * s1);
     }
 
@@ -5344,14 +5418,8 @@ unsafe fn dot_q8_0_q8_0_2x2_smmla(
         let w0_qs = w0p.add(2) as *const i8;
         let w1_qs = w1p.add(2) as *const i8;
         for j in (0..32).step_by(8) {
-            let a = vcombine_s8(
-                vld1_s8(w0_qs.add(j)),
-                vld1_s8(w1_qs.add(j)),
-            );
-            let b = vcombine_s8(
-                vld1_s8(q0.add(qoff + j)),
-                vld1_s8(q1.add(qoff + j)),
-            );
+            let a = vcombine_s8(vld1_s8(w0_qs.add(j)), vld1_s8(w1_qs.add(j)));
+            let b = vcombine_s8(vld1_s8(q0.add(qoff + j)), vld1_s8(q1.add(qoff + j)));
             isum = smmla_s32(isum, a, b);
         }
 
@@ -5425,18 +5493,50 @@ unsafe fn dot_q8_0_q8_0_2x4_smmla(
 
         // --- (t0, t1) tile ---
         let mut isum01 = vdupq_n_s32(0);
-        isum01 = smmla_s32(isum01, a0, vcombine_s8(vld1_s8(q0.add(qoff)),     vld1_s8(q1.add(qoff))));
-        isum01 = smmla_s32(isum01, a1, vcombine_s8(vld1_s8(q0.add(qoff + 8)), vld1_s8(q1.add(qoff + 8))));
-        isum01 = smmla_s32(isum01, a2, vcombine_s8(vld1_s8(q0.add(qoff + 16)), vld1_s8(q1.add(qoff + 16))));
-        isum01 = smmla_s32(isum01, a3, vcombine_s8(vld1_s8(q0.add(qoff + 24)), vld1_s8(q1.add(qoff + 24))));
+        isum01 = smmla_s32(
+            isum01,
+            a0,
+            vcombine_s8(vld1_s8(q0.add(qoff)), vld1_s8(q1.add(qoff))),
+        );
+        isum01 = smmla_s32(
+            isum01,
+            a1,
+            vcombine_s8(vld1_s8(q0.add(qoff + 8)), vld1_s8(q1.add(qoff + 8))),
+        );
+        isum01 = smmla_s32(
+            isum01,
+            a2,
+            vcombine_s8(vld1_s8(q0.add(qoff + 16)), vld1_s8(q1.add(qoff + 16))),
+        );
+        isum01 = smmla_s32(
+            isum01,
+            a3,
+            vcombine_s8(vld1_s8(q0.add(qoff + 24)), vld1_s8(q1.add(qoff + 24))),
+        );
         acc01 = vmlaq_f32(acc01, vcvtq_f32_s32(isum01), cs01_vec);
 
         // --- (t2, t3) tile — reuses a0..a3 ---
         let mut isum23 = vdupq_n_s32(0);
-        isum23 = smmla_s32(isum23, a0, vcombine_s8(vld1_s8(q2.add(qoff)),     vld1_s8(q3.add(qoff))));
-        isum23 = smmla_s32(isum23, a1, vcombine_s8(vld1_s8(q2.add(qoff + 8)), vld1_s8(q3.add(qoff + 8))));
-        isum23 = smmla_s32(isum23, a2, vcombine_s8(vld1_s8(q2.add(qoff + 16)), vld1_s8(q3.add(qoff + 16))));
-        isum23 = smmla_s32(isum23, a3, vcombine_s8(vld1_s8(q2.add(qoff + 24)), vld1_s8(q3.add(qoff + 24))));
+        isum23 = smmla_s32(
+            isum23,
+            a0,
+            vcombine_s8(vld1_s8(q2.add(qoff)), vld1_s8(q3.add(qoff))),
+        );
+        isum23 = smmla_s32(
+            isum23,
+            a1,
+            vcombine_s8(vld1_s8(q2.add(qoff + 8)), vld1_s8(q3.add(qoff + 8))),
+        );
+        isum23 = smmla_s32(
+            isum23,
+            a2,
+            vcombine_s8(vld1_s8(q2.add(qoff + 16)), vld1_s8(q3.add(qoff + 16))),
+        );
+        isum23 = smmla_s32(
+            isum23,
+            a3,
+            vcombine_s8(vld1_s8(q2.add(qoff + 24)), vld1_s8(q3.add(qoff + 24))),
+        );
         acc23 = vmlaq_f32(acc23, vcvtq_f32_s32(isum23), cs23_vec);
     }
 
@@ -5444,7 +5544,9 @@ unsafe fn dot_q8_0_q8_0_2x4_smmla(
     let mut out23 = [0.0f32; 4];
     vst1q_f32(out01.as_mut_ptr(), acc01);
     vst1q_f32(out23.as_mut_ptr(), acc23);
-    [out01[0], out01[1], out01[2], out01[3], out23[0], out23[1], out23[2], out23[3]]
+    [
+        out01[0], out01[1], out01[2], out01[3], out23[0], out23[1], out23[2], out23[3],
+    ]
 }
 
 /// 4-token matvec: stream weight data once and compute outputs for 4 tokens.
@@ -5488,8 +5590,9 @@ pub fn matvec_q8_0_preq_quad_into(
         let chunk_rows = adaptive_matvec_chunk_size(rows);
         let num_chunks = rows.div_ceil(chunk_rows);
         // Per-chunk results: Vec<(row, v0, v1, v2, v3)>
-        let chunk_results: Vec<Vec<(usize, f32, f32, f32, f32)>> =
-            (0..num_chunks).into_par_iter().map(|ci| {
+        let chunk_results: Vec<Vec<(usize, f32, f32, f32, f32)>> = (0..num_chunks)
+            .into_par_iter()
+            .map(|ci| {
                 let base = ci * chunk_rows;
                 let end = (base + chunk_rows).min(rows);
                 let len = end - base;
@@ -5510,14 +5613,19 @@ pub fn matvec_q8_0_preq_quad_into(
                 if len & 1 != 0 {
                     let row = base + len - 1;
                     let rb = &weight_data[row * bytes_per_row..(row + 1) * bytes_per_row];
-                    let v0 = unsafe { dot_q8_0_q8_0_neon(rb, t_scales[0], t_quants[0], blocks_per_row) };
-                    let v1 = unsafe { dot_q8_0_q8_0_neon(rb, t_scales[1], t_quants[1], blocks_per_row) };
-                    let v2 = unsafe { dot_q8_0_q8_0_neon(rb, t_scales[2], t_quants[2], blocks_per_row) };
-                    let v3 = unsafe { dot_q8_0_q8_0_neon(rb, t_scales[3], t_quants[3], blocks_per_row) };
+                    let v0 =
+                        unsafe { dot_q8_0_q8_0_neon(rb, t_scales[0], t_quants[0], blocks_per_row) };
+                    let v1 =
+                        unsafe { dot_q8_0_q8_0_neon(rb, t_scales[1], t_quants[1], blocks_per_row) };
+                    let v2 =
+                        unsafe { dot_q8_0_q8_0_neon(rb, t_scales[2], t_quants[2], blocks_per_row) };
+                    let v3 =
+                        unsafe { dot_q8_0_q8_0_neon(rb, t_scales[3], t_quants[3], blocks_per_row) };
                     results.push((row, v0, v1, v2, v3));
                 }
                 results
-            }).collect();
+            })
+            .collect();
         for chunk in chunk_results {
             for (row, v0, v1, v2, v3) in chunk {
                 out0[row] = v0;
@@ -5533,11 +5641,16 @@ pub fn matvec_q8_0_preq_quad_into(
             let r1 = r0 + 1;
             let rb0 = &weight_data[r0 * bytes_per_row..(r0 + 1) * bytes_per_row];
             let rb1 = &weight_data[r1 * bytes_per_row..(r1 + 1) * bytes_per_row];
-            let d = unsafe {
-                dot_q8_0_q8_0_2x4_smmla(rb0, rb1, t_scales, t_quants, blocks_per_row)
-            };
-            out0[r0] = d[0]; out1[r0] = d[1]; out2[r0] = d[4]; out3[r0] = d[5];
-            out0[r1] = d[2]; out1[r1] = d[3]; out2[r1] = d[6]; out3[r1] = d[7];
+            let d =
+                unsafe { dot_q8_0_q8_0_2x4_smmla(rb0, rb1, t_scales, t_quants, blocks_per_row) };
+            out0[r0] = d[0];
+            out1[r0] = d[1];
+            out2[r0] = d[4];
+            out3[r0] = d[5];
+            out0[r1] = d[2];
+            out1[r1] = d[3];
+            out2[r1] = d[6];
+            out3[r1] = d[7];
         }
         if rows & 1 != 0 {
             let row = rows - 1;
@@ -5576,9 +5689,29 @@ pub fn matvec_q8_0_preq_pair_into(
     // Helper to dispatch the 2×2 tile kernel (SMMLA on M2+, SDOT otherwise).
     let tile = |rb0: &[u8], rb1: &[u8], p0: &QuantizedInput, p1: &QuantizedInput| -> [f32; 4] {
         if has_smmla {
-            unsafe { dot_q8_0_q8_0_2x2_smmla(rb0, rb1, &p0.scales, &p0.quants, &p1.scales, &p1.quants, blocks_per_row) }
+            unsafe {
+                dot_q8_0_q8_0_2x2_smmla(
+                    rb0,
+                    rb1,
+                    &p0.scales,
+                    &p0.quants,
+                    &p1.scales,
+                    &p1.quants,
+                    blocks_per_row,
+                )
+            }
         } else {
-            unsafe { dot_q8_0_q8_0_2x2_sdot(rb0, rb1, &p0.scales, &p0.quants, &p1.scales, &p1.quants, blocks_per_row) }
+            unsafe {
+                dot_q8_0_q8_0_2x2_sdot(
+                    rb0,
+                    rb1,
+                    &p0.scales,
+                    &p0.quants,
+                    &p1.scales,
+                    &p1.quants,
+                    blocks_per_row,
+                )
+            }
         }
     };
     // Helper for single-row fallback.
@@ -5593,8 +5726,9 @@ pub fn matvec_q8_0_preq_pair_into(
         // (row_index, tok0_val, tok1_val) that we write back sequentially.
         // This avoids sending raw pointers across threads.
         let num_chunks = rows.div_ceil(chunk_rows);
-        let chunk_results: Vec<Vec<(usize, f32, f32)>> =
-            (0..num_chunks).into_par_iter().map(|ci| {
+        let chunk_results: Vec<Vec<(usize, f32, f32)>> = (0..num_chunks)
+            .into_par_iter()
+            .map(|ci| {
                 let base = ci * chunk_rows;
                 let end = (base + chunk_rows).min(rows);
                 let len = end - base;
@@ -5615,7 +5749,8 @@ pub fn matvec_q8_0_preq_pair_into(
                     results.push((row, single(rb, preq0), single(rb, preq1)));
                 }
                 results
-            }).collect();
+            })
+            .collect();
         for chunk in chunk_results {
             for (row, v0, v1) in chunk {
                 out0[row] = v0;
@@ -7092,7 +7227,10 @@ pub fn matvec_q8_0_preq_into(
         }
     }
 
-    #[cfg(all(not(target_arch = "aarch64"), not(all(target_arch = "wasm32", target_feature = "simd128"))))]
+    #[cfg(all(
+        not(target_arch = "aarch64"),
+        not(all(target_arch = "wasm32", target_feature = "simd128"))
+    ))]
     {
         for (i, out) in output.iter_mut().enumerate() {
             let row_start = i * bytes_per_row;
@@ -7167,7 +7305,10 @@ unsafe fn dot_q8_0_q8_0_wasm_simd(
         let i_qs0 = iq_ptr.add(ib0 * Q8_0_BLOCK_SIZE);
         let combined_scale0 = w_scale0 * *input_q8_scales.get_unchecked(ib0);
         let sum0 = q8_chunk_dot(w_qs0, i_qs0);
-        sumv0 = f32x4_add(sumv0, f32x4_mul(i32_to_f32(sum0), f32x4_splat(combined_scale0)));
+        sumv0 = f32x4_add(
+            sumv0,
+            f32x4_mul(i32_to_f32(sum0), f32x4_splat(combined_scale0)),
+        );
 
         // --- Block ib0 + 1 ---
         let w_ptr1 = row_ptr.add((ib0 + 1) * Q8_0_BLOCK_BYTES);
@@ -7176,7 +7317,10 @@ unsafe fn dot_q8_0_q8_0_wasm_simd(
         let i_qs1 = iq_ptr.add((ib0 + 1) * Q8_0_BLOCK_SIZE);
         let combined_scale1 = w_scale1 * *input_q8_scales.get_unchecked(ib0 + 1);
         let sum1 = q8_chunk_dot(w_qs1, i_qs1);
-        sumv1 = f32x4_add(sumv1, f32x4_mul(i32_to_f32(sum1), f32x4_splat(combined_scale1)));
+        sumv1 = f32x4_add(
+            sumv1,
+            f32x4_mul(i32_to_f32(sum1), f32x4_splat(combined_scale1)),
+        );
 
         // --- Block ib0 + 2 ---
         let w_ptr2 = row_ptr.add((ib0 + 2) * Q8_0_BLOCK_BYTES);
@@ -7185,7 +7329,10 @@ unsafe fn dot_q8_0_q8_0_wasm_simd(
         let i_qs2 = iq_ptr.add((ib0 + 2) * Q8_0_BLOCK_SIZE);
         let combined_scale2 = w_scale2 * *input_q8_scales.get_unchecked(ib0 + 2);
         let sum2 = q8_chunk_dot(w_qs2, i_qs2);
-        sumv2 = f32x4_add(sumv2, f32x4_mul(i32_to_f32(sum2), f32x4_splat(combined_scale2)));
+        sumv2 = f32x4_add(
+            sumv2,
+            f32x4_mul(i32_to_f32(sum2), f32x4_splat(combined_scale2)),
+        );
 
         // --- Block ib0 + 3 ---
         let w_ptr3 = row_ptr.add((ib0 + 3) * Q8_0_BLOCK_BYTES);
@@ -7194,7 +7341,10 @@ unsafe fn dot_q8_0_q8_0_wasm_simd(
         let i_qs3 = iq_ptr.add((ib0 + 3) * Q8_0_BLOCK_SIZE);
         let combined_scale3 = w_scale3 * *input_q8_scales.get_unchecked(ib0 + 3);
         let sum3 = q8_chunk_dot(w_qs3, i_qs3);
-        sumv3 = f32x4_add(sumv3, f32x4_mul(i32_to_f32(sum3), f32x4_splat(combined_scale3)));
+        sumv3 = f32x4_add(
+            sumv3,
+            f32x4_mul(i32_to_f32(sum3), f32x4_splat(combined_scale3)),
+        );
     }
 
     // Remaining 0-3 blocks.
@@ -7206,7 +7356,10 @@ unsafe fn dot_q8_0_q8_0_wasm_simd(
         let i_qs = iq_ptr.add(ib * Q8_0_BLOCK_SIZE);
         let combined_scale = w_scale * *input_q8_scales.get_unchecked(ib);
         let sum = q8_chunk_dot(w_qs, i_qs);
-        sumv0 = f32x4_add(sumv0, f32x4_mul(i32_to_f32(sum), f32x4_splat(combined_scale)));
+        sumv0 = f32x4_add(
+            sumv0,
+            f32x4_mul(i32_to_f32(sum), f32x4_splat(combined_scale)),
+        );
     }
 
     // Reduce 4 accumulators to one, then horizontal sum.
@@ -7330,10 +7483,22 @@ unsafe fn dot_q8_0_q8_0_2x2_wasm_simd(
         // Scale-fold: acc += float(d) * (w_scale * t_scale)
         let s0 = *t0_scales.get_unchecked(blk);
         let s1 = *t1_scales.get_unchecked(blk);
-        acc00 = f32x4_add(acc00, f32x4_mul(i32_to_f32(d00), f32x4_splat(w0_scale * s0)));
-        acc01 = f32x4_add(acc01, f32x4_mul(i32_to_f32(d01), f32x4_splat(w0_scale * s1)));
-        acc10 = f32x4_add(acc10, f32x4_mul(i32_to_f32(d10), f32x4_splat(w1_scale * s0)));
-        acc11 = f32x4_add(acc11, f32x4_mul(i32_to_f32(d11), f32x4_splat(w1_scale * s1)));
+        acc00 = f32x4_add(
+            acc00,
+            f32x4_mul(i32_to_f32(d00), f32x4_splat(w0_scale * s0)),
+        );
+        acc01 = f32x4_add(
+            acc01,
+            f32x4_mul(i32_to_f32(d01), f32x4_splat(w0_scale * s1)),
+        );
+        acc10 = f32x4_add(
+            acc10,
+            f32x4_mul(i32_to_f32(d10), f32x4_splat(w1_scale * s0)),
+        );
+        acc11 = f32x4_add(
+            acc11,
+            f32x4_mul(i32_to_f32(d11), f32x4_splat(w1_scale * s1)),
+        );
     }
 
     [
@@ -7412,9 +7577,12 @@ pub fn matvec_q8_0_preq_pair_into_wasm(
         let rb1 = &weight_data[r1 * bytes_per_row..(r1 + 1) * bytes_per_row];
         let [d00, d01, d10, d11] = unsafe {
             dot_q8_0_q8_0_2x2_wasm_simd(
-                rb0, rb1,
-                &preq0.scales, &preq0.quants,
-                &preq1.scales, &preq1.quants,
+                rb0,
+                rb1,
+                &preq0.scales,
+                &preq0.quants,
+                &preq1.scales,
+                &preq1.quants,
                 blocks_per_row,
             )
         };
@@ -7426,12 +7594,10 @@ pub fn matvec_q8_0_preq_pair_into_wasm(
     if rows & 1 != 0 {
         let row = rows - 1;
         let rb = &weight_data[row * bytes_per_row..(row + 1) * bytes_per_row];
-        out0[row] = unsafe {
-            dot_q8_0_q8_0_wasm_simd(rb, &preq0.scales, &preq0.quants, blocks_per_row)
-        };
-        out1[row] = unsafe {
-            dot_q8_0_q8_0_wasm_simd(rb, &preq1.scales, &preq1.quants, blocks_per_row)
-        };
+        out0[row] =
+            unsafe { dot_q8_0_q8_0_wasm_simd(rb, &preq0.scales, &preq0.quants, blocks_per_row) };
+        out1[row] =
+            unsafe { dot_q8_0_q8_0_wasm_simd(rb, &preq1.scales, &preq1.quants, blocks_per_row) };
     }
 }
 
@@ -7601,12 +7767,7 @@ pub fn matvec_argmax_q4k_q8_preq(
                         let start = row * bytes_per_row;
                         let row_bytes = &weight_data[start..start + bytes_per_row];
                         let val = unsafe {
-                            dot_q4k_q8_0_neon(
-                                row_bytes,
-                                &preq.scales,
-                                &preq.quants,
-                                blocks_per_row,
-                            )
+                            dot_q4k_q8_0_neon(row_bytes, &preq.scales, &preq.quants, blocks_per_row)
                         };
                         if val > local_best_val {
                             local_best_val = val;
@@ -8100,10 +8261,8 @@ unsafe fn dot_q4k_q8_0_neon(
 
             // Horizontal sums of the input quants for the min term.
             // vpaddlq_s8: int8x16 -> int16x8 pairwise-add; then vaddvq_s16.
-            let qsum_lo_i32 =
-                vaddvq_s16(vaddq_s16(vpaddlq_s8(il0), vpaddlq_s8(il1))) as i32;
-            let qsum_hi_i32 =
-                vaddvq_s16(vaddq_s16(vpaddlq_s8(ih0), vpaddlq_s8(ih1))) as i32;
+            let qsum_lo_i32 = vaddvq_s16(vaddq_s16(vpaddlq_s8(il0), vpaddlq_s8(il1))) as i32;
+            let qsum_hi_i32 = vaddvq_s16(vaddq_s16(vpaddlq_s8(ih0), vpaddlq_s8(ih1))) as i32;
 
             // Horizontal sum of the SDOT results -> i32 scalar
             let dot_lo_i32 = vaddvq_s32(dot_lo);
@@ -8340,10 +8499,8 @@ unsafe fn dot_q4k_q8_0_2tok_neon(
                     ggml_vdotq_s32(vdupq_n_s32(0), hi0, ih0),
                     ggml_vdotq_s32(vdupq_n_s32(0), hi1, ih1),
                 );
-                let qsum_lo =
-                    vaddvq_s16(vaddq_s16(vpaddlq_s8(il0), vpaddlq_s8(il1))) as i32;
-                let qsum_hi =
-                    vaddvq_s16(vaddq_s16(vpaddlq_s8(ih0), vpaddlq_s8(ih1))) as i32;
+                let qsum_lo = vaddvq_s16(vaddq_s16(vpaddlq_s8(il0), vpaddlq_s8(il1))) as i32;
+                let qsum_hi = vaddvq_s16(vaddq_s16(vpaddlq_s8(ih0), vpaddlq_s8(ih1))) as i32;
 
                 let s_lo = *is0_base.add(group);
                 let s_hi = *is0_base.add(group + 4);
@@ -8373,10 +8530,8 @@ unsafe fn dot_q4k_q8_0_2tok_neon(
                     ggml_vdotq_s32(vdupq_n_s32(0), hi0, ih0),
                     ggml_vdotq_s32(vdupq_n_s32(0), hi1, ih1),
                 );
-                let qsum_lo =
-                    vaddvq_s16(vaddq_s16(vpaddlq_s8(il0), vpaddlq_s8(il1))) as i32;
-                let qsum_hi =
-                    vaddvq_s16(vaddq_s16(vpaddlq_s8(ih0), vpaddlq_s8(ih1))) as i32;
+                let qsum_lo = vaddvq_s16(vaddq_s16(vpaddlq_s8(il0), vpaddlq_s8(il1))) as i32;
+                let qsum_hi = vaddvq_s16(vaddq_s16(vpaddlq_s8(ih0), vpaddlq_s8(ih1))) as i32;
 
                 let s_lo = *is1_base.add(group);
                 let s_hi = *is1_base.add(group + 4);
@@ -8486,10 +8641,8 @@ unsafe fn dot_q4k_q8_0_4tok_neon(
                     ggml_vdotq_s32(vdupq_n_s32(0), hi0, ih0),
                     ggml_vdotq_s32(vdupq_n_s32(0), hi1, ih1),
                 );
-                let qsum_lo =
-                    vaddvq_s16(vaddq_s16(vpaddlq_s8(il0), vpaddlq_s8(il1))) as i32;
-                let qsum_hi =
-                    vaddvq_s16(vaddq_s16(vpaddlq_s8(ih0), vpaddlq_s8(ih1))) as i32;
+                let qsum_lo = vaddvq_s16(vaddq_s16(vpaddlq_s8(il0), vpaddlq_s8(il1))) as i32;
+                let qsum_hi = vaddvq_s16(vaddq_s16(vpaddlq_s8(ih0), vpaddlq_s8(ih1))) as i32;
 
                 let s_lo = *is_base.add(group);
                 let s_hi = *is_base.add(group + 4);
@@ -8554,20 +8707,21 @@ pub fn matvec_q4k_q8_quad_into(
         use rayon::prelude::*;
         let chunk_rows = adaptive_matvec_chunk_size(rows);
         let num_chunks = rows.div_ceil(chunk_rows);
-        let chunk_results: Vec<Vec<(usize, f32, f32, f32, f32)>> =
-            (0..num_chunks).into_par_iter().map(|ci| {
+        let chunk_results: Vec<Vec<(usize, f32, f32, f32, f32)>> = (0..num_chunks)
+            .into_par_iter()
+            .map(|ci| {
                 let base = ci * chunk_rows;
                 let end = (base + chunk_rows).min(rows);
                 let mut results = Vec::with_capacity(end - base);
                 for row in base..end {
                     let rb = &weight_data[row * bytes_per_row..(row + 1) * bytes_per_row];
-                    let [v0, v1, v2, v3] = unsafe {
-                        dot_q4k_q8_0_4tok_neon(rb, t_scales, t_quants, blocks_per_row)
-                    };
+                    let [v0, v1, v2, v3] =
+                        unsafe { dot_q4k_q8_0_4tok_neon(rb, t_scales, t_quants, blocks_per_row) };
                     results.push((row, v0, v1, v2, v3));
                 }
                 results
-            }).collect();
+            })
+            .collect();
         for chunk in chunk_results {
             for (row, v0, v1, v2, v3) in chunk {
                 out0[row] = v0;
@@ -8579,9 +8733,8 @@ pub fn matvec_q4k_q8_quad_into(
     } else {
         for row in 0..rows {
             let rb = &weight_data[row * bytes_per_row..(row + 1) * bytes_per_row];
-            let [v0, v1, v2, v3] = unsafe {
-                dot_q4k_q8_0_4tok_neon(rb, t_scales, t_quants, blocks_per_row)
-            };
+            let [v0, v1, v2, v3] =
+                unsafe { dot_q4k_q8_0_4tok_neon(rb, t_scales, t_quants, blocks_per_row) };
             out0[row] = v0;
             out1[row] = v1;
             out2[row] = v2;
@@ -8617,8 +8770,9 @@ pub fn matvec_q4k_q8_pair_into(
         use rayon::prelude::*;
         let chunk_rows = adaptive_matvec_chunk_size(rows);
         let num_chunks = rows.div_ceil(chunk_rows);
-        let chunk_results: Vec<Vec<(usize, f32, f32)>> =
-            (0..num_chunks).into_par_iter().map(|ci| {
+        let chunk_results: Vec<Vec<(usize, f32, f32)>> = (0..num_chunks)
+            .into_par_iter()
+            .map(|ci| {
                 let base = ci * chunk_rows;
                 let end = (base + chunk_rows).min(rows);
                 let mut results = Vec::with_capacity(end - base);
@@ -8627,15 +8781,18 @@ pub fn matvec_q4k_q8_pair_into(
                     let [v0, v1] = unsafe {
                         dot_q4k_q8_0_2tok_neon(
                             rb,
-                            &preq0.scales, &preq0.quants,
-                            &preq1.scales, &preq1.quants,
+                            &preq0.scales,
+                            &preq0.quants,
+                            &preq1.scales,
+                            &preq1.quants,
                             blocks_per_row,
                         )
                     };
                     results.push((row, v0, v1));
                 }
                 results
-            }).collect();
+            })
+            .collect();
         for chunk in chunk_results {
             for (row, v0, v1) in chunk {
                 out0[row] = v0;
@@ -8648,8 +8805,10 @@ pub fn matvec_q4k_q8_pair_into(
             let [v0, v1] = unsafe {
                 dot_q4k_q8_0_2tok_neon(
                     rb,
-                    &preq0.scales, &preq0.quants,
-                    &preq1.scales, &preq1.quants,
+                    &preq0.scales,
+                    &preq0.quants,
+                    &preq1.scales,
+                    &preq1.quants,
                     blocks_per_row,
                 )
             };
@@ -8728,12 +8887,7 @@ pub fn matvec_q4k_q8_into(
                         let start = row * bytes_per_row;
                         let row_bytes = &weight_data[start..start + bytes_per_row];
                         chunk[len - 1] = unsafe {
-                            dot_q4k_q8_0_neon(
-                                row_bytes,
-                                &preq.scales,
-                                &preq.quants,
-                                blocks_per_row,
-                            )
+                            dot_q4k_q8_0_neon(row_bytes, &preq.scales, &preq.quants, blocks_per_row)
                         };
                     }
                 });
@@ -8774,7 +8928,10 @@ pub fn matvec_q4k_q8_into(
         }
     }
 
-    #[cfg(all(not(target_arch = "aarch64"), not(all(target_arch = "wasm32", target_feature = "simd128"))))]
+    #[cfg(all(
+        not(target_arch = "aarch64"),
+        not(all(target_arch = "wasm32", target_feature = "simd128"))
+    ))]
     {
         for (i, out) in output.iter_mut().enumerate() {
             let start = i * bytes_per_row;
@@ -11066,8 +11223,7 @@ mod tests {
         // The Q8_0 input quantization adds ~0.4% noise per element, so we
         // allow a loose tolerance relative to the magnitude of the result.
         for i in 0..rows {
-            let rel =
-                ((f32_out[i] - q8_out[i]).abs()) / (f32_out[i].abs().max(1e-3));
+            let rel = ((f32_out[i] - q8_out[i]).abs()) / (f32_out[i].abs().max(1e-3));
             assert!(
                 rel < 0.05,
                 "row {i}: f32={}, q8={}, rel={}",
@@ -11108,8 +11264,7 @@ mod tests {
         }
 
         // Fused argmax.
-        let (fused_idx, fused_val) =
-            matvec_argmax_q4k_q8_preq(&q4k_data, &preq, rows, cols);
+        let (fused_idx, fused_val) = matvec_argmax_q4k_q8_preq(&q4k_data, &preq, rows, cols);
 
         assert_eq!(
             fused_idx, full_best_idx,
@@ -11143,8 +11298,7 @@ mod tests {
         let preq = quantize_input_q8_0(&input);
 
         let f32_result = dot_q4k_f32_scalar(&block, &input, 1);
-        let q8_result =
-            dot_q4k_q8_0_scalar(&block, &preq.scales, &preq.quants, 1);
+        let q8_result = dot_q4k_q8_0_scalar(&block, &preq.scales, &preq.quants, 1);
 
         // Q8_0 input adds ~0.4% per-element quantization noise. For a single
         // Q4_K block this gives at most a few percent of the per-element
