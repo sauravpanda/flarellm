@@ -469,6 +469,17 @@ impl FlareEngine {
             );
         }
 
+        // Warm-start: run a throwaway forward pass now so the first real
+        // token after `begin_stream` doesn't pay the one-time cost of cold
+        // weight prefetches, cold branch predictors, and the JIT tiering
+        // up.  `Model::warmup` resets the KV cache afterwards so the engine
+        // is in the same state the caller would see without this call.
+        //
+        // This moves the TTFT cost from the first inference tick (where
+        // the user is waiting) into the load phase (where they're already
+        // waiting on the download).  Net user-visible latency is lower.
+        model.warmup();
+
         Ok(FlareEngine {
             model,
             chat_template,
@@ -1484,11 +1495,16 @@ impl FlareEngine {
     fn begin_stream_impl(&mut self, prompt_tokens: &[u32], max_tokens: u32) {
         let effective = self.with_bos(prompt_tokens);
         let t0 = now_ms();
-        let mut pos = 0usize;
-        for &tok in effective.iter() {
-            self.model.forward(tok, pos);
-            pos += 1;
-        }
+        // Batched prefill: one pass over all prompt tokens using the tuned
+        // batched_dequant_matmul path (2×4 tile on aarch64 / 2×2 on wasm+
+        // simd128) instead of N sequential single-token forward() calls.
+        // Dramatically lower TTFT on multi-token prompts.
+        let pos = if effective.is_empty() {
+            0
+        } else {
+            let _ = self.model.forward_prefill(&effective);
+            effective.len()
+        };
         self.last_prefill_ms = now_ms() - t0;
         self.last_decode_ms = 0.0;
         self.last_tokens_generated = 0;
@@ -1526,12 +1542,14 @@ impl FlareEngine {
         }
         let last_idx = effective.len() - 1;
         let t0 = now_ms();
-        // Prefill all tokens except the last.
-        let mut pos = 0usize;
-        for &tok in &effective[..last_idx] {
-            self.model.forward(tok, pos);
-            pos += 1;
-        }
+        // Batched prefill for the all-but-last tokens; the last prompt token
+        // is held back so next_token() runs it at its correct RoPE position.
+        let pos = if last_idx == 0 {
+            0
+        } else {
+            let _ = self.model.forward_prefill(&effective[..last_idx]);
+            last_idx
+        };
         self.last_prefill_ms = now_ms() - t0;
         self.last_decode_ms = 0.0;
         self.last_tokens_generated = 0;
