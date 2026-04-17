@@ -2,7 +2,9 @@ use std::collections::HashMap;
 use std::io::{Read, Seek};
 
 use flare_core::config::{Architecture, ModelConfig};
-use flare_core::model::{ExpertWeights, LayerWeights, ModelWeights, MoeLayerWeights, RawLayerWeights, RawWeight};
+use flare_core::model::{
+    ExpertWeights, LayerWeights, ModelWeights, MoeLayerWeights, RawLayerWeights, RawWeight,
+};
 use flare_core::tensor::Tensor;
 
 use crate::gguf::{GgufError, GgufFile};

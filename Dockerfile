@@ -31,9 +31,13 @@ COPY flare-gpu        flare-gpu/
 COPY flare-simd       flare-simd/
 COPY flare-server     flare-server/
 COPY flarellm         flarellm/
-# flare-web is WASM-only; skip it to avoid needing wasm-pack in the builder
+# flare-web and flare-edge are workspace members the server binary doesn't
+# need; stub them out with minimal lib.rs files so cargo can resolve the
+# workspace without pulling in their (wasm-pack / edge-runtime) toolchains.
 COPY flare-web/Cargo.toml flare-web/Cargo.toml
 RUN mkdir -p flare-web/src && echo 'fn main() {}' > flare-web/src/lib.rs
+COPY flare-edge/Cargo.toml flare-edge/Cargo.toml
+RUN mkdir -p flare-edge/src && echo 'fn main() {}' > flare-edge/src/lib.rs
 
 RUN cargo build --release -p flarellm-server
 
