@@ -540,6 +540,14 @@ impl FlareEngine {
         match WebGpuBackend::new().await {
             Ok(gpu) => {
                 self.model.set_backend(Box::new(gpu));
+                // Upload the raw quantized weights (populated in `load`) to
+                // GPU buffers so forward() takes the fused single-encoder
+                // path instead of falling back to CPU SIMD.  Without this,
+                // the GPU backend is active but `has_gpu_weights() == false`
+                // and every matmul still runs on the CPU — silently wasting
+                // the WebGPU init.  No-ops if raw weights aren't present or
+                // the backend doesn't support GPU forward.
+                self.model.upload_weights_to_gpu();
                 true
             }
             Err(_) => false,
@@ -579,6 +587,9 @@ impl FlareEngine {
         match result {
             Ok(gpu) => {
                 self.model.set_backend(Box::new(gpu));
+                // See `init_gpu` — upload raw quantized weights to GPU buffers
+                // so forward() takes the fused single-encoder path.
+                self.model.upload_weights_to_gpu();
                 true
             }
             Err(_) => false,
