@@ -609,6 +609,34 @@ impl FlareEngine {
         self.model.backend().pipeline_cache_data()
     }
 
+    /// Diagnostic snapshot of the current compute backend as a JSON string.
+    ///
+    /// Returns an object with:
+    /// - `backend` — backend identifier (`"cpu"` or `"webgpu"`).
+    /// - `has_gpu_weights` — `true` once weights have been uploaded to GPU buffers.
+    /// - `has_gpu_kv_cache` — `true` once GPU-resident KV storage is initialised.
+    /// - `has_raw_weights` — `true` once raw quantized weights are held on the CPU side.
+    ///
+    /// Benchmarks can call this after `init_gpu()` to confirm WebGPU is
+    /// actually driving inference instead of silently falling back to CPU.
+    ///
+    /// ```javascript
+    /// await engine.init_gpu();
+    /// console.log(JSON.parse(engine.backend_info()));
+    /// // { backend: "webgpu", has_gpu_weights: true, has_gpu_kv_cache: true, has_raw_weights: true }
+    /// ```
+    #[wasm_bindgen]
+    pub fn backend_info(&self) -> String {
+        let backend = self.model.backend();
+        format!(
+            "{{\"backend\":\"{}\",\"has_gpu_weights\":{},\"has_gpu_kv_cache\":{},\"has_raw_weights\":{}}}",
+            backend.name(),
+            backend.has_gpu_weights(),
+            backend.has_gpu_kv_cache(),
+            self.model.has_raw_weights()
+        )
+    }
+
     /// Run a single dummy forward pass to pre-compile WebGPU shader pipelines.
     ///
     /// WebGPU (and wgpu on native) compiles shader pipelines lazily on the
