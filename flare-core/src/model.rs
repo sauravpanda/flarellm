@@ -1254,7 +1254,7 @@ impl Model {
     /// The `clock` function must return a monotonic millisecond timestamp
     /// (e.g. `performance.now()` on the web, `Instant::now().elapsed()` on
     /// native).  After enabling, the next `forward_prefill` call records a
-    /// `PrefillProfile` retrievable via [`take_prefill_profile`].
+    /// `PrefillProfile` retrievable via [`Model::take_prefill_profile`].
     pub fn enable_prefill_profiling(&mut self, clock: fn() -> f64) {
         self.clock_fn = Some(clock);
         self.prefill_profile = Some(PrefillProfile::default());
