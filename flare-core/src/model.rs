@@ -1075,6 +1075,46 @@ pub struct ModelWeights {
     pub output_weight: Tensor,
 }
 
+/// Accumulate elapsed ms into `PrefillProfile.$field` when profiling is active.
+///
+/// Expanded inline at each phase boundary so the borrow checker sees disjoint
+/// field borrows (`self.clock_fn` + `self.prefill_profile`) rather than a full
+/// `&mut self` borrow, letting us record timings while `raw_layer` is live.
+macro_rules! record_phase {
+    ($self:expr, $start:expr, $field:ident) => {
+        if let Some(clock) = $self.clock_fn {
+            if let (Some(t0), Some(p)) = ($start, $self.prefill_profile.as_mut()) {
+                p.$field += (clock() - t0) as f32;
+            }
+        }
+    };
+}
+
+/// Wall-clock breakdown of a single `forward_prefill` call, grouped by phase.
+///
+/// All per-layer fields are summed across layers.  Populated only while
+/// profiling is enabled via [`Model::enable_prefill_profiling`].
+#[derive(Debug, Default, Clone)]
+pub struct PrefillProfile {
+    pub seq_len: usize,
+    pub num_layers: usize,
+    pub embed_ms: f32,
+    pub attn_norm_ms: f32,
+    pub qkv_proj_ms: f32,
+    pub rope_ms: f32,
+    pub attention_ms: f32,
+    pub attn_out_proj_ms: f32,
+    pub ffn_norm_ms: f32,
+    pub gate_up_ms: f32,
+    pub silu_mul_ms: f32,
+    pub down_ms: f32,
+    pub residual_ms: f32,
+    pub kv_write_ms: f32,
+    pub final_norm_ms: f32,
+    pub lm_head_ms: f32,
+    pub total_ms: f32,
+}
+
 /// The core model that runs inference.
 ///
 /// By default uses `CpuBackend` for all compute operations. Call
@@ -1119,6 +1159,13 @@ pub struct Model {
     /// Pre-computed cos/sin lookup table for RoPE, eliminating transcendental
     /// function calls from the per-token forward path.
     rope_table: RopeTable,
+    /// Wall-clock profile of the most recent `forward_prefill` call, when
+    /// profiling is enabled.  `None` means profiling is disabled.
+    prefill_profile: Option<PrefillProfile>,
+    /// Monotonic millisecond clock used by the profiler.  When `Some`,
+    /// `forward_prefill` records per-phase timings.  When `None`, the
+    /// profiling hooks compile to a single `is_some()` check per phase.
+    clock_fn: Option<fn() -> f64>,
 }
 
 impl Model {
@@ -1197,7 +1244,43 @@ impl Model {
             fused_f32_qkv: None,
             fused_f32_gate_up: None,
             rope_table,
+            prefill_profile: None,
+            clock_fn: None,
         }
+    }
+
+    /// Enable per-phase wall-clock profiling for `forward_prefill`.
+    ///
+    /// The `clock` function must return a monotonic millisecond timestamp
+    /// (e.g. `performance.now()` on the web, `Instant::now().elapsed()` on
+    /// native).  After enabling, the next `forward_prefill` call records a
+    /// `PrefillProfile` retrievable via [`Model::take_prefill_profile`].
+    pub fn enable_prefill_profiling(&mut self, clock: fn() -> f64) {
+        self.clock_fn = Some(clock);
+        self.prefill_profile = Some(PrefillProfile::default());
+    }
+
+    /// Disable prefill profiling.  Subsequent `forward_prefill` calls run
+    /// without any timing overhead.
+    pub fn disable_prefill_profiling(&mut self) {
+        self.clock_fn = None;
+        self.prefill_profile = None;
+    }
+
+    /// Consume and return the most recent prefill profile, leaving an empty
+    /// profile in place for the next call.  Returns `None` if profiling is
+    /// disabled.
+    pub fn take_prefill_profile(&mut self) -> Option<PrefillProfile> {
+        let snapshot = self.prefill_profile.take();
+        if self.clock_fn.is_some() {
+            self.prefill_profile = Some(PrefillProfile::default());
+        }
+        snapshot
+    }
+
+    #[inline]
+    fn tick(&self) -> Option<f64> {
+        self.clock_fn.map(|f| f())
     }
 
     /// Attach raw quantized weights for GPU fused-kernel inference.
@@ -2312,6 +2395,8 @@ impl Model {
             "forward_prefill requires at least one token"
         );
 
+        let t_total = self.tick();
+
         let config = self.config.clone();
         let dim = config.hidden_dim;
         let head_dim = config.head_dim;
@@ -2322,6 +2407,7 @@ impl Model {
         let seq_len = tokens.len();
 
         // Embed all tokens: x_batch [seq_len * dim], row-major (row = token position)
+        let t_embed = self.tick();
         let mut x_batch: Vec<f32> = {
             let embed_data = self.weights.token_embedding.data();
             tokens
@@ -2332,6 +2418,7 @@ impl Model {
                 })
                 .collect()
         };
+        record_phase!(self, t_embed, embed_ms);
 
         // Per-layer K/V tensors computed locally (used for causal attention;
         // written to the KV cache at the end).
@@ -2343,6 +2430,7 @@ impl Model {
             // --- Attention block ---
 
             // RMSNorm all rows — single GPU dispatch.
+            let t_attn_norm = self.tick();
             let normed_batch: Vec<f32> = {
                 let attn_norm: Vec<f32> = self.weights.layers[layer_idx].attn_norm.data().to_vec();
                 self.backend.batched_rmsnorm(
@@ -2353,6 +2441,7 @@ impl Model {
                     config.rms_norm_eps,
                 )
             };
+            record_phase!(self, t_attn_norm, attn_norm_ms);
 
             // Q/K/V projections: single batched dispatch per matrix, then per-token bias+RoPE.
             // When raw quantized weights are available and the backend supports fused
@@ -2382,6 +2471,7 @@ impl Model {
                 } else {
                     None
                 };
+                let t_qkv = self.tick();
                 let q_proj =
                     if let Some(rw) = raw_layer.filter(|l| raw_weight_cpu_dispatchable(&l.wq)) {
                         self.backend
@@ -2409,6 +2499,7 @@ impl Model {
                         self.backend
                             .batched_matmul(&wv, &normed_batch, kv_dim, dim, seq_len)
                     };
+                record_phase!(self, t_qkv, qkv_proj_ms);
 
                 // Apply biases in-place (CPU broadcast, cheap; rare in most models).
                 let mut q_proj = q_proj;
@@ -2440,6 +2531,7 @@ impl Model {
                 }
 
                 // RoPE: single GPU dispatch instead of 2 × seq_len CPU calls.
+                let t_rope = self.tick();
                 let q_roped = self.backend.batched_rope(
                     &q_proj,
                     num_heads,
@@ -2456,6 +2548,7 @@ impl Model {
                     0,
                     config.rope_theta,
                 );
+                record_phase!(self, t_rope, rope_ms);
 
                 q_batch.copy_from_slice(&q_roped);
                 for t in 0..seq_len {
@@ -2467,6 +2560,7 @@ impl Model {
             }
 
             // Causal self-attention: dispatch to GPU (if available) or CPU fallback.
+            let t_attn = self.tick();
             let attn_out_batch = self.backend.prefill_attention_gpu(
                 &q_batch,
                 &k_all[layer_idx],
@@ -2477,6 +2571,7 @@ impl Model {
                 head_dim,
                 config.attn_logit_softcap,
             );
+            record_phase!(self, t_attn, attention_ms);
 
             // Output projection + optional post-attention norm + residual
             {
@@ -2491,6 +2586,7 @@ impl Model {
                 } else {
                     None
                 };
+                let t_attn_out = self.tick();
                 let proj_batch =
                     if let Some(rw) = raw_layer.filter(|l| raw_weight_cpu_dispatchable(&l.wo)) {
                         self.backend
@@ -2500,7 +2596,9 @@ impl Model {
                         self.backend
                             .batched_matmul(&wo, &attn_out_batch, dim, q_dim, seq_len)
                     };
+                record_phase!(self, t_attn_out, attn_out_proj_ms);
 
+                let t_resid = self.tick();
                 for t in 0..seq_len {
                     let proj = proj_batch[t * dim..(t + 1) * dim].to_vec();
                     let contrib = match &post_attn_norm {
@@ -2511,14 +2609,17 @@ impl Model {
                         x_batch[t * dim + i] += contrib[i];
                     }
                 }
+                record_phase!(self, t_resid, residual_ms);
             }
 
             // --- FFN block ---
+            let t_ffn_norm = self.tick();
             let normed_batch2: Vec<f32> = {
                 let ffn_norm: Vec<f32> = self.weights.layers[layer_idx].ffn_norm.data().to_vec();
                 self.backend
                     .batched_rmsnorm(&x_batch, &ffn_norm, dim, seq_len, config.rms_norm_eps)
             };
+            record_phase!(self, t_ffn_norm, ffn_norm_ms);
 
             {
                 let inter = config.intermediate_dim;
@@ -2555,6 +2656,7 @@ impl Model {
                     } else {
                         None
                     };
+                    let t_gate_up = self.tick();
                     let gate_batch = if let Some(rw) =
                         raw_layer.filter(|l| raw_weight_cpu_dispatchable(&l.w_gate))
                     {
@@ -2576,8 +2678,10 @@ impl Model {
                         self.backend
                             .batched_matmul(&w_up, &normed_batch2, inter, dim, seq_len)
                     };
+                    record_phase!(self, t_gate_up, gate_up_ms);
 
                     // Per-token silu_mul / gelu_mul (CPU arithmetic, no GPU dispatch).
+                    let t_silu = self.tick();
                     let ffn_hidden_batch: Vec<f32> = (0..seq_len)
                         .flat_map(|t| {
                             let gate_t = &gate_batch[t * inter..(t + 1) * inter];
@@ -2589,9 +2693,13 @@ impl Model {
                             }
                         })
                         .collect();
+                    record_phase!(self, t_silu, silu_mul_ms);
 
                     // Single batched dispatch for the down projection.
-                    if let Some(rw) = raw_layer.filter(|l| raw_weight_cpu_dispatchable(&l.w_down)) {
+                    let t_down = self.tick();
+                    let down_result = if let Some(rw) =
+                        raw_layer.filter(|l| raw_weight_cpu_dispatchable(&l.w_down))
+                    {
                         self.backend
                             .batched_dequant_matmul(&rw.w_down, &ffn_hidden_batch, seq_len)
                     } else {
@@ -2599,9 +2707,12 @@ impl Model {
                             self.weights.layers[layer_idx].w_down.data().to_vec();
                         self.backend
                             .batched_matmul(&w_down, &ffn_hidden_batch, dim, inter, seq_len)
-                    }
+                    };
+                    record_phase!(self, t_down, down_ms);
+                    down_result
                 }; // end dense FFN / MoE branch
 
+                let t_resid_ffn = self.tick();
                 for t in 0..seq_len {
                     let down = down_batch[t * dim..(t + 1) * dim].to_vec();
                     let contrib = match &post_ffn_norm {
@@ -2612,11 +2723,13 @@ impl Model {
                         x_batch[t * dim + i] += contrib[i];
                     }
                 }
+                record_phase!(self, t_resid_ffn, residual_ms);
             }
         }
 
         // Write computed K/V to CPU cache and GPU cache (if initialized),
         // then advance the ring-buffer position once per token.
+        let t_kv_write = self.tick();
         let cache_pos = self.kv_cache.position(); // position before prefill tokens
         for t in 0..seq_len {
             for layer_idx in 0..num_layers {
@@ -2640,13 +2753,16 @@ impl Model {
                 qkv.advance();
             }
         }
+        record_phase!(self, t_kv_write, kv_write_ms);
 
         // Final RMSNorm + output projection on the last token only
+        let t_final_norm = self.tick();
         let last = seq_len - 1;
         let last_x = &x_batch[last * dim..(last + 1) * dim];
         let normed_final =
             self.backend
                 .rmsnorm_vec(last_x, self.weights.output_norm.data(), config.rms_norm_eps);
+        record_phase!(self, t_final_norm, final_norm_ms);
 
         // Use the CPU SIMD matvec directly for the output projection.
         // The output weight matrix can exceed GPU buffer limits for large vocabs
@@ -2661,6 +2777,7 @@ impl Model {
             .raw_output_weight
             .as_ref()
             .is_some_and(|rw| rw.format == WeightFormat::Q8_0 && use_quant_for_dim(dim));
+        let t_lm_head = self.tick();
         let mut logits = if use_output_q4k {
             let row = self.raw_output_weight.as_ref().unwrap();
             let mut out = vec![0.0f32; config.vocab_size];
@@ -2687,6 +2804,13 @@ impl Model {
             for l in &mut logits {
                 *l = (*l / cap).tanh() * cap;
             }
+        }
+        record_phase!(self, t_lm_head, lm_head_ms);
+
+        record_phase!(self, t_total, total_ms);
+        if let Some(profile) = self.prefill_profile.as_mut() {
+            profile.seq_len = seq_len;
+            profile.num_layers = num_layers;
         }
 
         Tensor::from_vec(logits, &[config.vocab_size]).unwrap()

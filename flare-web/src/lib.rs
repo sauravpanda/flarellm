@@ -180,6 +180,12 @@ fn detect_chat_template(gguf: &GgufFile) -> ChatTemplate {
     }
 }
 
+/// Bare `fn` pointer wrapper around [`now_ms`] for `Model::enable_prefill_profiling`,
+/// which requires a `fn() -> f64` (not a closure or method).
+fn now_ms_f64() -> f64 {
+    now_ms()
+}
+
 /// Return the current wall-clock time in milliseconds.
 ///
 /// In WASM uses `performance.now()` for sub-millisecond accuracy.
@@ -635,6 +641,66 @@ impl FlareEngine {
             backend.has_gpu_kv_cache(),
             self.model.has_raw_weights()
         )
+    }
+
+    /// Turn on per-phase wall-clock profiling of `forward_prefill`.
+    ///
+    /// After calling this, the next `begin_stream*` / `forward_prefill` that runs
+    /// over more than one token records a breakdown of where time is spent
+    /// (embed, attention, FFN, KV writes, LM head, etc.).  Retrieve the JSON
+    /// snapshot via [`FlareEngine::prefill_profile_json`].
+    ///
+    /// Overhead when enabled: one `performance.now()` call per phase boundary
+    /// (~15 per layer).  Turn off via [`FlareEngine::disable_prefill_profiling`]
+    /// before production inference.
+    #[wasm_bindgen]
+    pub fn enable_prefill_profiling(&mut self) {
+        self.model.enable_prefill_profiling(now_ms_f64);
+    }
+
+    /// Turn off prefill profiling.  Subsequent prefill calls run with zero
+    /// timing overhead.
+    #[wasm_bindgen]
+    pub fn disable_prefill_profiling(&mut self) {
+        self.model.disable_prefill_profiling();
+    }
+
+    /// JSON snapshot of the most recent prefill profile, or `"null"` if
+    /// profiling is disabled or no prefill has run since it was enabled.
+    ///
+    /// All `*_ms` fields are wall-clock milliseconds, summed across all
+    /// transformer layers where applicable.  `seq_len` is the number of
+    /// prompt tokens processed; `num_layers` is the transformer depth.
+    #[wasm_bindgen]
+    pub fn prefill_profile_json(&mut self) -> String {
+        match self.model.take_prefill_profile() {
+            None => "null".to_string(),
+            Some(p) => format!(
+                "{{\"seq_len\":{},\"num_layers\":{},\
+                 \"embed_ms\":{:.3},\"attn_norm_ms\":{:.3},\"qkv_proj_ms\":{:.3},\
+                 \"rope_ms\":{:.3},\"attention_ms\":{:.3},\"attn_out_proj_ms\":{:.3},\
+                 \"ffn_norm_ms\":{:.3},\"gate_up_ms\":{:.3},\"silu_mul_ms\":{:.3},\
+                 \"down_ms\":{:.3},\"residual_ms\":{:.3},\"kv_write_ms\":{:.3},\
+                 \"final_norm_ms\":{:.3},\"lm_head_ms\":{:.3},\"total_ms\":{:.3}}}",
+                p.seq_len,
+                p.num_layers,
+                p.embed_ms,
+                p.attn_norm_ms,
+                p.qkv_proj_ms,
+                p.rope_ms,
+                p.attention_ms,
+                p.attn_out_proj_ms,
+                p.ffn_norm_ms,
+                p.gate_up_ms,
+                p.silu_mul_ms,
+                p.down_ms,
+                p.residual_ms,
+                p.kv_write_ms,
+                p.final_norm_ms,
+                p.lm_head_ms,
+                p.total_ms,
+            ),
+        }
     }
 
     /// Run a single dummy forward pass to pre-compile WebGPU shader pipelines.
