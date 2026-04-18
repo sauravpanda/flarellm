@@ -546,6 +546,14 @@ pub trait ComputeBackend: Send + Sync {
     ) -> Option<Vec<f32>> {
         None
     }
+
+    /// Short identifier for this backend, used in diagnostics.
+    ///
+    /// Defaults to `"cpu"`. GPU backends should override to return e.g.
+    /// `"webgpu"` so consumers can confirm which compute path is active.
+    fn name(&self) -> &'static str {
+        "cpu"
+    }
 }
 
 /// Default CPU compute backend. Uses optimized scalar loops.

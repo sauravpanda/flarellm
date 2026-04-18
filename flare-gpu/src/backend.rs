@@ -4970,6 +4970,10 @@ impl ComputeBackend for WebGpuBackend {
         WebGpuBackend::has_gpu_weights(self)
     }
 
+    fn name(&self) -> &'static str {
+        "webgpu"
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn forward_single_token_gpu(
         &self,
