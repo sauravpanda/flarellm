@@ -1,11 +1,11 @@
 /**
- * @module @aspect/flare
+ * @module @sauravpanda/flare
  *
  * WASM-first LLM inference engine with WebGPU acceleration.
  *
  * @example
  * ```typescript
- * import { Flare } from '@aspect/flare';
+ * import { Flare } from '@sauravpanda/flare';
  *
  * const flare = await Flare.init();
  * console.log('WebGPU available:', flare.webgpuAvailable);

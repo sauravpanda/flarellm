@@ -144,7 +144,7 @@ open flare-web/demo/index.html
 ```
 
 ```javascript
-import init, { FlareEngine } from '@aspect/flare';
+import init, { FlareEngine } from '@sauravpanda/flare';
 
 await init();
 const buffer = await fetch('model.gguf').then(r => r.arrayBuffer());
