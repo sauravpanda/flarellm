@@ -469,16 +469,14 @@ impl FlareEngine {
             );
         }
 
-        // Warm-start: run a throwaway forward pass now so the first real
-        // token after `begin_stream` doesn't pay the one-time cost of cold
-        // weight prefetches, cold branch predictors, and the JIT tiering
-        // up.  `Model::warmup` resets the KV cache afterwards so the engine
-        // is in the same state the caller would see without this call.
-        //
-        // This moves the TTFT cost from the first inference tick (where
-        // the user is waiting) into the load phase (where they're already
-        // waiting on the download).  Net user-visible latency is lower.
-        model.warmup();
+        // Note: no explicit warm-up here.  The first `begin_stream` call
+        // runs `forward_prefill` over the prompt, which pages in the same
+        // weight pages and warms the same CPU caches as a synthetic warm-up
+        // forward would.  Adding a throwaway forward(0, 0) at load time cost
+        // ~500 ms of load latency for <100 ms of TTFT benefit (measured on
+        // BrowserAI's SmolLM2-135M benchmark), which is a net UX loss: load
+        // is a one-shot visible wait, and the batched prefill already
+        // handles the cold-cache work on the first real request.
 
         Ok(FlareEngine {
             model,
