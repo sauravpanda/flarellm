@@ -469,14 +469,17 @@ impl FlareEngine {
             );
         }
 
-        // Note: no explicit warm-up here.  The first `begin_stream` call
-        // runs `forward_prefill` over the prompt, which pages in the same
-        // weight pages and warms the same CPU caches as a synthetic warm-up
-        // forward would.  Adding a throwaway forward(0, 0) at load time cost
-        // ~500 ms of load latency for <100 ms of TTFT benefit (measured on
-        // BrowserAI's SmolLM2-135M benchmark), which is a net UX loss: load
-        // is a one-shot visible wait, and the batched prefill already
-        // handles the cold-cache work on the first real request.
+        // Warm-up: run a throwaway forward(0, 0) + KV reset so the decode
+        // path's hot kernels are fully tier-up'd and weight pages are resident
+        // before the first real inference.
+        //
+        // I initially removed this in 0.2.6 thinking batched prefill would
+        // cover it — it doesn't.  Dropping warmup regressed SmolLM2-135M
+        // decode from a stable 72 tok/s (0.2.5) to 40 tok/s averaged with a
+        // 20-73 range (0.2.6): the first few decode calls run cold and drag
+        // the average down.  Load-time cost is ~500 ms; paid once per
+        // session, saves ~30 tok/s on every decoded token — clear net win.
+        model.warmup();
 
         Ok(FlareEngine {
             model,
