@@ -188,15 +188,27 @@ fn now_ms_f64() -> f64 {
 
 /// Return the current wall-clock time in milliseconds.
 ///
-/// In WASM uses `performance.now()` for sub-millisecond accuracy.
+/// In WASM, tries `window.performance.now()` on the main thread first, then
+/// `self.performance.now()` when running inside a Web Worker (where `window`
+/// is undefined), finally falling back to `Date.now()` if neither is available.
+/// Sub-millisecond when `performance` is reachable, millisecond otherwise.
 /// In native builds uses `SystemTime` for coarser but portable timing.
 fn now_ms() -> f64 {
     #[cfg(target_arch = "wasm32")]
     {
-        web_sys::window()
-            .and_then(|w| w.performance())
-            .map(|p| p.now())
-            .unwrap_or(0.0)
+        if let Some(perf) = web_sys::window().and_then(|w| w.performance()) {
+            return perf.now();
+        }
+        // Worker context: `window` is undefined but the worker's global scope
+        // has its own `performance` object.  Reach it via `js_sys::global()`
+        // cast to `WorkerGlobalScope`.
+        if let Ok(scope) = js_sys::global().dyn_into::<web_sys::WorkerGlobalScope>() {
+            if let Some(perf) = scope.performance() {
+                return perf.now();
+            }
+        }
+        // Last resort — Date.now has only 1ms resolution but always works.
+        js_sys::Date::now()
     }
     #[cfg(not(target_arch = "wasm32"))]
     {
