@@ -26,6 +26,7 @@ web-sys = { workspace = true, features = [
     "Worker",
     "WorkerGlobalScope",
     "DedicatedWorkerGlobalScope",
+    "WorkerNavigator",
     "Request",
     "Response",
     "Cache",
