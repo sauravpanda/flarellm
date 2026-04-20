@@ -59,17 +59,31 @@ pub fn init_thread_pool(num_threads: usize) -> Result<(), JsValue> {
 }
 
 /// Check if WebGPU is available in the current browser.
+///
+/// Works on both the main thread (reads `window.navigator`) and inside a
+/// dedicated Web Worker (reads `self.navigator` via `WorkerGlobalScope`).
+/// Returning `true` means `WebGpuBackend::new()` has a chance of succeeding;
+/// it does not guarantee an adapter or device will actually be granted.
 #[wasm_bindgen]
 pub fn webgpu_available() -> bool {
-    let window = match web_sys::window() {
-        Some(w) => w,
-        None => return false,
-    };
-
-    let navigator: JsValue = window.navigator().into();
-    js_sys::Reflect::get(&navigator, &JsValue::from_str("gpu"))
-        .map(|v| !v.is_undefined() && !v.is_null())
-        .unwrap_or(false)
+    // Try main-thread navigator first.
+    if let Some(nav) = web_sys::window().map(|w| JsValue::from(w.navigator())) {
+        if js_sys::Reflect::get(&nav, &JsValue::from_str("gpu"))
+            .map(|v| !v.is_undefined() && !v.is_null())
+            .unwrap_or(false)
+        {
+            return true;
+        }
+    }
+    // Worker context: `window` is undefined but the worker's global scope
+    // has its own navigator with `.gpu` in Chrome 113+, Safari 17.4+, etc.
+    if let Ok(scope) = js_sys::global().dyn_into::<web_sys::WorkerGlobalScope>() {
+        let nav: JsValue = scope.navigator().into();
+        return js_sys::Reflect::get(&nav, &JsValue::from_str("gpu"))
+            .map(|v| !v.is_undefined() && !v.is_null())
+            .unwrap_or(false);
+    }
+    false
 }
 
 /// Check if WebNN is available in the current browser.
