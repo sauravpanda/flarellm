@@ -34,7 +34,7 @@ use flare_core::tokenizer::{BpeTokenizer, Tokenizer};
 use flare_gpu::WebGpuBackend;
 use flare_loader::gguf::{GgufFile, MetadataValue};
 use flare_loader::tokenizer::GgufVocab;
-use flare_loader::weights::{load_model_weights_with_progress, load_model_weights_with_raw};
+use flare_loader::weights::{load_model_weights_with_progress, load_model_weights_with_raw_opt};
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 
@@ -484,12 +484,39 @@ impl FlareEngine {
         let config = gguf
             .to_model_config()
             .map_err(|e| JsError::new(&format!("Model config error: {e}")))?;
-        // Single-pass load: dequantized f32 tensors and raw quantized bytes
-        // come back from one read of the tensor data region, so quantized
-        // models light up the WASM SIMD128 matvec path without paying for a
-        // second full pass over weight bytes.
-        let (weights, raw_layers) = load_model_weights_with_raw(&gguf, &mut reader)
+        // Single-pass load with deferred f32 matmul dequant.
+        //
+        // For per-layer matmul weights (wq/wk/wv/wo/w_gate/w_up/w_down) we keep
+        // only the raw quantized bytes and leave an empty-data Tensor in their
+        // place.  The forward paths already prefer `raw_weights` whenever the
+        // backend reports `supports_dequant_matmul` (CPU Q8_0/Q4_K SIMD kernels
+        // and WebGPU fused dequant matvec), so the f32 copies were dead weight
+        // — ~270 MB of them for a 138 MB Q8_0 model.  That reclaimed headroom
+        // lets memory-constrained Chrome renderer tabs finish load instead of
+        // hitting per-renderer memory limits mid-parse.
+        //
+        // If the model has an unsupported quant format on any layer, the raw
+        // extraction returns `None`; we then fall back to the full f32 path
+        // by doing a second pass.  The fallback doesn't save memory but keeps
+        // mixed-quant models working.
+        let (weights, raw_layers) = load_model_weights_with_raw_opt(&gguf, &mut reader, true)
             .map_err(|e| JsError::new(&format!("Weight load error: {e}")))?;
+
+        let (weights, raw_layers) = match raw_layers {
+            Some(rl) => (weights, Some(rl)),
+            None => {
+                // Mixed-format model — f32 matmul tensors are empty placeholders
+                // from the skip-f32 pass.  Redo the load with f32 populated so
+                // the unsupported layers fall back to the f32 forward path.
+                web_sys::console::log_1(
+                    &"flare: mixed-quant model; re-reading with full f32 dequant".into(),
+                );
+                let mut reader = Cursor::new(gguf_bytes);
+                let (w, rl) = load_model_weights_with_raw_opt(&gguf, &mut reader, false)
+                    .map_err(|e| JsError::new(&format!("Weight load error: {e}")))?;
+                (w, rl)
+            }
+        };
 
         let mut model = Model::new(config.clone(), weights);
 
