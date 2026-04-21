@@ -448,6 +448,103 @@ impl GgufFile {
         Ok((tensors, raw_weights))
     }
 
+    /// Like [`Self::load_all_tensors_with_raw`] but skips the f32 dequantization
+    /// for tensors whose names appear in `skip_f32_for`, returning an
+    /// empty-data `Tensor` with the correct shape in place of the f32 copy.
+    ///
+    /// Used by the browser load path to cut peak WASM memory during parse:
+    /// the per-layer matmul weights (~270 MB of f32 on a 138 MB Q8_0 model)
+    /// are served from the raw bytes directly via fused dequant+matvec, so
+    /// their f32 representation is never actually read.  A skipped tensor
+    /// whose format cannot be retained as raw (unsupported quant format)
+    /// falls back to the normal f32 dequant path — the caller can detect
+    /// this by checking the raw_weights map.
+    pub fn load_all_tensors_with_raw_skipping_f32<R: Read + Seek>(
+        &self,
+        reader: &mut R,
+        skip_f32_for: &std::collections::HashSet<String>,
+    ) -> Result<(HashMap<String, Tensor>, HashMap<String, RawWeight>), GgufError> {
+        let mut tensors = HashMap::new();
+        let mut raw_weights = HashMap::new();
+        for info in &self.tensors {
+            let skip = skip_f32_for.contains(&info.name);
+            let (tensor, maybe_raw) =
+                self.read_tensor_data_with_raw_opt(reader, info, true, skip)?;
+            if let Some(raw) = maybe_raw {
+                raw_weights.insert(info.name.clone(), raw);
+            }
+            tensors.insert(info.name.clone(), tensor);
+        }
+        Ok((tensors, raw_weights))
+    }
+
+    /// Like [`Self::read_tensor_data_with_raw`] but with an extra flag that
+    /// skips the f32 dequantization step when the raw bytes are retained.
+    /// Returns an empty-data `Tensor` with the correct shape when skipped.
+    pub fn read_tensor_data_with_raw_opt<R: Read + Seek>(
+        &self,
+        reader: &mut R,
+        tensor_info: &TensorInfo,
+        keep_raw: bool,
+        skip_f32: bool,
+    ) -> Result<(Tensor, Option<RawWeight>), GgufError> {
+        let absolute_offset = self.tensor_data_offset + tensor_info.offset;
+        reader.seek(SeekFrom::Start(absolute_offset))?;
+
+        let byte_size = tensor_info.byte_size() as usize;
+        let mut raw = vec![0u8; byte_size];
+        reader.read_exact(&mut raw)?;
+
+        // If we're both keeping the raw bytes AND the caller has opted out of
+        // the f32 representation, don't allocate or decode the f32 buffer.
+        // Fall through to the normal path if the quant format isn't one we
+        // can keep as raw (i.e. `quant_to_weight_format` returns `None`).
+        let format = quant_to_weight_format(tensor_info.dtype);
+        let can_skip = skip_f32 && keep_raw && format.is_some();
+
+        let shape: Vec<usize> = tensor_info.dimensions.iter().map(|&d| d as usize).collect();
+        let numel = tensor_info.numel() as usize;
+
+        let tensor = if can_skip {
+            // Placeholder: zero-length f32 data, real shape.  The model code
+            // uses raw_weights instead of .data() for any tensor we skipped.
+            Tensor::from_vec(Vec::new(), &shape).unwrap_or_else(|_| {
+                // Shape parsing shouldn't fail for valid GGUF, but keep a
+                // total fallback that hands back a dummy 0-element tensor.
+                Tensor::from_vec(Vec::new(), &[0]).expect("0-element tensor")
+            })
+        } else {
+            let f32_data = dequantize_tensor(&raw, tensor_info.dtype, numel)?;
+            Tensor::from_vec(f32_data, &shape).map_err(|e| {
+                GgufError::Io(io::Error::new(io::ErrorKind::InvalidData, e.to_string()))
+            })?
+        };
+
+        let raw_weight = if keep_raw {
+            format.map(|format| {
+                let num_rows = tensor_info.dimensions.last().copied().unwrap_or(1) as usize;
+                let weights_per_block = format.weights_per_block();
+                let col_elements = tensor_info
+                    .dimensions
+                    .iter()
+                    .rev()
+                    .skip(1)
+                    .product::<u64>()
+                    .max(1) as usize;
+                let blocks_per_row = col_elements.div_ceil(weights_per_block);
+                RawWeight {
+                    data: raw,
+                    format,
+                    num_rows,
+                    blocks_per_row,
+                }
+            })
+        } else {
+            None
+        };
+        Ok((tensor, raw_weight))
+    }
+
     /// Read a single tensor's raw bytes without dequantizing, along with its
     /// shape and quantization format.
     ///

@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{Read, Seek};
 
 use flare_core::config::{Architecture, ModelConfig};
@@ -85,7 +85,48 @@ pub fn load_model_weights_with_raw<R: Read + Seek>(
     gguf: &GgufFile,
     reader: &mut R,
 ) -> Result<(ModelWeights, Option<Vec<RawLayerWeights>>), GgufError> {
-    let (tensors, mut raw_map) = gguf.load_all_tensors_with_raw(reader)?;
+    load_model_weights_with_raw_opt(gguf, reader, false)
+}
+
+/// Like [`load_model_weights_with_raw`] but when `skip_f32_for_matmul` is true,
+/// per-layer matmul weights (wq/wk/wv/wo/w_gate/w_up/w_down) skip the f32
+/// dequantization step and keep only their raw quantized bytes.
+///
+/// On a 138 MB SmolLM2 Q8_0 model this drops peak WASM memory during parse
+/// from ~680 MB to ~410 MB — the f32 copies of those 7 tensors per layer
+/// (~270 MB across 30 layers) are never allocated.  The forward paths
+/// already route through `raw_weights` whenever the backend reports
+/// `supports_dequant_matmul`, so the f32 buffers are dead weight for every
+/// consumer except non-SIMD CPU fallback on unsupported quant formats.
+///
+/// If any layer's matmul weight isn't in a raw-dispatchable format the
+/// returned `raw_layers` is `None`, and the matmul f32 Tensors for those
+/// layers will be empty — the caller is responsible for re-loading from
+/// the source in that case.
+pub fn load_model_weights_with_raw_opt<R: Read + Seek>(
+    gguf: &GgufFile,
+    reader: &mut R,
+    skip_f32_for_matmul: bool,
+) -> Result<(ModelWeights, Option<Vec<RawLayerWeights>>), GgufError> {
+    let (tensors, mut raw_map) = if skip_f32_for_matmul {
+        let mut skip: HashSet<String> = HashSet::new();
+        for i in 0..gguf.to_model_config()?.num_layers {
+            for suffix in [
+                "attn_q",
+                "attn_k",
+                "attn_v",
+                "attn_output",
+                "ffn_gate",
+                "ffn_up",
+                "ffn_down",
+            ] {
+                skip.insert(format!("blk.{i}.{suffix}.weight"));
+            }
+        }
+        gguf.load_all_tensors_with_raw_skipping_f32(reader, &skip)?
+    } else {
+        gguf.load_all_tensors_with_raw(reader)?
+    };
     let config = gguf.to_model_config()?;
 
     let token_embedding = find_tensor(
