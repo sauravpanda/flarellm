@@ -3821,6 +3821,12 @@ impl WebGpuBackend {
     /// * `token_embedding` — token embedding slice `[dim]`
     /// * `k_data_per_layer` — mutable slices for writing K back to CPU KV cache
     /// * `v_data_per_layer` — mutable slices for writing V back to CPU KV cache
+    ///
+    /// Sync variant of the GPU-resident forward pass.
+    ///
+    /// Deadlocks on wasm32 main-thread because the final `map_async` readback
+    /// can't fire while the JS event loop is frozen in a sync WASM call.
+    /// Use [`Self::forward_single_token_gpu_async`] in browsers.
     #[allow(clippy::too_many_arguments)]
     pub fn forward_single_token_gpu(
         &self,
@@ -3837,6 +3843,110 @@ impl WebGpuBackend {
         num_layers: usize,
         seq_len: usize,
     ) -> Vec<f32> {
+        let (staging, _size) = self.forward_single_token_gpu_submit(
+            token_embedding,
+            pos,
+            dim,
+            num_heads,
+            num_kv_heads,
+            head_dim,
+            intermediate_dim,
+            vocab_size,
+            rms_norm_eps,
+            rope_theta,
+            num_layers,
+            seq_len,
+        );
+
+        let slice = staging.slice(..);
+        let (tx, rx) = std::sync::mpsc::channel();
+        slice.map_async(wgpu::MapMode::Read, move |result| {
+            tx.send(result).ok();
+        });
+        self.device.poll(wgpu::Maintain::Wait);
+        rx.recv()
+            .expect("GPU readback channel closed")
+            .expect("GPU readback failed");
+        let data = slice.get_mapped_range();
+        let logits: Vec<f32> = bytemuck::cast_slice(&data).to_vec();
+        drop(data);
+        staging.unmap();
+        self.pool.return_staging(staging);
+        logits
+    }
+
+    /// Async variant — identical command-encoder build, but awaits the
+    /// logits readback so WebGPU's `map_async` callback can fire.  This is
+    /// the only path that works on wasm32 main thread and in Web Workers.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn forward_single_token_gpu_async(
+        &self,
+        token_embedding: &[f32],
+        pos: usize,
+        dim: usize,
+        num_heads: usize,
+        num_kv_heads: usize,
+        head_dim: usize,
+        intermediate_dim: usize,
+        vocab_size: usize,
+        rms_norm_eps: f32,
+        rope_theta: f32,
+        num_layers: usize,
+        seq_len: usize,
+    ) -> Vec<f32> {
+        let (staging, _size) = self.forward_single_token_gpu_submit(
+            token_embedding,
+            pos,
+            dim,
+            num_heads,
+            num_kv_heads,
+            head_dim,
+            intermediate_dim,
+            vocab_size,
+            rms_norm_eps,
+            rope_theta,
+            num_layers,
+            seq_len,
+        );
+
+        let slice = staging.slice(..);
+        let (tx, rx) = futures_channel::oneshot::channel();
+        slice.map_async(wgpu::MapMode::Read, move |result| {
+            let _ = tx.send(result);
+        });
+        #[cfg(not(target_arch = "wasm32"))]
+        self.device.poll(wgpu::Maintain::Wait);
+        rx.await
+            .expect("GPU readback channel closed")
+            .expect("GPU readback failed");
+        let data = slice.get_mapped_range();
+        let logits: Vec<f32> = bytemuck::cast_slice(&data).to_vec();
+        drop(data);
+        staging.unmap();
+        self.pool.return_staging(staging);
+        logits
+    }
+
+    /// Build the single-token forward command encoder + submit.  Returns the
+    /// staging buffer (caller reads back the logits via their preferred
+    /// sync or async path) and the output size in bytes.  Keeping the heavy
+    /// body private lets the sync and async wrappers share it verbatim.
+    #[allow(clippy::too_many_arguments)]
+    fn forward_single_token_gpu_submit(
+        &self,
+        token_embedding: &[f32],
+        pos: usize,
+        dim: usize,
+        num_heads: usize,
+        num_kv_heads: usize,
+        head_dim: usize,
+        intermediate_dim: usize,
+        vocab_size: usize,
+        rms_norm_eps: f32,
+        rope_theta: f32,
+        num_layers: usize,
+        seq_len: usize,
+    ) -> (wgpu::Buffer, u64) {
         let guard = self.gpu_weights.lock().expect("gpu_weights mutex poisoned");
         let weights = guard
             .as_ref()
@@ -4175,7 +4285,10 @@ impl WebGpuBackend {
             }
         }
 
-        // 17. Readback only the logits
+        // 17. Readback only the logits — defer the map_async + wait to the
+        // caller (sync / async wrapper).  We stage the copy here and submit
+        // the encoder so the GPU starts executing immediately, minimising the
+        // await latency in the async path.
         let logits_size = (vocab_size * 4) as u64;
         let staging = self.pool.get_staging(&self.device, logits_size);
         encoder.copy_buffer_to_buffer(logits_buf, 0, &staging, 0, logits_size);
@@ -4183,25 +4296,7 @@ impl WebGpuBackend {
         // Submit the ENTIRE forward pass as ONE command buffer.
         self.queue.submit(Some(encoder.finish()));
 
-        // Map and read back logits
-        let slice = staging.slice(..);
-        let (sender, receiver) = std::sync::mpsc::channel();
-        slice.map_async(wgpu::MapMode::Read, move |result| {
-            sender.send(result).ok();
-        });
-        self.device.poll(wgpu::Maintain::Wait);
-        receiver
-            .recv()
-            .expect("GPU readback channel closed")
-            .expect("GPU readback failed");
-
-        let data = slice.get_mapped_range();
-        let logits: Vec<f32> = bytemuck::cast_slice(&data).to_vec();
-        drop(data);
-        staging.unmap();
-        self.pool.return_staging(staging);
-
-        logits
+        (staging, logits_size)
     }
 }
 
@@ -5068,6 +5163,47 @@ impl ComputeBackend for WebGpuBackend {
             num_layers,
             seq_len,
         ))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn forward_single_token_gpu_async<'a>(
+        &'a self,
+        token_embedding: &'a [f32],
+        pos: usize,
+        dim: usize,
+        num_heads: usize,
+        num_kv_heads: usize,
+        head_dim: usize,
+        intermediate_dim: usize,
+        vocab_size: usize,
+        rms_norm_eps: f32,
+        rope_theta: f32,
+        num_layers: usize,
+        seq_len: usize,
+    ) -> core::pin::Pin<Box<dyn core::future::Future<Output = Option<Vec<f32>>> + 'a>> {
+        Box::pin(async move {
+            if !WebGpuBackend::has_gpu_weights(self) || !self.has_gpu_kv_cache() {
+                return None;
+            }
+            Some(
+                WebGpuBackend::forward_single_token_gpu_async(
+                    self,
+                    token_embedding,
+                    pos,
+                    dim,
+                    num_heads,
+                    num_kv_heads,
+                    head_dim,
+                    intermediate_dim,
+                    vocab_size,
+                    rms_norm_eps,
+                    rope_theta,
+                    num_layers,
+                    seq_len,
+                )
+                .await,
+            )
+        })
     }
 }
 

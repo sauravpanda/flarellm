@@ -528,6 +528,11 @@ pub trait ComputeBackend: Send + Sync {
     ///
     /// Returns `None` if GPU weights/KV cache are not initialized, or the
     /// backend does not support GPU-resident forward.
+    ///
+    /// **wasm32 note:** this sync variant deadlocks on the browser main thread
+    /// because wgpu's final `map_async` + `recv()` readback needs JS
+    /// microtasks (which don't run during a sync WASM call).  Prefer
+    /// [`Self::forward_single_token_gpu_async`] on wasm32.
     #[allow(clippy::too_many_arguments)]
     fn forward_single_token_gpu(
         &self,
@@ -545,6 +550,44 @@ pub trait ComputeBackend: Send + Sync {
         _seq_len: usize,
     ) -> Option<Vec<f32>> {
         None
+    }
+
+    /// Async variant of [`Self::forward_single_token_gpu`].  Required on wasm32
+    /// so the WebGPU `map_async` callback can fire during `.await`.
+    ///
+    /// Default impl delegates to the sync version — backends that don't need
+    /// async readback (CPU, native wgpu) get this for free.
+    #[allow(clippy::too_many_arguments)]
+    fn forward_single_token_gpu_async<'a>(
+        &'a self,
+        token_embedding: &'a [f32],
+        pos: usize,
+        dim: usize,
+        num_heads: usize,
+        num_kv_heads: usize,
+        head_dim: usize,
+        intermediate_dim: usize,
+        vocab_size: usize,
+        rms_norm_eps: f32,
+        rope_theta: f32,
+        num_layers: usize,
+        seq_len: usize,
+    ) -> core::pin::Pin<Box<dyn core::future::Future<Output = Option<Vec<f32>>> + 'a>> {
+        let sync = self.forward_single_token_gpu(
+            token_embedding,
+            pos,
+            dim,
+            num_heads,
+            num_kv_heads,
+            head_dim,
+            intermediate_dim,
+            vocab_size,
+            rms_norm_eps,
+            rope_theta,
+            num_layers,
+            seq_len,
+        );
+        Box::pin(async move { sync })
     }
 
     /// Short identifier for this backend, used in diagnostics.
@@ -1667,6 +1710,65 @@ impl Model {
         }
 
         Tensor::from_vec(self.forward_buffers.logits.clone(), &[vocab_size]).unwrap()
+    }
+
+    /// Async variant of [`Self::forward`].  Required on wasm32 browsers because
+    /// the sync GPU path hits a `map_async` + `recv()` deadlock (the mapping
+    /// callback can't fire while the JS event loop is frozen in a sync WASM
+    /// call).  Falls through to the sync path on CPU-only backends.
+    ///
+    /// Advances the KV cache on success and applies Gemma-2's final logit
+    /// soft-cap when configured.  On backends that don't implement
+    /// `forward_single_token_gpu_async`, the default trait impl forwards to
+    /// the sync version — so this is a safe drop-in for `forward` in both
+    /// browser and native contexts.
+    pub async fn forward_async(&mut self, token_id: u32, pos: usize) -> Tensor {
+        let dim = self.config.hidden_dim;
+        let head_dim = self.config.head_dim;
+        let num_heads = self.config.num_heads;
+        let num_kv_heads = self.config.num_kv_heads;
+        let vocab_size = self.config.vocab_size;
+
+        if self.backend.has_gpu_weights() && self.backend.has_gpu_kv_cache() {
+            let embed_data = self.weights.token_embedding.data();
+            let embed_offset = token_id as usize * dim;
+            let token_embed = &embed_data[embed_offset..embed_offset + dim];
+            let seq_len = self.kv_cache.len() + 1;
+
+            let maybe_logits = self
+                .backend
+                .forward_single_token_gpu_async(
+                    token_embed,
+                    pos,
+                    dim,
+                    num_heads,
+                    num_kv_heads,
+                    head_dim,
+                    self.config.intermediate_dim,
+                    vocab_size,
+                    self.config.rms_norm_eps,
+                    self.config.rope_theta,
+                    self.config.num_layers,
+                    seq_len,
+                )
+                .await;
+
+            if let Some(mut logits) = maybe_logits {
+                self.kv_cache.advance();
+                if self.config.final_logit_softcap > 0.0 {
+                    let cap = self.config.final_logit_softcap;
+                    for l in &mut logits {
+                        *l = (*l / cap).tanh() * cap;
+                    }
+                }
+                return Tensor::from_vec(logits, &[vocab_size]).unwrap();
+            }
+        }
+
+        // Fall back to the sync path.  On CPU backends that's the normal
+        // hot path; on GPU backends it's only reached when the async GPU
+        // call returned `None` (GPU state missing).
+        self.forward(token_id, pos)
     }
 
     /// Greedy forward pass: runs the full transformer but returns only the
