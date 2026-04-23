@@ -2111,6 +2111,108 @@ impl FlareEngine {
         Some(token_id)
     }
 
+    /// Async variant of [`Self::next_token`].  Required on wasm32 browsers
+    /// when WebGPU is the active backend — the sync `forward` path deadlocks
+    /// on the final `map_async` + `recv()` readback because the WebGPU
+    /// mapping callback is serviced by JS microtasks that can't run during
+    /// a sync WASM call, and `device.poll(Wait)` is a no-op on wasm32.
+    ///
+    /// Returns a Promise that resolves to the generated token id (or
+    /// `undefined` on stream end).  Identical sampling + stop-sequence +
+    /// EOS handling as `next_token`.  Safe to use on CPU backends too —
+    /// the async path falls through to the sync fast path there.
+    #[wasm_bindgen]
+    pub async fn next_token_async(&mut self) -> Option<u32> {
+        if self.stream_done || self.stream_remaining == 0 {
+            if !self.stream_done {
+                self.stream_done = true;
+                self.stream_stop_reason = "length".to_string();
+            }
+            return None;
+        }
+
+        if self.stream_decode_start_ms == 0.0 {
+            self.stream_decode_start_ms = now_ms();
+        }
+
+        let logits_tensor = self
+            .model
+            .forward_async(self.stream_last_token, self.stream_pos)
+            .await;
+        self.last_logits = logits_tensor.data().to_vec();
+        if self.top_logprobs_n > 0 {
+            self.top_logprobs_data =
+                compute_top_logprobs(&self.last_logits, self.top_logprobs_n as usize);
+        }
+        let token_id = if self.stream_params.temperature == 0.0 {
+            sampling::sample_greedy(logits_tensor.data())
+        } else {
+            let mut logits = logits_tensor.data().to_vec();
+            sampling::apply_repeat_penalty(
+                &mut logits,
+                &self.stream_recent_tokens,
+                self.stream_params.repeat_penalty,
+            );
+            sampling::apply_temperature(&mut logits, self.stream_params.temperature);
+            self.stream_rng_state = self
+                .stream_rng_state
+                .wrapping_mul(1664525)
+                .wrapping_add(1013904223);
+            let rng_val = (self.stream_rng_state as f32) / (u32::MAX as f32);
+            if self.stream_params.top_p < 1.0 {
+                sampling::sample_top_p(&logits, self.stream_params.top_p, rng_val)
+            } else if self.stream_params.min_p > 0.0 {
+                sampling::sample_min_p(&logits, self.stream_params.min_p, rng_val)
+            } else if self.stream_params.top_k > 0 {
+                sampling::sample_top_k(&logits, self.stream_params.top_k, rng_val)
+            } else {
+                sampling::sample_top_p(&logits, 1.0, rng_val)
+            }
+        };
+
+        self.stream_last_token = token_id;
+        self.stream_pos += 1;
+        self.kv_pos = self.stream_pos;
+        if self.repeat_last_n > 0 {
+            if self.stream_recent_tokens.len() >= self.repeat_last_n {
+                self.stream_recent_tokens.remove(0);
+            }
+            self.stream_recent_tokens.push(token_id);
+        }
+        self.stream_remaining -= 1;
+
+        if self.eos_token_id == Some(token_id) {
+            self.last_decode_ms = now_ms() - self.stream_decode_start_ms;
+            self.stream_done = true;
+            self.stream_stop_reason = "eos".to_string();
+            return None;
+        }
+
+        if !self.stop_sequences.is_empty() {
+            if let Some(vocab) = &self.gguf_vocab {
+                let piece = vocab.decode(&[token_id]);
+                self.stream_text_accum.push_str(&piece);
+                for seq in &self.stop_sequences {
+                    if self.stream_text_accum.ends_with(seq.as_str()) {
+                        self.last_decode_ms = now_ms() - self.stream_decode_start_ms;
+                        self.stream_done = true;
+                        self.stream_stop_reason = "stop_sequence".to_string();
+                        return None;
+                    }
+                }
+            }
+        }
+
+        if self.stream_remaining == 0 {
+            self.stream_done = true;
+            self.stream_stop_reason = "length".to_string();
+        }
+
+        self.last_tokens_generated += 1;
+        self.last_decode_ms = now_ms() - self.stream_decode_start_ms;
+        Some(token_id)
+    }
+
     /// Signal the current stream to stop after the next `next_token()` call.
     /// The JS Stop button should call this, then wait for `next_token()` to
     /// return `undefined` before updating the UI.
