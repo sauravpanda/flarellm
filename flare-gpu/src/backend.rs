@@ -4906,6 +4906,23 @@ impl ComputeBackend for WebGpuBackend {
         head_dim: usize,
         attn_softcap: f32,
     ) -> Vec<f32> {
+        // wasm32: sync GPU readback deadlocks because the map_async callback
+        // can't fire during a sync WASM call.  Delegate to CpuBackend so
+        // prefill finishes; decode path uses forward_single_token_gpu_async.
+        #[cfg(target_arch = "wasm32")]
+        {
+            return flare_core::model::CpuBackend.grouped_query_attention(
+                q,
+                k,
+                v,
+                num_heads,
+                num_kv_heads,
+                head_dim,
+                seq_len,
+                attn_softcap,
+            );
+        }
+        #[cfg(not(target_arch = "wasm32"))]
         self.prefill_attention(
             q,
             k,
@@ -4926,6 +4943,12 @@ impl ComputeBackend for WebGpuBackend {
         in_cols: usize,
         batch: usize,
     ) -> Vec<f32> {
+        #[cfg(target_arch = "wasm32")]
+        {
+            return flare_core::model::CpuBackend
+                .batched_matmul(weight, input, out_rows, in_cols, batch);
+        }
+        #[cfg(not(target_arch = "wasm32"))]
         self.batched_matvec(weight, input, out_rows, in_cols, batch)
     }
 
@@ -4937,6 +4960,11 @@ impl ComputeBackend for WebGpuBackend {
         batch: usize,
         eps: f32,
     ) -> Vec<f32> {
+        #[cfg(target_arch = "wasm32")]
+        {
+            return flare_core::model::CpuBackend.batched_rmsnorm(input, weight, dim, batch, eps);
+        }
+        #[cfg(not(target_arch = "wasm32"))]
         WebGpuBackend::batched_rmsnorm(self, input, weight, dim, batch, eps)
     }
 
@@ -4949,6 +4977,12 @@ impl ComputeBackend for WebGpuBackend {
         start_pos: usize,
         theta: f32,
     ) -> Vec<f32> {
+        #[cfg(target_arch = "wasm32")]
+        {
+            return flare_core::model::CpuBackend
+                .batched_rope(inp, num_heads, head_dim, seq_len, start_pos, theta);
+        }
+        #[cfg(not(target_arch = "wasm32"))]
         WebGpuBackend::batched_rope(self, inp, num_heads, head_dim, seq_len, start_pos, theta)
     }
 
@@ -4957,139 +4991,172 @@ impl ComputeBackend for WebGpuBackend {
     }
 
     fn batched_dequant_matmul(&self, weight: &RawWeight, input: &[f32], batch: usize) -> Vec<f32> {
-        let num_rows = weight.num_rows;
+        // wasm32: force CPU path (see prefill_attention_gpu note above).  The
+        // CpuBackend impl has fast Q8_0 + Q4K SIMD kernels.
+        #[cfg(target_arch = "wasm32")]
+        {
+            return flare_core::model::CpuBackend.batched_dequant_matmul(weight, input, batch);
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let num_rows = weight.num_rows;
 
-        match weight.format {
-            WeightFormat::BF16 => self.dequant_matvec_bf16(
-                &weight.data,
-                input,
-                num_rows,
-                weight.blocks_per_row,
-                batch,
-            ),
-            WeightFormat::F16 => {
-                self.dequant_matvec_f16(&weight.data, input, num_rows, weight.blocks_per_row, batch)
-            }
-            WeightFormat::Q4_1 => self.dequant_matvec_q4_1(
-                &weight.data,
-                input,
-                num_rows,
-                weight.blocks_per_row,
-                batch,
-            ),
-            WeightFormat::Q8_0 => self.dequant_matvec_q8_0(
-                &weight.data,
-                input,
-                num_rows,
-                weight.blocks_per_row,
-                batch,
-            ),
-            WeightFormat::Q8_1 => self.dequant_matvec_q8_1(
-                &weight.data,
-                input,
-                num_rows,
-                weight.blocks_per_row,
-                batch,
-            ),
-            WeightFormat::Q4_0 => self.dequant_matvec_q4_0(
-                &weight.data,
-                input,
-                num_rows,
-                weight.blocks_per_row,
-                batch,
-            ),
-            WeightFormat::Q5_0 => self.dequant_matvec_q5_0(
-                &weight.data,
-                input,
-                num_rows,
-                weight.blocks_per_row,
-                batch,
-            ),
-            WeightFormat::Q5_1 => self.dequant_matvec_q5_1(
-                &weight.data,
-                input,
-                num_rows,
-                weight.blocks_per_row,
-                batch,
-            ),
-            WeightFormat::Q2K => {
-                self.dequant_matvec_q2k(&weight.data, input, num_rows, weight.blocks_per_row, batch)
-            }
-            WeightFormat::Q3K => {
-                self.dequant_matvec_q3k(&weight.data, input, num_rows, weight.blocks_per_row, batch)
-            }
-            WeightFormat::Q4K => {
-                self.dequant_matvec_q4k(&weight.data, input, num_rows, weight.blocks_per_row, batch)
-            }
-            WeightFormat::Q5K => {
-                self.dequant_matvec_q5k(&weight.data, input, num_rows, weight.blocks_per_row, batch)
-            }
-            WeightFormat::Q6K => {
-                self.dequant_matvec_q6k(&weight.data, input, num_rows, weight.blocks_per_row, batch)
-            }
-            WeightFormat::IQ4NL => self.dequant_matvec_iq4nl(
-                &weight.data,
-                input,
-                num_rows,
-                weight.blocks_per_row,
-                batch,
-            ),
-            WeightFormat::IQ2XXS => self.dequant_matvec_iq2xxs(
-                &weight.data,
-                input,
-                num_rows,
-                weight.blocks_per_row,
-                batch,
-            ),
-            WeightFormat::IQ2XS => self.dequant_matvec_iq2xs(
-                &weight.data,
-                input,
-                num_rows,
-                weight.blocks_per_row,
-                batch,
-            ),
-            WeightFormat::IQ3XXS => self.dequant_matvec_iq3xxs(
-                &weight.data,
-                input,
-                num_rows,
-                weight.blocks_per_row,
-                batch,
-            ),
-            WeightFormat::IQ4XS => self.dequant_matvec_iq4xs(
-                &weight.data,
-                input,
-                num_rows,
-                weight.blocks_per_row,
-                batch,
-            ),
-            WeightFormat::IQ3S => self.dequant_matvec_iq3s(
-                &weight.data,
-                input,
-                num_rows,
-                weight.blocks_per_row,
-                batch,
-            ),
-            WeightFormat::IQ2S => self.dequant_matvec_iq2s(
-                &weight.data,
-                input,
-                num_rows,
-                weight.blocks_per_row,
-                batch,
-            ),
-            WeightFormat::IQ1S => self.dequant_matvec_iq1s(
-                &weight.data,
-                input,
-                num_rows,
-                weight.blocks_per_row,
-                batch,
-            ),
-            WeightFormat::Ternary => {
-                // Ternary weights on the GPU path: fall back to CPU matvec_ternary
-                // for now. The WGSL shader (dequant_matvec_ternary.wgsl) is ready
-                // but full GPU dispatch plumbing will be added when BitNet models
-                // are common enough to warrant the integration effort.
-                let cols = weight.blocks_per_row * 4;
-                flare_core::model::matvec_ternary(&weight.data, input, num_rows, cols)
+            match weight.format {
+                WeightFormat::BF16 => self.dequant_matvec_bf16(
+                    &weight.data,
+                    input,
+                    num_rows,
+                    weight.blocks_per_row,
+                    batch,
+                ),
+                WeightFormat::F16 => self.dequant_matvec_f16(
+                    &weight.data,
+                    input,
+                    num_rows,
+                    weight.blocks_per_row,
+                    batch,
+                ),
+                WeightFormat::Q4_1 => self.dequant_matvec_q4_1(
+                    &weight.data,
+                    input,
+                    num_rows,
+                    weight.blocks_per_row,
+                    batch,
+                ),
+                WeightFormat::Q8_0 => self.dequant_matvec_q8_0(
+                    &weight.data,
+                    input,
+                    num_rows,
+                    weight.blocks_per_row,
+                    batch,
+                ),
+                WeightFormat::Q8_1 => self.dequant_matvec_q8_1(
+                    &weight.data,
+                    input,
+                    num_rows,
+                    weight.blocks_per_row,
+                    batch,
+                ),
+                WeightFormat::Q4_0 => self.dequant_matvec_q4_0(
+                    &weight.data,
+                    input,
+                    num_rows,
+                    weight.blocks_per_row,
+                    batch,
+                ),
+                WeightFormat::Q5_0 => self.dequant_matvec_q5_0(
+                    &weight.data,
+                    input,
+                    num_rows,
+                    weight.blocks_per_row,
+                    batch,
+                ),
+                WeightFormat::Q5_1 => self.dequant_matvec_q5_1(
+                    &weight.data,
+                    input,
+                    num_rows,
+                    weight.blocks_per_row,
+                    batch,
+                ),
+                WeightFormat::Q2K => self.dequant_matvec_q2k(
+                    &weight.data,
+                    input,
+                    num_rows,
+                    weight.blocks_per_row,
+                    batch,
+                ),
+                WeightFormat::Q3K => self.dequant_matvec_q3k(
+                    &weight.data,
+                    input,
+                    num_rows,
+                    weight.blocks_per_row,
+                    batch,
+                ),
+                WeightFormat::Q4K => self.dequant_matvec_q4k(
+                    &weight.data,
+                    input,
+                    num_rows,
+                    weight.blocks_per_row,
+                    batch,
+                ),
+                WeightFormat::Q5K => self.dequant_matvec_q5k(
+                    &weight.data,
+                    input,
+                    num_rows,
+                    weight.blocks_per_row,
+                    batch,
+                ),
+                WeightFormat::Q6K => self.dequant_matvec_q6k(
+                    &weight.data,
+                    input,
+                    num_rows,
+                    weight.blocks_per_row,
+                    batch,
+                ),
+                WeightFormat::IQ4NL => self.dequant_matvec_iq4nl(
+                    &weight.data,
+                    input,
+                    num_rows,
+                    weight.blocks_per_row,
+                    batch,
+                ),
+                WeightFormat::IQ2XXS => self.dequant_matvec_iq2xxs(
+                    &weight.data,
+                    input,
+                    num_rows,
+                    weight.blocks_per_row,
+                    batch,
+                ),
+                WeightFormat::IQ2XS => self.dequant_matvec_iq2xs(
+                    &weight.data,
+                    input,
+                    num_rows,
+                    weight.blocks_per_row,
+                    batch,
+                ),
+                WeightFormat::IQ3XXS => self.dequant_matvec_iq3xxs(
+                    &weight.data,
+                    input,
+                    num_rows,
+                    weight.blocks_per_row,
+                    batch,
+                ),
+                WeightFormat::IQ4XS => self.dequant_matvec_iq4xs(
+                    &weight.data,
+                    input,
+                    num_rows,
+                    weight.blocks_per_row,
+                    batch,
+                ),
+                WeightFormat::IQ3S => self.dequant_matvec_iq3s(
+                    &weight.data,
+                    input,
+                    num_rows,
+                    weight.blocks_per_row,
+                    batch,
+                ),
+                WeightFormat::IQ2S => self.dequant_matvec_iq2s(
+                    &weight.data,
+                    input,
+                    num_rows,
+                    weight.blocks_per_row,
+                    batch,
+                ),
+                WeightFormat::IQ1S => self.dequant_matvec_iq1s(
+                    &weight.data,
+                    input,
+                    num_rows,
+                    weight.blocks_per_row,
+                    batch,
+                ),
+                WeightFormat::Ternary => {
+                    // Ternary weights on the GPU path: fall back to CPU matvec_ternary
+                    // for now. The WGSL shader (dequant_matvec_ternary.wgsl) is ready
+                    // but full GPU dispatch plumbing will be added when BitNet models
+                    // are common enough to warrant the integration effort.
+                    let cols = weight.blocks_per_row * 4;
+                    flare_core::model::matvec_ternary(&weight.data, input, num_rows, cols)
+                }
             }
         }
     }
