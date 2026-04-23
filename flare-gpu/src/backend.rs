@@ -333,6 +333,66 @@ impl WebGpuBackend {
     ///
     /// The staging buffer used for readback is pooled; it is returned to the
     /// pool after the GPU results are copied to the returned `Vec<f32>`.
+    /// Async variant of [`Self::dispatch_and_readback`] that awaits the WebGPU
+    /// mapping promise via `futures_channel::oneshot` instead of blocking on a
+    /// sync `std::sync::mpsc` channel.  This is the only pattern that works on
+    /// wasm32 — the `map_async` callback is serviced by JS microtasks which
+    /// don't run during a sync WASM call.  On native the `.await` completes
+    /// as soon as `device.poll` fires the callback, so it's a drop-in for the
+    /// sync path there too.
+    ///
+    /// Not yet wired into the GPU forward paths — the full propagation of
+    /// `async fn` through `ComputeBackend`, `Model::forward_prefill`, and the
+    /// `wasm-bindgen` bridge is a larger refactor.  Keeping this primitive in
+    /// place so the refactor is a mechanical propagation rather than a
+    /// design-from-scratch.
+    #[allow(dead_code)]
+    async fn dispatch_and_readback_async(
+        &self,
+        pipeline: &wgpu::ComputePipeline,
+        bind_group: &wgpu::BindGroup,
+        dispatch: [u32; 3],
+        output_buf: &wgpu::Buffer,
+        output_size: u64,
+    ) -> Vec<f32> {
+        let staging = self.pool.get_staging(&self.device, output_size);
+
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: None,
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(pipeline);
+            pass.set_bind_group(0, bind_group, &[]);
+            pass.dispatch_workgroups(dispatch[0], dispatch[1], dispatch[2]);
+        }
+        encoder.copy_buffer_to_buffer(output_buf, 0, &staging, 0, output_size);
+        self.queue.submit(Some(encoder.finish()));
+
+        let slice = staging.slice(..);
+        let (tx, rx) = futures_channel::oneshot::channel();
+        slice.map_async(wgpu::MapMode::Read, move |result| {
+            let _ = tx.send(result);
+        });
+        // Native: device.poll drains the callback.  Wasm32: no-op; we rely on
+        // `rx.await` yielding microtasks so the browser can fire map_async.
+        #[cfg(not(target_arch = "wasm32"))]
+        self.device.poll(wgpu::Maintain::Wait);
+        rx.await
+            .expect("GPU readback channel closed")
+            .expect("GPU readback failed");
+
+        let data = slice.get_mapped_range();
+        let result: Vec<f32> = bytemuck::cast_slice(&data).to_vec();
+        drop(data);
+        staging.unmap();
+        self.pool.return_staging(staging);
+        result
+    }
+
     fn dispatch_and_readback(
         &self,
         pipeline: &wgpu::ComputePipeline,

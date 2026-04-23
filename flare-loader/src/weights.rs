@@ -108,25 +108,46 @@ pub fn load_model_weights_with_raw_opt<R: Read + Seek>(
     reader: &mut R,
     skip_f32_for_matmul: bool,
 ) -> Result<(ModelWeights, Option<Vec<RawLayerWeights>>), GgufError> {
-    let (tensors, mut raw_map) = if skip_f32_for_matmul {
-        let mut skip: HashSet<String> = HashSet::new();
-        for i in 0..gguf.to_model_config()?.num_layers {
-            for suffix in [
-                "attn_q",
-                "attn_k",
-                "attn_v",
-                "attn_output",
-                "ffn_gate",
-                "ffn_up",
-                "ffn_down",
-            ] {
-                skip.insert(format!("blk.{i}.{suffix}.weight"));
-            }
-        }
+    let (tensors, raw_map) = if skip_f32_for_matmul {
+        let skip = matmul_skip_set(gguf)?;
         gguf.load_all_tensors_with_raw_skipping_f32(reader, &skip)?
     } else {
         gguf.load_all_tensors_with_raw(reader)?
     };
+    assemble_model_weights_from_maps(gguf, tensors, raw_map)
+}
+
+/// Name set of the 7 per-layer matmul tensors (wq/wk/wv/wo/w_gate/w_up/w_down)
+/// for every layer in the model.  Passed to
+/// [`GgufFile::load_all_tensors_with_raw_skipping_f32`] to skip the f32 dequant
+/// pass for those weights when a raw-dispatchable backend will serve them.
+pub fn matmul_skip_set(gguf: &GgufFile) -> Result<HashSet<String>, GgufError> {
+    let mut skip: HashSet<String> = HashSet::new();
+    for i in 0..gguf.to_model_config()?.num_layers {
+        for suffix in [
+            "attn_q",
+            "attn_k",
+            "attn_v",
+            "attn_output",
+            "ffn_gate",
+            "ffn_up",
+            "ffn_down",
+        ] {
+            skip.insert(format!("blk.{i}.{suffix}.weight"));
+        }
+    }
+    Ok(skip)
+}
+
+/// Assemble `ModelWeights` + per-layer raw weight bundles from pre-loaded
+/// `tensors` and `raw_map` maps.  Exposed so streaming / chunked loaders can
+/// reuse the layer-name lookup + raw-weight extraction logic after populating
+/// the maps tensor-by-tensor.
+pub fn assemble_model_weights_from_maps(
+    gguf: &GgufFile,
+    tensors: HashMap<String, flare_core::tensor::Tensor>,
+    mut raw_map: HashMap<String, RawWeight>,
+) -> Result<(ModelWeights, Option<Vec<RawLayerWeights>>), GgufError> {
     let config = gguf.to_model_config()?;
 
     let token_embedding = find_tensor(

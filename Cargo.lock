@@ -443,10 +443,13 @@ dependencies = [
  "byteorder",
  "flarellm-core",
  "flarellm-loader",
+ "futures-channel",
  "half",
  "log",
  "pollster",
  "thiserror 2.0.18",
+ "wasm-bindgen-futures",
+ "web-sys",
  "wgpu",
 ]
 

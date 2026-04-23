@@ -21,6 +21,11 @@ byteorder = { workspace = true }
 bytemuck = { workspace = true }
 half = { workspace = true }
 pollster = "0.4"
+futures-channel = "0.3"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+web-sys = { workspace = true, features = ["console"] }
+wasm-bindgen-futures = "0.4"
 
 [dev-dependencies]
 pollster = "0.4"

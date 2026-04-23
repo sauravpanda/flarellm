@@ -22,6 +22,7 @@
 //! const tokens = engine.generate_tokens(ids, 50);
 //! ```
 
+use std::collections::HashMap;
 use std::io::Cursor;
 #[cfg(not(target_arch = "wasm32"))]
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -34,7 +35,10 @@ use flare_core::tokenizer::{BpeTokenizer, Tokenizer};
 use flare_gpu::WebGpuBackend;
 use flare_loader::gguf::{GgufFile, MetadataValue};
 use flare_loader::tokenizer::GgufVocab;
-use flare_loader::weights::{load_model_weights_with_progress, load_model_weights_with_raw_opt};
+use flare_loader::weights::{
+    assemble_model_weights_from_maps, load_model_weights_with_progress,
+    load_model_weights_with_raw_opt, matmul_skip_set,
+};
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 
@@ -445,8 +449,271 @@ pub struct FlareEngine {
     utf8_byte_buf: Vec<u8>,
 }
 
+// ---------------------------------------------------------------------------
+// Chunked load API — state machine for UI-responsive GGUF parse
+// ---------------------------------------------------------------------------
+
+/// In-progress GGUF load.  Breaks the monolithic [`FlareEngine::load`] into
+/// per-tensor steps so JS can `await Promise.resolve()` between them and keep
+/// the main thread responsive.  JS owns the source `Uint8Array` and hands
+/// WASM a per-tensor slice each step — the loader itself stores no copy of
+/// the bulk data, so peak memory stays at one model's worth.
+///
+/// ```javascript
+/// const loader = FlareEngine.begin_load(gguf_bytes);       // parses header only
+/// const total = loader.total_tensors;
+/// for (let i = 0; i < total; i++) {
+///   const off = loader.tensor_byte_offset(i);
+///   const len = loader.tensor_byte_length(i);
+///   loader.load_tensor(i, gguf_bytes.subarray(off, off + len));
+///   if (i % 10 === 0) await new Promise(r => setTimeout(r, 0)); // yield
+/// }
+/// const engine = loader.finalize();
+/// ```
+///
+/// Per-tensor work is a single memcpy + optional dequant.  The yields let GC
+/// run and keep Chrome from declaring the page unresponsive.
+#[wasm_bindgen]
+pub struct FlareLoader {
+    gguf: GgufFile,
+    skip_names: std::collections::HashSet<String>,
+    tensor_map: HashMap<String, flare_core::tensor::Tensor>,
+    raw_map: HashMap<String, flare_core::model::RawWeight>,
+    loaded: usize,
+    // Cached metadata so `finalize` doesn't re-parse.
+    chat_template: ChatTemplate,
+    eos_token_id: Option<u32>,
+    bos_token_id: Option<u32>,
+    add_bos_token: bool,
+    raw_chat_template: Option<String>,
+    architecture: String,
+    model_name: String,
+    metadata_json: String,
+    config: flare_core::config::ModelConfig,
+}
+
+#[wasm_bindgen]
+impl FlareLoader {
+    /// Total number of tensors in the GGUF file.
+    #[wasm_bindgen(getter)]
+    pub fn total_tensors(&self) -> u32 {
+        self.gguf.tensors.len() as u32
+    }
+
+    /// Number of tensors loaded so far (via successful `load_tensor` calls).
+    #[wasm_bindgen(getter)]
+    pub fn loaded_tensors(&self) -> u32 {
+        self.loaded as u32
+    }
+
+    /// Byte offset (within the original GGUF file) where tensor `i`'s data
+    /// starts.  JS uses this to slice its `Uint8Array` and hand WASM just the
+    /// bytes for that tensor.  f64 return because tensor offsets in large
+    /// GGUFs can exceed `u32::MAX`.
+    #[wasm_bindgen]
+    pub fn tensor_byte_offset(&self, i: u32) -> f64 {
+        let info = &self.gguf.tensors[i as usize];
+        (self.gguf.tensor_data_offset + info.offset) as f64
+    }
+
+    /// Byte length of tensor `i`'s data in the original GGUF file.
+    #[wasm_bindgen]
+    pub fn tensor_byte_length(&self, i: u32) -> f64 {
+        self.gguf.tensors[i as usize].byte_size() as f64
+    }
+
+    /// Tensor name — useful for progress UIs.
+    #[wasm_bindgen]
+    pub fn tensor_name(&self, i: u32) -> String {
+        self.gguf.tensors[i as usize].name.clone()
+    }
+
+    /// Load tensor `i` from the caller-provided byte slice, which must be
+    /// exactly `tensor_byte_length(i)` bytes and positioned at
+    /// `tensor_byte_offset(i)` within the original GGUF.
+    #[wasm_bindgen]
+    pub fn load_tensor(&mut self, i: u32, tensor_bytes: &[u8]) -> Result<(), JsError> {
+        let idx = i as usize;
+        if idx >= self.gguf.tensors.len() {
+            return Err(JsError::new(&format!(
+                "tensor index {idx} out of range (total {})",
+                self.gguf.tensors.len()
+            )));
+        }
+        let info = &self.gguf.tensors[idx];
+        let expected = info.byte_size() as usize;
+        if tensor_bytes.len() != expected {
+            return Err(JsError::new(&format!(
+                "tensor {} byte length mismatch: got {}, expected {}",
+                info.name,
+                tensor_bytes.len(),
+                expected
+            )));
+        }
+        let skip = self.skip_names.contains(&info.name);
+        let (tensor, maybe_raw) =
+            GgufFile::decode_tensor_from_bytes(info, tensor_bytes, true, skip)
+                .map_err(|e| JsError::new(&format!("Tensor decode error ({}): {e}", info.name)))?;
+        if let Some(raw) = maybe_raw {
+            self.raw_map.insert(info.name.clone(), raw);
+        }
+        self.tensor_map.insert(info.name.clone(), tensor);
+        self.loaded += 1;
+        Ok(())
+    }
+
+    /// Finalise the load: assemble `ModelWeights`, build the `Model`, run
+    /// warmup, and return a ready-to-use `FlareEngine`.  Consumes the loader.
+    ///
+    /// If any layer's matmul tensors couldn't be retained as raw (mixed-quant
+    /// model), this returns an error — the caller should fall back to the
+    /// sync `FlareEngine.load` which can do a second f32 dequant pass.
+    #[wasm_bindgen]
+    pub fn finalize(self) -> Result<FlareEngine, JsError> {
+        let FlareLoader {
+            gguf,
+            skip_names: _,
+            tensor_map,
+            raw_map,
+            loaded: _,
+            chat_template,
+            eos_token_id,
+            bos_token_id,
+            add_bos_token,
+            raw_chat_template,
+            architecture,
+            model_name,
+            metadata_json,
+            config,
+        } = self;
+
+        let (weights, raw_layers) = assemble_model_weights_from_maps(&gguf, tensor_map, raw_map)
+            .map_err(|e| JsError::new(&format!("Weight assembly error: {e}")))?;
+
+        if raw_layers.is_none() {
+            return Err(JsError::new(
+                "chunked load: mixed-quant model has unsupported tensor format. \
+                 Fall back to FlareEngine.load(bytes) which can re-read with full f32 dequant.",
+            ));
+        }
+
+        let mut model = Model::new(config.clone(), weights);
+        if let Some(rl) = raw_layers {
+            model.set_raw_weights(rl);
+        } else {
+            web_sys::console::log_1(
+                &"flare: raw quantized weights not available, using f32 path".into(),
+            );
+        }
+        model.warmup();
+
+        let gguf_vocab = GgufVocab::from_gguf(&gguf).ok();
+        Ok(FlareEngine {
+            model,
+            chat_template,
+            gguf_vocab,
+            eos_token_id,
+            bos_token_id,
+            add_bos_token,
+            raw_chat_template,
+            architecture,
+            model_name,
+            kv_pos: 0,
+            stream_params: SamplingParams {
+                temperature: 0.0,
+                ..Default::default()
+            },
+            stream_rng_state: 0x12345678,
+            stream_last_token: 0,
+            stream_recent_tokens: Vec::new(),
+            repeat_last_n: 64,
+            stream_pos: 0,
+            stream_remaining: 0,
+            stream_done: true,
+            stream_stop_reason: String::new(),
+            last_prefill_ms: 0.0,
+            last_decode_ms: 0.0,
+            last_tokens_generated: 0,
+            stream_decode_start_ms: 0.0,
+            stop_sequences: Vec::new(),
+            stream_text_accum: String::new(),
+            rng_seed: 0x12345678,
+            metadata_json,
+            last_logits: Vec::new(),
+            top_logprobs_n: 0,
+            top_logprobs_data: Vec::new(),
+            utf8_byte_buf: Vec::new(),
+        })
+    }
+}
+
 #[wasm_bindgen]
 impl FlareEngine {
+    /// Start a chunked GGUF load.  The passed bytes only need to span the
+    /// GGUF header (typically < 1 MB) — after header parsing WASM retains no
+    /// copy of the bulk tensor data.  Follow with `tensor_byte_offset` /
+    /// `load_tensor` per tensor, yielding between calls so the UI stays
+    /// responsive.
+    ///
+    /// Prefer this over [`FlareEngine::load`] in the browser — the sync
+    /// `load` method does ~2-3 s of uninterrupted work which Chrome flags
+    /// as "not responding" on memory-pressured tabs.
+    #[wasm_bindgen]
+    pub fn begin_load(gguf_bytes: &[u8]) -> Result<FlareLoader, JsError> {
+        let mut reader = Cursor::new(gguf_bytes);
+        let gguf = GgufFile::parse_header(&mut reader)
+            .map_err(|e| JsError::new(&format!("GGUF parse error: {e}")))?;
+        let chat_template = detect_chat_template(&gguf);
+        let eos_token_id = gguf
+            .metadata
+            .get("tokenizer.ggml.eos_token_id")
+            .and_then(|v| v.as_u32());
+        let bos_token_id = gguf
+            .metadata
+            .get("tokenizer.ggml.bos_token_id")
+            .and_then(|v| v.as_u32());
+        let add_bos_token = gguf
+            .metadata
+            .get("tokenizer.ggml.add_bos_token")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let raw_chat_template = gguf
+            .metadata
+            .get("tokenizer.chat_template")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let architecture = gguf.architecture().unwrap_or("unknown").to_string();
+        let model_name = gguf
+            .metadata
+            .get("general.name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let metadata_json = build_metadata_json(&gguf);
+        let config = gguf
+            .to_model_config()
+            .map_err(|e| JsError::new(&format!("Model config error: {e}")))?;
+        let skip_names =
+            matmul_skip_set(&gguf).map_err(|e| JsError::new(&format!("Skip set error: {e}")))?;
+
+        Ok(FlareLoader {
+            gguf,
+            skip_names,
+            tensor_map: HashMap::new(),
+            raw_map: HashMap::new(),
+            loaded: 0,
+            chat_template,
+            eos_token_id,
+            bos_token_id,
+            add_bos_token,
+            raw_chat_template,
+            architecture,
+            model_name,
+            metadata_json,
+            config,
+        })
+    }
+
     /// Load a GGUF model from a Uint8Array of bytes (e.g. from `fetch`).
     #[wasm_bindgen]
     pub fn load(gguf_bytes: &[u8]) -> Result<FlareEngine, JsError> {
