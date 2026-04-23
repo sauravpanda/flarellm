@@ -4355,50 +4355,58 @@ impl ComputeBackend for WebGpuBackend {
     }
 
     fn silu_mul_vec(&self, gate: &[f32], up: &[f32]) -> Vec<f32> {
-        let size = gate.len() as u32;
+        // wasm32: sync GPU readback deadlocks — fall back to CPU.
+        #[cfg(target_arch = "wasm32")]
+        {
+            return flare_core::model::CpuBackend.silu_mul_vec(gate, up);
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let size = gate.len() as u32;
 
-        let gate_buf = self
-            .pool
-            .get_storage(&self.device, &self.queue, bytemuck::cast_slice(gate));
-        let up_buf = self
-            .pool
-            .get_storage(&self.device, &self.queue, bytemuck::cast_slice(up));
-        let output_size = size as u64 * 4;
-        let out_buf = self.pool.get_output(&self.device, output_size);
+            let gate_buf =
+                self.pool
+                    .get_storage(&self.device, &self.queue, bytemuck::cast_slice(gate));
+            let up_buf = self
+                .pool
+                .get_storage(&self.device, &self.queue, bytemuck::cast_slice(up));
+            let output_size = size as u64 * 4;
+            let out_buf = self.pool.get_output(&self.device, output_size);
 
-        let params: [u32; 1] = [size];
-        let params_buf =
-            self.pool
-                .get_uniform(&self.device, &self.queue, bytemuck::cast_slice(&params));
+            let params: [u32; 1] = [size];
+            let params_buf =
+                self.pool
+                    .get_uniform(&self.device, &self.queue, bytemuck::cast_slice(&params));
 
-        let layout_entries = Self::standard_layout();
-        let result = self.cache.with_pipeline(
-            &self.device,
-            "silu_mul",
-            SILU_MUL_SHADER,
-            "silu_mul",
-            &layout_entries,
-            |cached| {
-                let bind_group =
-                    self.make_bind_group(cached, &gate_buf, &up_buf, &out_buf, &params_buf);
-                let workgroup_size = 256u32;
-                let dispatch_x = size.div_ceil(workgroup_size);
-                self.dispatch_and_readback(
-                    &cached.pipeline,
-                    &bind_group,
-                    [dispatch_x, 1, 1],
-                    &out_buf,
-                    output_size,
-                )
-            },
-        );
+            let layout_entries = Self::standard_layout();
+            let result = self.cache.with_pipeline(
+                &self.device,
+                "silu_mul",
+                SILU_MUL_SHADER,
+                "silu_mul",
+                &layout_entries,
+                |cached| {
+                    let bind_group =
+                        self.make_bind_group(cached, &gate_buf, &up_buf, &out_buf, &params_buf);
+                    let workgroup_size = 256u32;
+                    let dispatch_x = size.div_ceil(workgroup_size);
+                    self.dispatch_and_readback(
+                        &cached.pipeline,
+                        &bind_group,
+                        [dispatch_x, 1, 1],
+                        &out_buf,
+                        output_size,
+                    )
+                },
+            );
 
-        self.pool.return_storage(gate_buf);
-        self.pool.return_storage(up_buf);
-        self.pool.return_output(out_buf);
-        self.pool.return_uniform(params_buf);
+            self.pool.return_storage(gate_buf);
+            self.pool.return_storage(up_buf);
+            self.pool.return_output(out_buf);
+            self.pool.return_uniform(params_buf);
 
-        result
+            result
+        }
     }
 
     fn matmul(&self, a: &Tensor, b: &Tensor, output: &mut Tensor) {
@@ -4907,18 +4915,21 @@ impl ComputeBackend for WebGpuBackend {
         attn_softcap: f32,
     ) -> Vec<f32> {
         // wasm32: sync GPU readback deadlocks because the map_async callback
-        // can't fire during a sync WASM call.  Delegate to CpuBackend so
-        // prefill finishes; decode path uses forward_single_token_gpu_async.
+        // can't fire during a sync WASM call.  Delegate to the trait's default
+        // impl (via CpuBackend — it doesn't override `prefill_attention_gpu`,
+        // so calling it invokes the default CPU per-position loop that
+        // returns `[seq_len * q_dim]` — same contract as the GPU version).
+        // Decode path still uses forward_single_token_gpu_async.
         #[cfg(target_arch = "wasm32")]
         {
-            return flare_core::model::CpuBackend.grouped_query_attention(
+            return flare_core::model::CpuBackend.prefill_attention_gpu(
                 q,
                 k,
                 v,
+                seq_len,
                 num_heads,
                 num_kv_heads,
                 head_dim,
-                seq_len,
                 attn_softcap,
             );
         }
