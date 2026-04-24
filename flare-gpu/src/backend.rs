@@ -341,12 +341,6 @@ impl WebGpuBackend {
     /// as soon as `device.poll` fires the callback, so it's a drop-in for the
     /// sync path there too.
     ///
-    /// Not yet wired into the GPU forward paths — the full propagation of
-    /// `async fn` through `ComputeBackend`, `Model::forward_prefill`, and the
-    /// `wasm-bindgen` bridge is a larger refactor.  Keeping this primitive in
-    /// place so the refactor is a mechanical propagation rather than a
-    /// design-from-scratch.
-    #[allow(dead_code)]
     async fn dispatch_and_readback_async(
         &self,
         pipeline: &wgpu::ComputePipeline,
@@ -1696,6 +1690,87 @@ impl WebGpuBackend {
                 )
             },
         );
+
+        self.pool.return_storage(raw_buf);
+        self.pool.return_storage(vec_buf);
+        self.pool.return_output(out_buf);
+        self.pool.return_uniform(params_buf);
+
+        result
+    }
+
+    /// Async variant of [`Self::dequant_matvec_q8_0`].  The pipeline is
+    /// cloned out of the cache up-front (Arc-backed, cheap) so the lock
+    /// guard doesn't need to straddle the `.await`.  Required on wasm32
+    /// because the sync readback deadlocks when the JS event loop is
+    /// frozen inside a synchronous WASM call.
+    pub async fn dequant_matvec_q8_0_async(
+        &self,
+        raw_bytes: &[u8],
+        input: &[f32],
+        num_rows: usize,
+        num_blocks_per_row: usize,
+        batch: usize,
+    ) -> Vec<f32> {
+        let output_size = num_rows as u64 * batch as u64 * 4;
+
+        #[allow(clippy::manual_is_multiple_of)]
+        let raw_buf = if raw_bytes.len() % 4 == 0 {
+            self.pool.get_storage(&self.device, &self.queue, raw_bytes)
+        } else {
+            let mut padded = raw_bytes.to_vec();
+            padded.resize((padded.len() + 3) & !3, 0);
+            self.pool.get_storage(&self.device, &self.queue, &padded)
+        };
+        let vec_buf = self
+            .pool
+            .get_storage(&self.device, &self.queue, bytemuck::cast_slice(input));
+        let out_buf = self.pool.get_output(&self.device, output_size);
+
+        let params: [u32; 3] = [num_rows as u32, num_blocks_per_row as u32, batch as u32];
+        let params_buf =
+            self.pool
+                .get_uniform(&self.device, &self.queue, bytemuck::cast_slice(&params));
+
+        let layout_entries = Self::standard_layout();
+        let (pipeline, layout) = self.cache.ensure_pipeline_cloned(
+            &self.device,
+            "dequant_matvec_q8_0",
+            DEQUANT_MATVEC_Q8_0_SHADER,
+            "dequant_matvec_q8_0",
+            &layout_entries,
+        );
+        let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: None,
+            layout: &layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: raw_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: vec_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: out_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: params_buf.as_entire_binding(),
+                },
+            ],
+        });
+        let result = self
+            .dispatch_and_readback_async(
+                &pipeline,
+                &bind_group,
+                [num_rows as u32, batch as u32, 1],
+                &out_buf,
+                output_size,
+            )
+            .await;
 
         self.pool.return_storage(raw_buf);
         self.pool.return_storage(vec_buf);
@@ -4999,6 +5074,32 @@ impl ComputeBackend for WebGpuBackend {
 
     fn supports_dequant_matmul(&self) -> bool {
         true
+    }
+
+    fn batched_dequant_matmul_async<'a>(
+        &'a self,
+        weight: &'a RawWeight,
+        input: &'a [f32],
+        batch: usize,
+    ) -> core::pin::Pin<Box<dyn core::future::Future<Output = Vec<f32>> + 'a>> {
+        Box::pin(async move {
+            // Fast async path for Q8_0 (the dominant SmolLM2 / Llama format);
+            // other formats fall back to the sync path, which on wasm32
+            // delegates to CpuBackend to avoid the readback deadlock.
+            match weight.format {
+                WeightFormat::Q8_0 => {
+                    self.dequant_matvec_q8_0_async(
+                        &weight.data,
+                        input,
+                        weight.num_rows,
+                        weight.blocks_per_row,
+                        batch,
+                    )
+                    .await
+                }
+                _ => self.batched_dequant_matmul(weight, input, batch),
+            }
+        })
     }
 
     fn batched_dequant_matmul(&self, weight: &RawWeight, input: &[f32], batch: usize) -> Vec<f32> {
