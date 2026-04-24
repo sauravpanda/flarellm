@@ -2933,6 +2933,469 @@ impl Model {
         Tensor::from_vec(logits, &[config.vocab_size]).unwrap()
     }
 
+    /// Async variant of [`Self::forward_prefill`].  Routes the per-layer
+    /// dequant matmul dispatches through
+    /// [`ComputeBackend::batched_dequant_matmul_async`] so the WebGPU
+    /// `map_async` readback can fire between projections instead of
+    /// deadlocking the JS event loop on wasm32 browsers.  Other backend
+    /// methods stay sync — they don't do GPU readback on wasm32 (the
+    /// WebGpuBackend override delegates to the CPU SIMD path), so the
+    /// mixed async/sync flow is safe.
+    ///
+    /// **Note: this method duplicates the body of `forward_prefill`.**  The
+    /// duplication is tracked in a follow-up refactor issue — factoring the
+    /// matmul dispatch into a closure parameterising both variants is the
+    /// right fix but orthogonal to unblocking GPU prefill.
+    pub async fn forward_prefill_async(&mut self, tokens: &[u32]) -> Tensor {
+        assert!(
+            !tokens.is_empty(),
+            "forward_prefill_async requires at least one token"
+        );
+
+        let t_total = self.tick();
+
+        let config = self.config.clone();
+        let dim = config.hidden_dim;
+        let head_dim = config.head_dim;
+        let num_heads = config.num_heads;
+        let num_kv_heads = config.num_kv_heads;
+        let kv_dim = num_kv_heads * head_dim;
+        let q_dim = num_heads * head_dim;
+        let seq_len = tokens.len();
+
+        let t_embed = self.tick();
+        let mut x_batch: Vec<f32> = {
+            let embed_data = self.weights.token_embedding.data();
+            tokens
+                .iter()
+                .flat_map(|&tok| {
+                    let off = tok as usize * dim;
+                    embed_data[off..off + dim].iter().copied()
+                })
+                .collect()
+        };
+        record_phase!(self, t_embed, embed_ms);
+
+        let num_layers = config.num_layers;
+        let mut k_all: Vec<Vec<f32>> = vec![vec![0.0; seq_len * kv_dim]; num_layers];
+        let mut v_all: Vec<Vec<f32>> = vec![vec![0.0; seq_len * kv_dim]; num_layers];
+
+        for layer_idx in 0..num_layers {
+            // --- Attention block ---
+            let t_attn_norm = self.tick();
+            let normed_batch: Vec<f32> = {
+                let attn_norm: Vec<f32> = self.weights.layers[layer_idx].attn_norm.data().to_vec();
+                self.backend.batched_rmsnorm(
+                    &x_batch,
+                    &attn_norm,
+                    dim,
+                    seq_len,
+                    config.rms_norm_eps,
+                )
+            };
+            record_phase!(self, t_attn_norm, attn_norm_ms);
+
+            let use_raw = self.backend.supports_dequant_matmul() && self.raw_weights.is_some();
+            let mut q_batch = vec![0.0f32; seq_len * q_dim];
+            {
+                let q_bias: Option<Vec<f32>> = self.weights.layers[layer_idx]
+                    .attn_q_bias
+                    .as_ref()
+                    .map(|t| t.data().to_vec());
+                let k_bias: Option<Vec<f32>> = self.weights.layers[layer_idx]
+                    .attn_k_bias
+                    .as_ref()
+                    .map(|t| t.data().to_vec());
+                let v_bias: Option<Vec<f32>> = self.weights.layers[layer_idx]
+                    .attn_v_bias
+                    .as_ref()
+                    .map(|t| t.data().to_vec());
+
+                let t_qkv = self.tick();
+                // Raw-layer ownership must not straddle an .await; scope each
+                // matmul to a narrow block so the borrow of self ends before
+                // we await the returned future.
+                let q_proj = {
+                    let raw_layer_q = if use_raw {
+                        Some(&self.raw_weights.as_ref().unwrap()[layer_idx])
+                    } else {
+                        None
+                    };
+                    if let Some(rw) =
+                        raw_layer_q.filter(|l| raw_weight_cpu_dispatchable(&l.wq))
+                    {
+                        self.backend
+                            .batched_dequant_matmul_async(&rw.wq, &normed_batch, seq_len)
+                            .await
+                    } else {
+                        let wq: Vec<f32> = self.weights.layers[layer_idx].wq.data().to_vec();
+                        self.backend
+                            .batched_matmul(&wq, &normed_batch, q_dim, dim, seq_len)
+                    }
+                };
+                let k_proj = {
+                    let raw_layer_k = if use_raw {
+                        Some(&self.raw_weights.as_ref().unwrap()[layer_idx])
+                    } else {
+                        None
+                    };
+                    if let Some(rw) =
+                        raw_layer_k.filter(|l| raw_weight_cpu_dispatchable(&l.wk))
+                    {
+                        self.backend
+                            .batched_dequant_matmul_async(&rw.wk, &normed_batch, seq_len)
+                            .await
+                    } else {
+                        let wk: Vec<f32> = self.weights.layers[layer_idx].wk.data().to_vec();
+                        self.backend
+                            .batched_matmul(&wk, &normed_batch, kv_dim, dim, seq_len)
+                    }
+                };
+                let v_proj = {
+                    let raw_layer_v = if use_raw {
+                        Some(&self.raw_weights.as_ref().unwrap()[layer_idx])
+                    } else {
+                        None
+                    };
+                    if let Some(rw) =
+                        raw_layer_v.filter(|l| raw_weight_cpu_dispatchable(&l.wv))
+                    {
+                        self.backend
+                            .batched_dequant_matmul_async(&rw.wv, &normed_batch, seq_len)
+                            .await
+                    } else {
+                        let wv: Vec<f32> = self.weights.layers[layer_idx].wv.data().to_vec();
+                        self.backend
+                            .batched_matmul(&wv, &normed_batch, kv_dim, dim, seq_len)
+                    }
+                };
+                record_phase!(self, t_qkv, qkv_proj_ms);
+
+                let mut q_proj = q_proj;
+                let mut k_proj = k_proj;
+                let mut v_proj = v_proj;
+                if let Some(ref b) = q_bias {
+                    for t in 0..seq_len {
+                        let row = &mut q_proj[t * q_dim..(t + 1) * q_dim];
+                        for (qi, &bi) in row.iter_mut().zip(b.iter()) {
+                            *qi += bi;
+                        }
+                    }
+                }
+                if let Some(ref b) = k_bias {
+                    for t in 0..seq_len {
+                        let row = &mut k_proj[t * kv_dim..(t + 1) * kv_dim];
+                        for (ki, &bi) in row.iter_mut().zip(b.iter()) {
+                            *ki += bi;
+                        }
+                    }
+                }
+                if let Some(ref b) = v_bias {
+                    for t in 0..seq_len {
+                        let row = &mut v_proj[t * kv_dim..(t + 1) * kv_dim];
+                        for (vi, &bi) in row.iter_mut().zip(b.iter()) {
+                            *vi += bi;
+                        }
+                    }
+                }
+
+                let t_rope = self.tick();
+                let q_roped = self.backend.batched_rope(
+                    &q_proj,
+                    num_heads,
+                    head_dim,
+                    seq_len,
+                    0,
+                    config.rope_theta,
+                );
+                let k_roped = self.backend.batched_rope(
+                    &k_proj,
+                    num_kv_heads,
+                    head_dim,
+                    seq_len,
+                    0,
+                    config.rope_theta,
+                );
+                record_phase!(self, t_rope, rope_ms);
+
+                q_batch.copy_from_slice(&q_roped);
+                for t in 0..seq_len {
+                    k_all[layer_idx][t * kv_dim..(t + 1) * kv_dim]
+                        .copy_from_slice(&k_roped[t * kv_dim..(t + 1) * kv_dim]);
+                    v_all[layer_idx][t * kv_dim..(t + 1) * kv_dim]
+                        .copy_from_slice(&v_proj[t * kv_dim..(t + 1) * kv_dim]);
+                }
+            }
+
+            let t_attn = self.tick();
+            let attn_out_batch = self.backend.prefill_attention_gpu(
+                &q_batch,
+                &k_all[layer_idx],
+                &v_all[layer_idx],
+                seq_len,
+                num_heads,
+                num_kv_heads,
+                head_dim,
+                config.attn_logit_softcap,
+            );
+            record_phase!(self, t_attn, attention_ms);
+
+            // Output projection + optional post-attention norm + residual
+            {
+                let post_attn_norm: Option<Vec<f32>> = self.weights.layers[layer_idx]
+                    .post_attn_norm
+                    .as_ref()
+                    .map(|t| t.data().to_vec());
+
+                let t_attn_out = self.tick();
+                let proj_batch = {
+                    let raw_layer_o = if use_raw {
+                        Some(&self.raw_weights.as_ref().unwrap()[layer_idx])
+                    } else {
+                        None
+                    };
+                    if let Some(rw) =
+                        raw_layer_o.filter(|l| raw_weight_cpu_dispatchable(&l.wo))
+                    {
+                        self.backend
+                            .batched_dequant_matmul_async(&rw.wo, &attn_out_batch, seq_len)
+                            .await
+                    } else {
+                        let wo: Vec<f32> = self.weights.layers[layer_idx].wo.data().to_vec();
+                        self.backend
+                            .batched_matmul(&wo, &attn_out_batch, dim, q_dim, seq_len)
+                    }
+                };
+                record_phase!(self, t_attn_out, attn_out_proj_ms);
+
+                let t_resid = self.tick();
+                for t in 0..seq_len {
+                    let proj = proj_batch[t * dim..(t + 1) * dim].to_vec();
+                    let contrib = match &post_attn_norm {
+                        Some(n) => rmsnorm(&proj, n, config.rms_norm_eps),
+                        None => proj,
+                    };
+                    for i in 0..dim {
+                        x_batch[t * dim + i] += contrib[i];
+                    }
+                }
+                record_phase!(self, t_resid, residual_ms);
+            }
+
+            // --- FFN block ---
+            let t_ffn_norm = self.tick();
+            let normed_batch2: Vec<f32> = {
+                let ffn_norm: Vec<f32> = self.weights.layers[layer_idx].ffn_norm.data().to_vec();
+                self.backend
+                    .batched_rmsnorm(&x_batch, &ffn_norm, dim, seq_len, config.rms_norm_eps)
+            };
+            record_phase!(self, t_ffn_norm, ffn_norm_ms);
+
+            {
+                let inter = config.intermediate_dim;
+                let post_ffn_norm: Option<Vec<f32>> = self.weights.layers[layer_idx]
+                    .post_ffn_norm
+                    .as_ref()
+                    .map(|t| t.data().to_vec());
+
+                let down_batch = if config.moe {
+                    if let Some(ref moe_weights) = self.weights.layers[layer_idx].moe {
+                        let mut result = vec![0.0f32; seq_len * dim];
+                        for t in 0..seq_len {
+                            let x_t = &normed_batch2[t * dim..(t + 1) * dim];
+                            let out = moe_forward(
+                                x_t,
+                                moe_weights,
+                                dim,
+                                inter,
+                                config.num_experts_per_token,
+                            );
+                            result[t * dim..(t + 1) * dim].copy_from_slice(&out);
+                        }
+                        result
+                    } else {
+                        vec![0.0f32; seq_len * dim]
+                    }
+                } else {
+                    let t_gate_up = self.tick();
+                    let gate_batch = {
+                        let raw_layer_g = if use_raw {
+                            Some(&self.raw_weights.as_ref().unwrap()[layer_idx])
+                        } else {
+                            None
+                        };
+                        if let Some(rw) =
+                            raw_layer_g.filter(|l| raw_weight_cpu_dispatchable(&l.w_gate))
+                        {
+                            self.backend
+                                .batched_dequant_matmul_async(&rw.w_gate, &normed_batch2, seq_len)
+                                .await
+                        } else {
+                            let w_gate: Vec<f32> =
+                                self.weights.layers[layer_idx].w_gate.data().to_vec();
+                            self.backend
+                                .batched_matmul(&w_gate, &normed_batch2, inter, dim, seq_len)
+                        }
+                    };
+                    let up_batch = {
+                        let raw_layer_u = if use_raw {
+                            Some(&self.raw_weights.as_ref().unwrap()[layer_idx])
+                        } else {
+                            None
+                        };
+                        if let Some(rw) =
+                            raw_layer_u.filter(|l| raw_weight_cpu_dispatchable(&l.w_up))
+                        {
+                            self.backend
+                                .batched_dequant_matmul_async(&rw.w_up, &normed_batch2, seq_len)
+                                .await
+                        } else {
+                            let w_up: Vec<f32> =
+                                self.weights.layers[layer_idx].w_up.data().to_vec();
+                            self.backend
+                                .batched_matmul(&w_up, &normed_batch2, inter, dim, seq_len)
+                        }
+                    };
+                    record_phase!(self, t_gate_up, gate_up_ms);
+
+                    let t_silu = self.tick();
+                    let ffn_hidden_batch: Vec<f32> = (0..seq_len)
+                        .flat_map(|t| {
+                            let gate_t = &gate_batch[t * inter..(t + 1) * inter];
+                            let up_t = &up_batch[t * inter..(t + 1) * inter];
+                            if config.architecture == Architecture::Gemma2 {
+                                gelu_mul_cpu(gate_t, up_t)
+                            } else {
+                                self.backend.silu_mul_vec(gate_t, up_t)
+                            }
+                        })
+                        .collect();
+                    record_phase!(self, t_silu, silu_mul_ms);
+
+                    let t_down = self.tick();
+                    let down_result = {
+                        let raw_layer_d = if use_raw {
+                            Some(&self.raw_weights.as_ref().unwrap()[layer_idx])
+                        } else {
+                            None
+                        };
+                        if let Some(rw) =
+                            raw_layer_d.filter(|l| raw_weight_cpu_dispatchable(&l.w_down))
+                        {
+                            self.backend
+                                .batched_dequant_matmul_async(
+                                    &rw.w_down,
+                                    &ffn_hidden_batch,
+                                    seq_len,
+                                )
+                                .await
+                        } else {
+                            let w_down: Vec<f32> =
+                                self.weights.layers[layer_idx].w_down.data().to_vec();
+                            self.backend
+                                .batched_matmul(&w_down, &ffn_hidden_batch, dim, inter, seq_len)
+                        }
+                    };
+                    record_phase!(self, t_down, down_ms);
+                    down_result
+                };
+
+                let t_resid_ffn = self.tick();
+                for t in 0..seq_len {
+                    let down = down_batch[t * dim..(t + 1) * dim].to_vec();
+                    let contrib = match &post_ffn_norm {
+                        Some(n) => rmsnorm(&down, n, config.rms_norm_eps),
+                        None => down,
+                    };
+                    for i in 0..dim {
+                        x_batch[t * dim + i] += contrib[i];
+                    }
+                }
+                record_phase!(self, t_resid_ffn, residual_ms);
+            }
+        }
+
+        let t_kv_write = self.tick();
+        let cache_pos = self.kv_cache.position();
+        for t in 0..seq_len {
+            for layer_idx in 0..num_layers {
+                let k_slice = &k_all[layer_idx][t * kv_dim..(t + 1) * kv_dim];
+                let v_slice = &v_all[layer_idx][t * kv_dim..(t + 1) * kv_dim];
+                self.kv_cache.write(layer_idx, k_slice, v_slice);
+                if let Some(ref mut qkv) = self.quantized_kv_cache {
+                    qkv.write(layer_idx, k_slice, v_slice);
+                }
+                self.backend.gpu_kv_write(
+                    layer_idx,
+                    cache_pos + t,
+                    num_kv_heads,
+                    head_dim,
+                    k_slice,
+                    v_slice,
+                );
+            }
+            self.kv_cache.advance();
+            if let Some(ref mut qkv) = self.quantized_kv_cache {
+                qkv.advance();
+            }
+        }
+        record_phase!(self, t_kv_write, kv_write_ms);
+
+        let t_final_norm = self.tick();
+        let last = seq_len - 1;
+        let last_x = &x_batch[last * dim..(last + 1) * dim];
+        let normed_final =
+            self.backend
+                .rmsnorm_vec(last_x, self.weights.output_norm.data(), config.rms_norm_eps);
+        record_phase!(self, t_final_norm, final_norm_ms);
+
+        let use_output_q4k = self
+            .raw_output_weight
+            .as_ref()
+            .is_some_and(|rw| rw.format == WeightFormat::Q4K && use_quant_for_dim(dim));
+        let use_output_q8 = self
+            .raw_output_weight
+            .as_ref()
+            .is_some_and(|rw| rw.format == WeightFormat::Q8_0 && use_quant_for_dim(dim));
+        let t_lm_head = self.tick();
+        let mut logits = if use_output_q4k {
+            let row = self.raw_output_weight.as_ref().unwrap();
+            let mut out = vec![0.0f32; config.vocab_size];
+            let preq = quantize_input_q8_0(&normed_final);
+            matvec_q4k_q8_into(&row.data, &preq, row.num_rows, dim, &mut out);
+            out
+        } else if use_output_q8 {
+            let row = self.raw_output_weight.as_ref().unwrap();
+            let preq = quantize_input_q8_0(&normed_final);
+            let mut out = vec![0.0f32; config.vocab_size];
+            matvec_q8_0_preq_into(&row.data, &preq, row.num_rows, &mut out);
+            out
+        } else {
+            matvec(
+                self.weights.output_weight.data(),
+                &normed_final,
+                config.vocab_size,
+                dim,
+            )
+        };
+
+        if config.final_logit_softcap > 0.0 {
+            let cap = config.final_logit_softcap;
+            for l in &mut logits {
+                *l = (*l / cap).tanh() * cap;
+            }
+        }
+        record_phase!(self, t_lm_head, lm_head_ms);
+
+        record_phase!(self, t_total, total_ms);
+        if let Some(profile) = self.prefill_profile.as_mut() {
+            profile.seq_len = seq_len;
+            profile.num_layers = num_layers;
+        }
+
+        Tensor::from_vec(logits, &[config.vocab_size]).unwrap()
+    }
+
     /// Returns the number of transformer layers that currently have weights loaded.
     ///
     /// This is always equal to the total layer count unless the model was created
