@@ -71,6 +71,57 @@ impl PipelineCache {
             .unwrap_or_default()
     }
 
+    /// Ensure the pipeline for `name` exists, returning cheap clones of its
+    /// `ComputePipeline` and `BindGroupLayout`.  Both are Arc-backed in wgpu,
+    /// so the clone is refcount-only.
+    ///
+    /// Use this when you need to hold the pipeline across an `.await` — the
+    /// callback-based [`Self::with_pipeline`] holds the `RwLock` read guard
+    /// for the entire callback, which can't straddle an await boundary
+    /// without `Send`-bound issues on wasm32.
+    pub fn ensure_pipeline_cloned(
+        &self,
+        device: &wgpu::Device,
+        name: &'static str,
+        shader_source: &'static str,
+        entry_point: &'static str,
+        bind_layout_entries: &[wgpu::BindGroupLayoutEntry],
+    ) -> (wgpu::ComputePipeline, wgpu::BindGroupLayout) {
+        {
+            let read = self.cache.read().expect("pipeline cache poisoned");
+            if let Some(cached) = read.get(name) {
+                return (cached.pipeline.clone(), cached.layout.clone());
+            }
+        }
+        let mut write = self.cache.write().expect("pipeline cache poisoned");
+        if !write.contains_key(name) {
+            let shader_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some(name),
+                source: wgpu::ShaderSource::Wgsl(shader_source.into()),
+            });
+            let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some(name),
+                entries: bind_layout_entries,
+            });
+            let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some(name),
+                bind_group_layouts: &[&layout],
+                push_constant_ranges: &[],
+            });
+            let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some(name),
+                layout: Some(&pipeline_layout),
+                module: &shader_module,
+                entry_point: Some(entry_point),
+                compilation_options: Default::default(),
+                cache: self.wgpu_cache.as_ref(),
+            });
+            write.insert(name, CachedPipeline { pipeline, layout });
+        }
+        let cached = write.get(name).expect("just inserted");
+        (cached.pipeline.clone(), cached.layout.clone())
+    }
+
     /// Run `f` with the cached pipeline for `name`, building it on first call.
     ///
     /// `bind_layout_entries` defines the bind group layout (typically 4 entries:

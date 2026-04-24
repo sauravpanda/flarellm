@@ -474,6 +474,21 @@ pub trait ComputeBackend: Send + Sync {
         )
     }
 
+    /// Async variant of [`Self::batched_dequant_matmul`] — returns the same
+    /// `Vec<f32>` but via a `Pin<Box<dyn Future>>` so GPU backends on wasm32
+    /// can `.await` the `map_async` readback without deadlocking the JS
+    /// event loop.  Default impl forwards to the sync version so CPU-only
+    /// callers get it for free.
+    fn batched_dequant_matmul_async<'a>(
+        &'a self,
+        weight: &'a RawWeight,
+        input: &'a [f32],
+        batch: usize,
+    ) -> core::pin::Pin<Box<dyn core::future::Future<Output = Vec<f32>> + 'a>> {
+        let result = self.batched_dequant_matmul(weight, input, batch);
+        Box::pin(async move { result })
+    }
+
     /// Serialise the driver-managed GPU pipeline cache to bytes.
     ///
     /// On backends that support `wgpu::Features::PIPELINE_CACHE` (Vulkan native),
