@@ -1872,7 +1872,8 @@ impl FlareEngine {
             ..Default::default()
         };
         self.stream_rng_state = self.rng_seed;
-        self.begin_stream_async_impl(&prompt_tokens, max_tokens).await;
+        self.begin_stream_async_impl(&prompt_tokens, max_tokens)
+            .await;
     }
 
     /// Begin a token-by-token stream, healing the last prompt token.

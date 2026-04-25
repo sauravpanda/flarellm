@@ -3021,9 +3021,7 @@ impl Model {
                     } else {
                         None
                     };
-                    if let Some(rw) =
-                        raw_layer_q.filter(|l| raw_weight_cpu_dispatchable(&l.wq))
-                    {
+                    if let Some(rw) = raw_layer_q.filter(|l| raw_weight_cpu_dispatchable(&l.wq)) {
                         self.backend
                             .batched_dequant_matmul_async(&rw.wq, &normed_batch, seq_len)
                             .await
@@ -3039,9 +3037,7 @@ impl Model {
                     } else {
                         None
                     };
-                    if let Some(rw) =
-                        raw_layer_k.filter(|l| raw_weight_cpu_dispatchable(&l.wk))
-                    {
+                    if let Some(rw) = raw_layer_k.filter(|l| raw_weight_cpu_dispatchable(&l.wk)) {
                         self.backend
                             .batched_dequant_matmul_async(&rw.wk, &normed_batch, seq_len)
                             .await
@@ -3057,9 +3053,7 @@ impl Model {
                     } else {
                         None
                     };
-                    if let Some(rw) =
-                        raw_layer_v.filter(|l| raw_weight_cpu_dispatchable(&l.wv))
-                    {
+                    if let Some(rw) = raw_layer_v.filter(|l| raw_weight_cpu_dispatchable(&l.wv)) {
                         self.backend
                             .batched_dequant_matmul_async(&rw.wv, &normed_batch, seq_len)
                             .await
@@ -3154,9 +3148,7 @@ impl Model {
                     } else {
                         None
                     };
-                    if let Some(rw) =
-                        raw_layer_o.filter(|l| raw_weight_cpu_dispatchable(&l.wo))
-                    {
+                    if let Some(rw) = raw_layer_o.filter(|l| raw_weight_cpu_dispatchable(&l.wo)) {
                         self.backend
                             .batched_dequant_matmul_async(&rw.wo, &attn_out_batch, seq_len)
                             .await
@@ -3233,8 +3225,13 @@ impl Model {
                         } else {
                             let w_gate: Vec<f32> =
                                 self.weights.layers[layer_idx].w_gate.data().to_vec();
-                            self.backend
-                                .batched_matmul(&w_gate, &normed_batch2, inter, dim, seq_len)
+                            self.backend.batched_matmul(
+                                &w_gate,
+                                &normed_batch2,
+                                inter,
+                                dim,
+                                seq_len,
+                            )
                         }
                     };
                     let up_batch = {
@@ -3292,8 +3289,13 @@ impl Model {
                         } else {
                             let w_down: Vec<f32> =
                                 self.weights.layers[layer_idx].w_down.data().to_vec();
-                            self.backend
-                                .batched_matmul(&w_down, &ffn_hidden_batch, dim, inter, seq_len)
+                            self.backend.batched_matmul(
+                                &w_down,
+                                &ffn_hidden_batch,
+                                dim,
+                                inter,
+                                seq_len,
+                            )
                         }
                     };
                     record_phase!(self, t_down, down_ms);
