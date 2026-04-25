@@ -1843,6 +1843,39 @@ impl FlareEngine {
         self.begin_stream_impl(prompt_tokens, max_tokens);
     }
 
+    /// Async variant of [`Self::begin_stream_with_params`].  Routes the
+    /// prefill through `Model::forward_prefill_async` so WebGPU dequant
+    /// matmuls can run on-device without the sync readback deadlock.
+    /// Required on wasm32 when a GPU backend is active; safe on CPU
+    /// backends too (the async path falls through to sync kernels).
+    ///
+    /// JS callers `await` the returned Promise before entering the
+    /// `next_token_async` decode loop.
+    #[allow(clippy::too_many_arguments)]
+    #[wasm_bindgen]
+    pub async fn begin_stream_with_params_async(
+        &mut self,
+        prompt_tokens: Vec<u32>,
+        max_tokens: u32,
+        temperature: f32,
+        top_p: f32,
+        top_k: u32,
+        repeat_penalty: f32,
+        min_p: f32,
+    ) {
+        self.stream_params = SamplingParams {
+            temperature,
+            top_p,
+            top_k: top_k as usize,
+            repeat_penalty,
+            min_p,
+            ..Default::default()
+        };
+        self.stream_rng_state = self.rng_seed;
+        self.begin_stream_async_impl(&prompt_tokens, max_tokens)
+            .await;
+    }
+
     /// Begin a token-by-token stream, healing the last prompt token.
     ///
     /// Identical to `begin_stream` but avoids double-processing the final prompt
@@ -1954,6 +1987,42 @@ impl FlareEngine {
                 .extend_from_slice(&effective[effective.len() - n..]);
         }
         // Reset stop-sequence accumulator for this stream.
+        self.stream_text_accum.clear();
+    }
+
+    /// Async variant of [`Self::begin_stream_impl`] for the WebGPU + wasm32
+    /// path.  Routes prefill through `forward_prefill_async` so the dequant
+    /// matmul readbacks can await JS microtasks instead of deadlocking.
+    async fn begin_stream_async_impl(&mut self, prompt_tokens: &[u32], max_tokens: u32) {
+        let effective = self.with_bos(prompt_tokens);
+        let t0 = now_ms();
+        let pos = if effective.is_empty() {
+            0
+        } else {
+            let _ = self.model.forward_prefill_async(&effective).await;
+            effective.len()
+        };
+        self.last_prefill_ms = now_ms() - t0;
+        self.last_decode_ms = 0.0;
+        self.last_tokens_generated = 0;
+        self.stream_decode_start_ms = 0.0;
+        self.stream_pos = pos;
+        self.kv_pos = pos;
+        self.stream_last_token = *effective.last().unwrap_or(&0);
+        self.stream_remaining = max_tokens as usize;
+        self.stream_done = false;
+        self.stream_stop_reason.clear();
+        let window = self.repeat_last_n;
+        let n = if window == 0 {
+            0
+        } else {
+            effective.len().min(window)
+        };
+        self.stream_recent_tokens.clear();
+        if n > 0 {
+            self.stream_recent_tokens
+                .extend_from_slice(&effective[effective.len() - n..]);
+        }
         self.stream_text_accum.clear();
     }
 
