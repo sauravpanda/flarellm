@@ -1843,14 +1843,18 @@ impl FlareEngine {
         self.begin_stream_impl(prompt_tokens, max_tokens);
     }
 
-    /// Async variant of [`Self::begin_stream_with_params`].  Routes the
-    /// prefill through `Model::forward_prefill_async` so WebGPU dequant
-    /// matmuls can run on-device without the sync readback deadlock.
-    /// Required on wasm32 when a GPU backend is active; safe on CPU
-    /// backends too (the async path falls through to sync kernels).
+    /// Async variant of [`Self::begin_stream_with_params`].  JS callers
+    /// `await` the returned Promise before entering the `next_token_async`
+    /// decode loop.
     ///
-    /// JS callers `await` the returned Promise before entering the
-    /// `next_token_async` decode loop.
+    /// On wasm32 + WebGPU, the prefill currently runs through the CPU
+    /// dispatch path (which the WebGpuBackend overrides on wasm32) rather
+    /// than the GPU async-readback path.  The per-matmul `map_async`
+    /// readback overhead dominates GPU compute for the small prefill
+    /// regime (e.g. SmolLM2-135M, 32 tokens, 30 layers ≈ 180 readbacks),
+    /// making CPU prefill ~1.7× faster end-to-end.  `forward_prefill_async`
+    /// remains in flare-core for callers that want it explicitly and as
+    /// the foundation for a future batched-readback redesign.
     #[allow(clippy::too_many_arguments)]
     #[wasm_bindgen]
     pub async fn begin_stream_with_params_async(
@@ -1990,16 +1994,18 @@ impl FlareEngine {
         self.stream_text_accum.clear();
     }
 
-    /// Async variant of [`Self::begin_stream_impl`] for the WebGPU + wasm32
-    /// path.  Routes prefill through `forward_prefill_async` so the dequant
-    /// matmul readbacks can await JS microtasks instead of deadlocking.
+    /// Async variant of [`Self::begin_stream_impl`].  Wraps the sync
+    /// `forward_prefill` in an async wrapper so JS callers can `await`
+    /// the returned Promise.  The prefill itself runs synchronously —
+    /// see the doc comment on `begin_stream_with_params_async` for why
+    /// the GPU async-readback path was disabled on wasm32.
     async fn begin_stream_async_impl(&mut self, prompt_tokens: &[u32], max_tokens: u32) {
         let effective = self.with_bos(prompt_tokens);
         let t0 = now_ms();
         let pos = if effective.is_empty() {
             0
         } else {
-            let _ = self.model.forward_prefill_async(&effective).await;
+            let _ = self.model.forward_prefill(&effective);
             effective.len()
         };
         self.last_prefill_ms = now_ms() - t0;

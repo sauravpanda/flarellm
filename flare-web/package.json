@@ -1,6 +1,6 @@
 {
   "name": "@sauravpanda/flare",
-  "version": "0.2.17",
+  "version": "0.2.18",
   "description": "WASM-first LLM inference engine with WebGPU acceleration — run LLMs in the browser with zero server costs",
   "type": "module",
   "main": "pkg/flare_web.js",
