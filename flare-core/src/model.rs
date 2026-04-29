@@ -617,6 +617,36 @@ pub trait ComputeBackend: Send + Sync {
 /// Default CPU compute backend. Uses optimized scalar loops.
 pub struct CpuBackend;
 
+/// Dispatch a 2-token Q8_0 matmul into the platform's best paired kernel.
+///
+/// Centralised here so the rayon-parallel and serial loops in
+/// [`CpuBackend::batched_dequant_matmul`] both call the same per-platform
+/// fast path without duplicating the cfg cascade at every site.
+#[allow(unused_variables)]
+#[inline]
+fn pair_dispatch(
+    weight_data: &[u8],
+    preq0: &QuantizedInput,
+    preq1: &QuantizedInput,
+    rows: usize,
+    out_chunk: &mut [f32],
+) {
+    debug_assert_eq!(out_chunk.len(), 2 * rows);
+    #[cfg(target_arch = "aarch64")]
+    matvec_q8_0_preq_pair_into(weight_data, preq0, preq1, rows, out_chunk);
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    matvec_q8_0_preq_pair_into_wasm(weight_data, preq0, preq1, rows, out_chunk);
+    #[cfg(all(
+        not(target_arch = "aarch64"),
+        not(all(target_arch = "wasm32", target_feature = "simd128"))
+    ))]
+    {
+        let (out0, out1) = out_chunk.split_at_mut(rows);
+        matvec_q8_0_preq_into(weight_data, preq0, rows, out0);
+        matvec_q8_0_preq_into(weight_data, preq1, rows, out1);
+    }
+}
+
 impl ComputeBackend for CpuBackend {
     fn matmul(&self, a: &Tensor, b: &Tensor, output: &mut Tensor) {
         let a_shape = a.shape();
@@ -719,132 +749,161 @@ impl ComputeBackend for CpuBackend {
         match weight.format {
             WeightFormat::Q8_0 => {
                 let mut output = vec![0.0f32; batch * out_rows];
-                let mk_preq = || QuantizedInput {
-                    scales: vec![0.0f32; blocks_per_row],
-                    quants: vec![0i8; blocks_per_row * Q8_0_BLOCK_SIZE],
-                    blocks_per_row,
+
+                // Pre-quantize every batch input row up front.  All matmul tiles
+                // below read from this preq array, so each input row is
+                // quantized exactly once regardless of which tile-shape (quad /
+                // pair / single) lands on it.  The kernels that follow write
+                // directly into per-tile output slices, so we drop the
+                // scratch+memcpy buffers (`quad_out` / `pair_out`) entirely.
+                // Quantize all batch input rows up front.  Each row is an
+                // independent map; we run it serially because quantization is
+                // cheap (one f32 pass per row) and the rayon spawn cost
+                // exceeds the per-row work for typical prefill batches.
+                let mk_preq = |b: usize| {
+                    let mut preq = QuantizedInput {
+                        scales: vec![0.0f32; blocks_per_row],
+                        quants: vec![0i8; blocks_per_row * Q8_0_BLOCK_SIZE],
+                        blocks_per_row,
+                    };
+                    quantize_input_q8_0_into(&input[b * in_cols..(b + 1) * in_cols], &mut preq);
+                    preq
                 };
-                // `preq0` / `preq1` are always used (at least by the single-token
-                // fallback on non-SIMD targets).  `preq2` / `preq3` are only used
-                // by the 4-token SMMLA tile on aarch64 with FEAT_I8MM; gate them
-                // so non-aarch64 CI builds (with `-D warnings`) don't flag them.
-                let mut preq0 = mk_preq();
-                let mut preq1 = mk_preq();
-                #[cfg(target_arch = "aarch64")]
-                let mut preq2 = mk_preq();
-                #[cfg(target_arch = "aarch64")]
-                let mut preq3 = mk_preq();
+                let preqs: Vec<QuantizedInput> = (0..batch).map(mk_preq).collect();
 
                 #[cfg(target_arch = "aarch64")]
                 let has_smmla = std::arch::is_aarch64_feature_detected!("i8mm");
 
-                #[cfg(any(
-                    target_arch = "aarch64",
-                    all(target_arch = "wasm32", target_feature = "simd128")
-                ))]
-                let mut pair_out = vec![0.0f32; 2 * out_rows];
+                // Decide the tile partitioning up front so each section writes
+                // into a non-overlapping output range:
+                //   [0 .. quad_tiles*4)               : 4-token SMMLA tiles
+                //   [quad_end .. quad_end + pair_tiles*2) : 2-token pair tiles
+                //   [pair_end .. batch)               : trailing 1-token
                 #[cfg(target_arch = "aarch64")]
-                let mut quad_out = vec![0.0f32; 4 * out_rows];
+                let quad_tiles = if has_smmla { batch / 4 } else { 0 };
+                #[cfg(not(target_arch = "aarch64"))]
+                let quad_tiles = 0usize;
+                let quad_end = quad_tiles * 4;
+                let pair_tiles = (batch - quad_end) / 2;
+                let pair_end = quad_end + pair_tiles * 2;
 
-                let mut b = 0usize;
-                // 4-token tiles (M2+ only, SMMLA-backed).  Streams weights once
-                // per 4 tokens instead of once per pair.
+                // 4-token SMMLA tiles.  Independent across tiles so we hand
+                // the work to rayon on native (M-series 10 cores idle during
+                // the previous serial loop).  Gate parallelism on
+                // `out_rows >= PARALLEL_TILE_THRESHOLD`: small projections
+                // (e.g. K/V heads at 192 rows on SmolLM2-135M) take less per
+                // tile than the rayon spawn cost, so we run them serially.
+                // The threshold catches the dominant matmuls (gate/up at
+                // 1536 rows, down/Q/attn_out at 576) and skips the small
+                // kv-projection cases.  On wasm32 this branch is unreachable
+                // (quad_tiles = 0).
+                #[cfg(not(target_arch = "wasm32"))]
+                const PARALLEL_TILE_THRESHOLD: usize = 384;
                 #[cfg(target_arch = "aarch64")]
-                if has_smmla {
-                    while b + 4 <= batch {
-                        quantize_input_q8_0_into(
-                            &input[b * in_cols..(b + 1) * in_cols],
-                            &mut preq0,
-                        );
-                        quantize_input_q8_0_into(
-                            &input[(b + 1) * in_cols..(b + 2) * in_cols],
-                            &mut preq1,
-                        );
-                        quantize_input_q8_0_into(
-                            &input[(b + 2) * in_cols..(b + 3) * in_cols],
-                            &mut preq2,
-                        );
-                        quantize_input_q8_0_into(
-                            &input[(b + 3) * in_cols..(b + 4) * in_cols],
-                            &mut preq3,
-                        );
-                        matvec_q8_0_preq_quad_into(
-                            &weight.data,
-                            [&preq0, &preq1, &preq2, &preq3],
-                            out_rows,
-                            &mut quad_out,
-                        );
-                        for i in 0..4 {
-                            output[(b + i) * out_rows..(b + i + 1) * out_rows]
-                                .copy_from_slice(&quad_out[i * out_rows..(i + 1) * out_rows]);
+                if quad_tiles > 0 {
+                    let weight_data = &weight.data;
+                    let preqs_ref = &preqs;
+                    if out_rows >= PARALLEL_TILE_THRESHOLD {
+                        use rayon::prelude::*;
+                        output[..quad_end * out_rows]
+                            .par_chunks_mut(4 * out_rows)
+                            .enumerate()
+                            .for_each(|(tile, out_chunk)| {
+                                let b = tile * 4;
+                                matvec_q8_0_preq_quad_into(
+                                    weight_data,
+                                    [
+                                        &preqs_ref[b],
+                                        &preqs_ref[b + 1],
+                                        &preqs_ref[b + 2],
+                                        &preqs_ref[b + 3],
+                                    ],
+                                    out_rows,
+                                    out_chunk,
+                                );
+                            });
+                    } else {
+                        for (tile, out_chunk) in output[..quad_end * out_rows]
+                            .chunks_mut(4 * out_rows)
+                            .enumerate()
+                        {
+                            let b = tile * 4;
+                            matvec_q8_0_preq_quad_into(
+                                weight_data,
+                                [
+                                    &preqs_ref[b],
+                                    &preqs_ref[b + 1],
+                                    &preqs_ref[b + 2],
+                                    &preqs_ref[b + 3],
+                                ],
+                                out_rows,
+                                out_chunk,
+                            );
                         }
-                        b += 4;
                     }
                 }
 
-                // 2-token tiles for the remainder.  Available on aarch64
-                // (SDOT/SMMLA) and wasm32 + SIMD128.
-                while b + 2 <= batch {
-                    quantize_input_q8_0_into(&input[b * in_cols..(b + 1) * in_cols], &mut preq0);
-                    quantize_input_q8_0_into(
-                        &input[(b + 1) * in_cols..(b + 2) * in_cols],
-                        &mut preq1,
-                    );
-                    #[cfg(target_arch = "aarch64")]
+                // 2-token tiles (aarch64 SDOT pair, wasm32 simd128 pair, scalar
+                // fallback elsewhere).  Same parallel-by-tile pattern; on
+                // wasm32 / non-aarch64 the loop runs serially because rayon's
+                // worker pool either has no extra threads or isn't compiled in.
+                if pair_tiles > 0 {
+                    let weight_data = &weight.data;
+                    let preqs_ref = &preqs;
+                    let pair_section = &mut output[quad_end * out_rows..pair_end * out_rows];
+                    #[cfg(not(target_arch = "wasm32"))]
                     {
-                        matvec_q8_0_preq_pair_into(
-                            &weight.data,
-                            &preq0,
-                            &preq1,
-                            out_rows,
-                            &mut pair_out,
-                        );
-                        output[b * out_rows..(b + 1) * out_rows]
-                            .copy_from_slice(&pair_out[..out_rows]);
-                        output[(b + 1) * out_rows..(b + 2) * out_rows]
-                            .copy_from_slice(&pair_out[out_rows..]);
+                        if out_rows >= PARALLEL_TILE_THRESHOLD {
+                            use rayon::prelude::*;
+                            pair_section
+                                .par_chunks_mut(2 * out_rows)
+                                .enumerate()
+                                .for_each(|(tile, out_chunk)| {
+                                    let b = quad_end + tile * 2;
+                                    pair_dispatch(
+                                        weight_data,
+                                        &preqs_ref[b],
+                                        &preqs_ref[b + 1],
+                                        out_rows,
+                                        out_chunk,
+                                    );
+                                });
+                        } else {
+                            for (tile, out_chunk) in
+                                pair_section.chunks_mut(2 * out_rows).enumerate()
+                            {
+                                let b = quad_end + tile * 2;
+                                pair_dispatch(
+                                    weight_data,
+                                    &preqs_ref[b],
+                                    &preqs_ref[b + 1],
+                                    out_rows,
+                                    out_chunk,
+                                );
+                            }
+                        }
                     }
-                    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+                    #[cfg(target_arch = "wasm32")]
                     {
-                        matvec_q8_0_preq_pair_into_wasm(
-                            &weight.data,
-                            &preq0,
-                            &preq1,
-                            out_rows,
-                            &mut pair_out,
-                        );
-                        output[b * out_rows..(b + 1) * out_rows]
-                            .copy_from_slice(&pair_out[..out_rows]);
-                        output[(b + 1) * out_rows..(b + 2) * out_rows]
-                            .copy_from_slice(&pair_out[out_rows..]);
+                        for (tile, out_chunk) in pair_section.chunks_mut(2 * out_rows).enumerate() {
+                            let b = quad_end + tile * 2;
+                            pair_dispatch(
+                                weight_data,
+                                &preqs_ref[b],
+                                &preqs_ref[b + 1],
+                                out_rows,
+                                out_chunk,
+                            );
+                        }
                     }
-                    #[cfg(all(
-                        not(target_arch = "aarch64"),
-                        not(all(target_arch = "wasm32", target_feature = "simd128"))
-                    ))]
-                    {
-                        matvec_q8_0_preq_into(
-                            &weight.data,
-                            &preq0,
-                            out_rows,
-                            &mut output[b * out_rows..(b + 1) * out_rows],
-                        );
-                        matvec_q8_0_preq_into(
-                            &weight.data,
-                            &preq1,
-                            out_rows,
-                            &mut output[(b + 1) * out_rows..(b + 2) * out_rows],
-                        );
-                    }
-                    b += 2;
                 }
 
                 // Trailing single token (odd batch).
-                if b < batch {
-                    quantize_input_q8_0_into(&input[b * in_cols..(b + 1) * in_cols], &mut preq0);
+                if pair_end < batch {
+                    let b = pair_end;
                     matvec_q8_0_preq_into(
                         &weight.data,
-                        &preq0,
+                        &preqs[b],
                         out_rows,
                         &mut output[b * out_rows..(b + 1) * out_rows],
                     );
