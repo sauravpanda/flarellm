@@ -2798,18 +2798,21 @@ impl Model {
                     record_phase!(self, t_gate_up, gate_up_ms);
 
                     // Per-token silu_mul / gelu_mul (CPU arithmetic, no GPU dispatch).
+                    // Write directly into a preallocated buffer to avoid the
+                    // per-token Vec allocation that the iterator-collect chain
+                    // would otherwise do.
                     let t_silu = self.tick();
-                    let ffn_hidden_batch: Vec<f32> = (0..seq_len)
-                        .flat_map(|t| {
-                            let gate_t = &gate_batch[t * inter..(t + 1) * inter];
-                            let up_t = &up_batch[t * inter..(t + 1) * inter];
-                            if config.architecture == Architecture::Gemma2 {
-                                gelu_mul_cpu(gate_t, up_t)
-                            } else {
-                                self.backend.silu_mul_vec(gate_t, up_t)
-                            }
-                        })
-                        .collect();
+                    let mut ffn_hidden_batch = vec![0.0f32; seq_len * inter];
+                    for t in 0..seq_len {
+                        let gate_t = &gate_batch[t * inter..(t + 1) * inter];
+                        let up_t = &up_batch[t * inter..(t + 1) * inter];
+                        let dst = &mut ffn_hidden_batch[t * inter..(t + 1) * inter];
+                        if config.architecture == Architecture::Gemma2 {
+                            gelu_mul_into(gate_t, up_t, dst);
+                        } else {
+                            silu_mul_into(gate_t, up_t, dst);
+                        }
+                    }
                     record_phase!(self, t_silu, silu_mul_ms);
 
                     // Single batched dispatch for the down projection.
@@ -3256,17 +3259,17 @@ impl Model {
                     record_phase!(self, t_gate_up, gate_up_ms);
 
                     let t_silu = self.tick();
-                    let ffn_hidden_batch: Vec<f32> = (0..seq_len)
-                        .flat_map(|t| {
-                            let gate_t = &gate_batch[t * inter..(t + 1) * inter];
-                            let up_t = &up_batch[t * inter..(t + 1) * inter];
-                            if config.architecture == Architecture::Gemma2 {
-                                gelu_mul_cpu(gate_t, up_t)
-                            } else {
-                                self.backend.silu_mul_vec(gate_t, up_t)
-                            }
-                        })
-                        .collect();
+                    let mut ffn_hidden_batch = vec![0.0f32; seq_len * inter];
+                    for t in 0..seq_len {
+                        let gate_t = &gate_batch[t * inter..(t + 1) * inter];
+                        let up_t = &up_batch[t * inter..(t + 1) * inter];
+                        let dst = &mut ffn_hidden_batch[t * inter..(t + 1) * inter];
+                        if config.architecture == Architecture::Gemma2 {
+                            gelu_mul_into(gate_t, up_t, dst);
+                        } else {
+                            silu_mul_into(gate_t, up_t, dst);
+                        }
+                    }
                     record_phase!(self, t_silu, silu_mul_ms);
 
                     let t_down = self.tick();
