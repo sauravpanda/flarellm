@@ -797,6 +797,7 @@ impl ComputeBackend for CpuBackend {
                 // 1536 rows, down/Q/attn_out at 576) and skips the small
                 // kv-projection cases.  On wasm32 this branch is unreachable
                 // (quad_tiles = 0).
+                #[cfg(not(target_arch = "wasm32"))]
                 const PARALLEL_TILE_THRESHOLD: usize = 384;
                 #[cfg(target_arch = "aarch64")]
                 if quad_tiles > 0 {
