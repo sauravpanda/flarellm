@@ -157,15 +157,18 @@ pub fn raw_weight_cpu_dispatchable(weight: &RawWeight) -> bool {
 /// [wq; wk; wv] and [w_gate; w_up].  This lets us replace 3 matvec calls
 /// (Q, K, V) with 1, and 2 matvec calls (gate, up) with 1, reading the
 /// input vector once instead of multiple times.
+///
+/// Stored as `RawWeight`s so prefill can dispatch the fused projection
+/// through `ComputeBackend::batched_dequant_matmul` — same fast path the
+/// un-fused projections take, just with a single batched call over a
+/// 2× / 3× wider weight.
 pub struct FusedLayerWeights {
-    /// Concatenated Q8_0 bytes for [wq; wk; wv].
-    pub qkv_data: Vec<u8>,
-    /// Total output rows = q_dim + kv_dim + kv_dim.
-    pub qkv_rows: usize,
-    /// Concatenated Q8_0 bytes for [w_gate; w_up].
-    pub gate_up_data: Vec<u8>,
-    /// Total output rows = intermediate_dim * 2.
-    pub gate_up_rows: usize,
+    /// Concatenated Q8_0 bytes for [wq; wk; wv], wrapped as a RawWeight.
+    /// `num_rows = q_dim + kv_dim + kv_dim`.
+    pub qkv: RawWeight,
+    /// Concatenated Q8_0 bytes for [w_gate; w_up], wrapped as a RawWeight.
+    /// `num_rows = intermediate_dim * 2`.
+    pub gate_up: RawWeight,
 }
 
 /// Trait for compute backends (WebGPU, SIMD, native wgpu).
@@ -1413,27 +1416,34 @@ impl Model {
             let fused: Vec<FusedLayerWeights> = raw
                 .iter()
                 .map(|rw| {
-                    // Concatenate [wq; wk; wv] Q8_0 bytes
+                    // Concatenate [wq; wk; wv] Q8_0 bytes.  All three projections
+                    // share the same `in_cols = dim`, so they share `blocks_per_row`
+                    // — the fused weight just stacks rows.
                     let mut qkv_data =
                         Vec::with_capacity(rw.wq.data.len() + rw.wk.data.len() + rw.wv.data.len());
                     qkv_data.extend_from_slice(&rw.wq.data);
                     qkv_data.extend_from_slice(&rw.wk.data);
                     qkv_data.extend_from_slice(&rw.wv.data);
-                    let qkv_rows = rw.wq.num_rows + rw.wk.num_rows + rw.wv.num_rows;
+                    let qkv = RawWeight {
+                        data: qkv_data,
+                        format: rw.wq.format,
+                        num_rows: rw.wq.num_rows + rw.wk.num_rows + rw.wv.num_rows,
+                        blocks_per_row: rw.wq.blocks_per_row,
+                    };
 
-                    // Concatenate [w_gate; w_up] Q8_0 bytes
+                    // Concatenate [w_gate; w_up] Q8_0 bytes.
                     let mut gate_up_data =
                         Vec::with_capacity(rw.w_gate.data.len() + rw.w_up.data.len());
                     gate_up_data.extend_from_slice(&rw.w_gate.data);
                     gate_up_data.extend_from_slice(&rw.w_up.data);
-                    let gate_up_rows = rw.w_gate.num_rows + rw.w_up.num_rows;
+                    let gate_up = RawWeight {
+                        data: gate_up_data,
+                        format: rw.w_gate.format,
+                        num_rows: rw.w_gate.num_rows + rw.w_up.num_rows,
+                        blocks_per_row: rw.w_gate.blocks_per_row,
+                    };
 
-                    FusedLayerWeights {
-                        qkv_data,
-                        qkv_rows,
-                        gate_up_data,
-                        gate_up_rows,
-                    }
+                    FusedLayerWeights { qkv, gate_up }
                 })
                 .collect();
             self.fused_weights = Some(fused);
@@ -2012,9 +2022,9 @@ impl Model {
                 );
                 let fused = &self.fused_weights.as_ref().unwrap()[layer_idx];
                 matvec_q8_0_preq_into(
-                    &fused.qkv_data,
+                    &fused.qkv.data,
                     &self.forward_buffers.normed_q8,
-                    fused.qkv_rows,
+                    fused.qkv.num_rows,
                     &mut self.forward_buffers.qkv,
                 );
                 self.forward_buffers
@@ -2340,7 +2350,7 @@ impl Model {
                 // start pulling gate/up data into L2 before the matvec needs it.
                 if use_q8_ffn {
                     let fused = &self.fused_weights.as_ref().unwrap()[layer_idx];
-                    prefetch_weight_bytes(&fused.gate_up_data);
+                    prefetch_weight_bytes(&fused.gate_up.data);
                 } else if self.fused_f32_gate_up.is_some() {
                     prefetch_weight_f32(&self.fused_f32_gate_up.as_ref().unwrap()[layer_idx]);
                 } else {
@@ -2393,9 +2403,9 @@ impl Model {
                     );
                     let fused = &self.fused_weights.as_ref().unwrap()[layer_idx];
                     matvec_q8_0_preq_into(
-                        &fused.gate_up_data,
+                        &fused.gate_up.data,
                         &self.forward_buffers.ffn_normed_q8,
-                        fused.gate_up_rows,
+                        fused.gate_up.num_rows,
                         &mut self.forward_buffers.gate_up,
                     );
                     self.forward_buffers
@@ -2459,7 +2469,7 @@ impl Model {
                     prefetch_weight_f32(next_layer.attn_norm.data());
                     if use_q8_attn {
                         let next_fused = &self.fused_weights.as_ref().unwrap()[layer_idx + 1];
-                        prefetch_weight_bytes(&next_fused.qkv_data);
+                        prefetch_weight_bytes(&next_fused.qkv.data);
                     } else if self.fused_f32_qkv.is_some() {
                         prefetch_weight_f32(&self.fused_f32_qkv.as_ref().unwrap()[layer_idx + 1]);
                     } else {
@@ -2638,18 +2648,49 @@ impl Model {
                     .as_ref()
                     .map(|t| t.data().to_vec());
 
-                // Three GPU dispatches instead of 3 × seq_len individual matvec calls.
                 // Use fused dequant+matvec when raw quantized weights are available
                 // *and* the specific weight's format is dispatchable by the backend
                 // (mixed-format models like Q4_K_M fall back per-weight).
+                //
+                // When the model has a Q8_0 fused QKV weight (built once at load
+                // time by `set_raw_weights`), one batched call replaces the three
+                // separate Q/K/V dispatches: the input is quantized once instead
+                // of three times, the rayon spawn cost is paid once, and the
+                // tile loop streams a single 960-row weight (= q_dim+kv_dim*2)
+                // instead of three smaller ones with separate per-call setup.
+                // Output layout per token: `[q_row || k_row || v_row]`, so the
+                // post-matmul split is a per-token slice copy.
                 let raw_layer = if use_raw {
                     Some(&self.raw_weights.as_ref().unwrap()[layer_idx])
                 } else {
                     None
                 };
+                let fused_qkv = self
+                    .fused_weights
+                    .as_ref()
+                    .map(|fw| &fw[layer_idx].qkv)
+                    .filter(|rw| raw_weight_cpu_dispatchable(rw));
                 let t_qkv = self.tick();
-                let q_proj =
-                    if let Some(rw) = raw_layer.filter(|l| raw_weight_cpu_dispatchable(&l.wq)) {
+                let (q_proj, k_proj, v_proj) = if let Some(qkv_w) = fused_qkv {
+                    let qkv = self
+                        .backend
+                        .batched_dequant_matmul(qkv_w, &normed_batch, seq_len);
+                    let stride = q_dim + kv_dim + kv_dim;
+                    debug_assert_eq!(qkv.len(), seq_len * stride);
+                    let mut q = Vec::with_capacity(seq_len * q_dim);
+                    let mut k = Vec::with_capacity(seq_len * kv_dim);
+                    let mut v = Vec::with_capacity(seq_len * kv_dim);
+                    for t in 0..seq_len {
+                        let row = &qkv[t * stride..(t + 1) * stride];
+                        q.extend_from_slice(&row[..q_dim]);
+                        k.extend_from_slice(&row[q_dim..q_dim + kv_dim]);
+                        v.extend_from_slice(&row[q_dim + kv_dim..]);
+                    }
+                    (q, k, v)
+                } else {
+                    let q_proj = if let Some(rw) =
+                        raw_layer.filter(|l| raw_weight_cpu_dispatchable(&l.wq))
+                    {
                         self.backend
                             .batched_dequant_matmul(&rw.wq, &normed_batch, seq_len)
                     } else {
@@ -2657,8 +2698,9 @@ impl Model {
                         self.backend
                             .batched_matmul(&wq, &normed_batch, q_dim, dim, seq_len)
                     };
-                let k_proj =
-                    if let Some(rw) = raw_layer.filter(|l| raw_weight_cpu_dispatchable(&l.wk)) {
+                    let k_proj = if let Some(rw) =
+                        raw_layer.filter(|l| raw_weight_cpu_dispatchable(&l.wk))
+                    {
                         self.backend
                             .batched_dequant_matmul(&rw.wk, &normed_batch, seq_len)
                     } else {
@@ -2666,8 +2708,9 @@ impl Model {
                         self.backend
                             .batched_matmul(&wk, &normed_batch, kv_dim, dim, seq_len)
                     };
-                let v_proj =
-                    if let Some(rw) = raw_layer.filter(|l| raw_weight_cpu_dispatchable(&l.wv)) {
+                    let v_proj = if let Some(rw) =
+                        raw_layer.filter(|l| raw_weight_cpu_dispatchable(&l.wv))
+                    {
                         self.backend
                             .batched_dequant_matmul(&rw.wv, &normed_batch, seq_len)
                     } else {
@@ -2675,6 +2718,8 @@ impl Model {
                         self.backend
                             .batched_matmul(&wv, &normed_batch, kv_dim, dim, seq_len)
                     };
+                    (q_proj, k_proj, v_proj)
+                };
                 record_phase!(self, t_qkv, qkv_proj_ms);
 
                 // Apply biases in-place (CPU broadcast, cheap; rare in most models).
@@ -3608,9 +3653,9 @@ impl Model {
                 );
                 let fused = &self.fused_weights.as_ref().unwrap()[layer_idx];
                 matvec_q8_0_preq_into(
-                    &fused.qkv_data,
+                    &fused.qkv.data,
                     &self.forward_buffers.normed_q8,
-                    fused.qkv_rows,
+                    fused.qkv.num_rows,
                     &mut self.forward_buffers.qkv,
                 );
                 self.forward_buffers
@@ -3895,7 +3940,7 @@ impl Model {
             // Prefetch FFN gate/up weights while computing FFN RMSNorm.
             if use_q8_ffn {
                 let fused = &self.fused_weights.as_ref().unwrap()[layer_idx];
-                prefetch_weight_bytes(&fused.gate_up_data);
+                prefetch_weight_bytes(&fused.gate_up.data);
             } else if self.fused_f32_gate_up.is_some() {
                 prefetch_weight_f32(&self.fused_f32_gate_up.as_ref().unwrap()[layer_idx]);
             } else if !use_raw {
@@ -3914,9 +3959,9 @@ impl Model {
                 );
                 let fused = &self.fused_weights.as_ref().unwrap()[layer_idx];
                 matvec_q8_0_preq_into(
-                    &fused.gate_up_data,
+                    &fused.gate_up.data,
                     &self.forward_buffers.ffn_normed_q8,
-                    fused.gate_up_rows,
+                    fused.gate_up.num_rows,
                     &mut self.forward_buffers.gate_up,
                 );
                 self.forward_buffers
@@ -4019,7 +4064,7 @@ impl Model {
                 prefetch_weight_f32(next_layer.attn_norm.data());
                 if use_q8_attn {
                     let next_fused = &self.fused_weights.as_ref().unwrap()[layer_idx + 1];
-                    prefetch_weight_bytes(&next_fused.qkv_data);
+                    prefetch_weight_bytes(&next_fused.qkv.data);
                 } else if self.fused_f32_qkv.is_some() {
                     prefetch_weight_f32(&self.fused_f32_qkv.as_ref().unwrap()[layer_idx + 1]);
                 } else if !use_raw {
@@ -4249,9 +4294,9 @@ impl Model {
                 );
                 let fused = &self.fused_weights.as_ref().unwrap()[layer_idx];
                 matvec_q8_0_preq_into(
-                    &fused.qkv_data,
+                    &fused.qkv.data,
                     &self.forward_buffers.normed_q8,
-                    fused.qkv_rows,
+                    fused.qkv.num_rows,
                     &mut self.forward_buffers.qkv,
                 );
                 self.forward_buffers
@@ -4536,7 +4581,7 @@ impl Model {
 
             if use_q8_ffn {
                 let fused = &self.fused_weights.as_ref().unwrap()[layer_idx];
-                prefetch_weight_bytes(&fused.gate_up_data);
+                prefetch_weight_bytes(&fused.gate_up.data);
             } else if self.fused_f32_gate_up.is_some() {
                 prefetch_weight_f32(&self.fused_f32_gate_up.as_ref().unwrap()[layer_idx]);
             } else if !use_raw {
@@ -4554,9 +4599,9 @@ impl Model {
                 );
                 let fused = &self.fused_weights.as_ref().unwrap()[layer_idx];
                 matvec_q8_0_preq_into(
-                    &fused.gate_up_data,
+                    &fused.gate_up.data,
                     &self.forward_buffers.ffn_normed_q8,
-                    fused.gate_up_rows,
+                    fused.gate_up.num_rows,
                     &mut self.forward_buffers.gate_up,
                 );
                 self.forward_buffers
