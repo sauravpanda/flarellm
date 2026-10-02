@@ -72,3 +72,91 @@ Native error recovery tests require a real adapter:
 ```sh
 cargo test -p flarellm-gpu --test decode_errors -- --ignored --nocapture
 ```
+
+## Automated installed-package coverage (#521)
+
+The ordinary `CI / WASM build` job now drives Chromium from the locked Playwright
+version in `flare-web/package-lock.json`. It installs the npm tarball with the
+same consumer checker above. No external model downloads or private paths are
+needed:
+
+```sh
+wasm-pack build flare-web --target web --no-opt
+npm ci --prefix flare-web
+npm run build:sdk --prefix flare-web
+node .github/scripts/check_wasm_package.mjs /tmp/flare-consumer
+python3 flare-web/tests/browser/make_ci_fixture.py /tmp/flare-consumer
+(cd flare-web && npx playwright install --with-deps chromium)
+node flare-web/tests/browser/run.mjs /tmp/flare-consumer
+```
+
+For an already running local Chrome, serve with `serve.py ... --ci`, then call
+`await runCI()` in the consumer page, or `await runCI({gpu: true})`. Each GPU
+fault uses a disposable worker. The CI driver launches a fresh browser/context;
+it never attaches to user tabs. Set `BROWSER_PORT` or `BROWSER_ARTIFACTS` to change
+its localhost port or artifact directory.
+
+### Fixture and assertions
+
+`fixture.json` pins SHA-256 for the generated 370 KiB GGUF and synthetic tokenizer,
+prompt IDs, greedy sampling settings, regression token IDs and logit tolerances.
+Generation verifies checksums; the driver verifies them again before launching.
+The GGUF uses the existing deterministic two-layer generator: F32 embeddings,
+norms and output plus Q8_0 layer matrices. It is redistributable under the repo
+license. No trained weights are downloaded. The tokenizer deliberately maps the
+first three generated tokens to the three bytes of `€`; actual WASM worker
+inference must stream two empty chunks then the complete character.
+
+Assertions cover worker init/load errors, download progress, actual CPU generation,
+stream/result equality, token-boundary Unicode, cancellation, automatic reload,
+reset, BUSY rejection, download abort, disposal, and 27 prompt + 5 generated tokens
+at the 32-token context boundary. The CPU CI job disables GPU and verifies no
+adapter exists. Cache coverage constructs a fresh worker with the model download
+returning HTTP 503. **WASM and tokenizer still load online**; fully offline app
+startup is not covered. Tiny-model cancellation does not certify cancellation
+during a long-running prefill; the original manual real-model check remains.
+
+These are synthetic regression expectations from Flare, **not an independent
+trusted generation reference**. `referenceImplementation` is explicitly null.
+They do not establish real-answer quality or original model tokenizer parity.
+
+### GPU jobs and capability requirements
+
+`GPU correctness (software Vulkan)` runs weekly and on workflow dispatch:
+
+- Native: Ubuntu 24.04 + Mesa software Vulkan; executes all ignored `flarellm-gpu`
+  library/integration tests with `--no-fail-fast`. `FLARE_REQUIRE_GPU=1` converts
+  the integration helper's optional adapter skip into an explicit failure.
+  Existing unit tests and decode error tests already require an adapter.
+- Browser: pinned Chromium + SwiftShader, requiring WebGPU initialization. It runs
+  f16/default and forced f32 KV comparisons and adapter/device storage, invalid
+  pipeline and oversized-dispatch fault regressions against the generated model.
+  A missing/insufficient adapter fails, not skips. Default mode uses f16 only
+  when the adapter offers it; features are recorded, not assumed.
+
+There were zero repository self-hosted runners when this was implemented. These
+jobs use hosted runners and software adapters for correctness only. Physical GPU
+coverage needs an available managed runner and remains outstanding. The browser
+compares all logits over CPU prefill + four GPU decode steps with
+`abs(gpu-cpu) <= 0.002 + 0.002 * abs(cpu)`. Prefill runs on CPU in both paths;
+this is **not GPU prefill parity**. Q4/mixed-quantized layer formats and GPU context
+boundaries remain outside this fixture. No tolerance is widened to hide failures.
+Known native SiLU tolerance and resident shader issues described in VALIDATION.md
+may keep the diagnostic workflow red; its failures are retained, not suppressed.
+
+### Reports and performance
+
+Artifacts include `result.json`, console/network/server logs, a screenshot and a
+Playwright trace; native jobs preserve adapter/platform/compiler metadata and
+full test output. The result explicitly reports Chromium, Firefox/WebKit not run,
+CPU-job GPU skips and required-GPU failures. Rust tests print their ignored counts.
+Load milliseconds, TTFT (first token event, which may be an incomplete UTF-8
+character), and decode tokens/second exclude setup. These tiny-model measurements
+are informational: hosted runner variance and software GPUs are unsuitable for
+physical GPU performance gates. Gather repeated baselines on a stable physical
+runner before adding thresholds. No speed threshold is enforced.
+
+Remaining #521 work: independent versioned reference fixtures, original tokenizer
+parity, GPU prefill/more quantization/context coverage, fully offline startup,
+other browser/platform configurations, physical adapters and stable performance
+baselines. This change deliberately references rather than closes #521.

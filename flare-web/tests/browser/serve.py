@@ -8,14 +8,30 @@ from pathlib import Path
 parser = argparse.ArgumentParser()
 parser.add_argument('consumer')
 parser.add_argument('model')
+parser.add_argument('--ci', action='store_true', help='Enable test-only model availability controls')
 parser.add_argument('--port', type=int, default=8520)
 args = parser.parse_args()
 model = Path(args.model)
 
 class Handler(http.server.SimpleHTTPRequestHandler):
+    model_offline = False
+
+    def do_POST(self):
+        if not args.ci or self.path not in ('/__model_offline', '/__model_online'):
+            self.send_error(404)
+            return
+        Handler.model_offline = self.path == '/__model_offline'
+        self.send_response(204)
+        self.end_headers()
+
     def do_GET(self):
         if self.path not in ('/model.gguf', '/slow-model.gguf'):
             return super().do_GET()
+        if Handler.model_offline:
+            self.send_error(503, 'Model unavailable for cache regression')
+            return
+        if args.ci and self.path == '/slow-model.gguf':
+            time.sleep(0.5)
         self.send_response(200)
         self.send_header('Content-Type', 'application/octet-stream')
         self.send_header('Content-Length', str(model.stat().st_size))
