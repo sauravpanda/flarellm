@@ -29,8 +29,8 @@ as performance gates; no threshold or stable baseline is claimed.
 
 Evidence runs:
 
-- [Ordinary CI including CPU browser and negative adapter check](https://github.com/sauravpanda/flarellm/actions/runs/36979736315)
-- [Software GPU workflow and downloadable artifacts](https://github.com/sauravpanda/flarellm/actions/runs/36979736217)
+- [Ordinary CI including CPU browser and negative adapter check](https://github.com/sauravpanda/flarellm/actions/runs/36980374157)
+- [Software GPU workflow and downloadable artifacts](https://github.com/sauravpanda/flarellm/actions/runs/36980374150)
 
 ## Native capability and test results
 
@@ -47,6 +47,13 @@ at `test_dequant_matvec_q3k_matches_cpu`. The workflow now discovers every ignor
 test and runs each in its own process; crashes remain failures and the remaining
 tests still execute. Each has a 120-second timeout and its own saved log. This
 isolates a software-driver failure without weakening correctness assertions.
+
+The final isolated Mesa 25.2.8 / LLVM 20.1.2 run exercised all 42 ignored tests:
+**38 passed, 4 failed**. The single/multi-row Q3_K and Q6_K matvec tests each exited
+with SIGSEGV (`-11`); all remaining tests ran and passed. Each failure has a log
+and a JSON entry. The workflow intentionally remains red. A deliberate fake test
+executable that crashes followed by one that passes separately verified that the
+runner continues after a signal and still exits 1 overall.
 
 Local native Metal: 41 passed and the existing SiLU comparison failed
 (`0.7310586` vs `0.732906` at `1e-3`). No tolerance or shader was changed. Full

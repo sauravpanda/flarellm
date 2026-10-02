@@ -150,7 +150,7 @@ compares all logits over CPU prefill + four GPU decode steps with
 this is **not GPU prefill parity**. Q4/mixed-quantized layer formats and GPU context
 boundaries remain outside this fixture. No tolerance is widened to hide failures.
 Known native SiLU tolerance and resident shader issues described in VALIDATION.md
-may keep the diagnostic workflow red; its failures are retained, not suppressed.
+remain unresolved. Hosted Mesa also crashes in Q3_K/Q6_K kernel tests; its failures are retained, not suppressed.
 
 ### Reports and performance
 
