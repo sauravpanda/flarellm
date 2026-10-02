@@ -125,8 +125,11 @@ They do not establish real-answer quality or original model tokenizer parity.
 `GPU correctness (software Vulkan)` runs weekly, on workflow dispatch, and on PRs changing that workflow:
 
 - Native: Ubuntu 24.04 + Mesa software Vulkan; executes all ignored `flarellm-gpu`
-  library/integration tests with `--no-fail-fast -- --ignored --nocapture --test-threads=1`.
-  Tests run serially to avoid concurrent software-driver device initialization. `FLARE_REQUIRE_GPU=1` converts
+  library/integration tests through `.github/scripts/run_gpu_tests.py`.
+  It discovers ignored tests from Cargo's actual test executables and runs each
+  in a separate process, serially, with a 120-second per-test timeout. Crashes,
+  timeouts and assertions remain failures, but cannot hide the remaining tests.
+  Per-test logs and `results.json` record every pass/failure/not-run state. `FLARE_REQUIRE_GPU=1` converts
   the integration helper's optional adapter skip into an explicit failure.
   Existing unit tests and decode error tests already require an adapter.
   Device creation caps buffer limits at the adapter's advertised values (up to

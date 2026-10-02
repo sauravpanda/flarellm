@@ -1,3 +1,68 @@
+# Issue #521 automated coverage — October 2, 2026
+
+## Browser CI evidence
+
+The installed-package job passed on hosted Linux x86_64, Node 20.20.2 and
+Playwright Chromium 145.0.7632.6. The model and tokenizer were generated from
+committed scripts and checked against `fixture.json`; no private assets were used.
+The ordinary job disables GPU and verifies that `requestAdapter()` returns null.
+All eight lifecycle/numerical stages passed, including streamed Unicode from
+actual generated tokens, cancellation/reset/reload, model-cache reuse with HTTP
+503 downloads, and the CPU context boundary. The deliberate required-adapter run
+exited 1 with the expected missing-adapter error; a corrupted GGUF also exited 1
+with a checksum error before browser startup.
+
+The software WebGPU job passed all six dedicated worker modes: default and
+forced-f32 numerical comparisons, insufficient adapter storage, insufficient
+device storage, invalid pipeline, and oversized dispatch. Adapter metadata says
+Google SwiftShader with 32,768-byte workgroup storage; Flare requested 16,416.
+The device did not enable shader-f16 or subgroups. Both are explicitly reported
+as skipped; this run certifies neither path. Five comparison tokens match
+`[36,28,20,12,4]`; maximum absolute logit error was about 0.001900 under the unchanged
+`0.002 + 0.002 * abs(cpu)` bound. Prefill is CPU in both comparison paths.
+
+Artifacts include JSON reports, browser/server/network logs, screenshot and
+Playwright trace. Example observed CPU measurements across two hosted runs were
+16.1–17.6 ms load, 2.9–6.1 ms TTFT and roughly 2,222–5,714 tokens/s for this tiny
+fixture. This variance and sub-millisecond decode intervals make these unsuitable
+as performance gates; no threshold or stable baseline is claimed.
+
+Evidence runs:
+
+- [Ordinary CI including CPU browser and negative adapter check](https://github.com/sauravpanda/flarellm/actions/runs/36979736315)
+- [Software GPU workflow and downloadable artifacts](https://github.com/sauravpanda/flarellm/actions/runs/36979736217)
+
+## Native capability and test results
+
+The initial Mesa llvmpipe run rejected Flare's unconditional 1 GiB storage binding
+request because the adapter supports 128 MiB. Device creation now caps buffer
+limits at the adapter's advertised values, with the existing 1 GiB ceiling and
+attention workgroup minimum retained. A unit test covers 128 MiB, 1 GiB and 2 GiB
+adapters. This enables small kernels; it does not certify large-model allocation
+or sharding on lower-limit devices.
+
+After negotiation, the parallel Mesa run passed all six integration tests but its
+library test process exited with SIGSEGV. A serial run also crashed, specifically
+at `test_dequant_matvec_q3k_matches_cpu`. The workflow now discovers every ignored
+test and runs each in its own process; crashes remain failures and the remaining
+tests still execute. Each has a 120-second timeout and its own saved log. This
+isolates a software-driver failure without weakening correctness assertions.
+
+Local native Metal: 41 passed and the existing SiLU comparison failed
+(`0.7310586` vs `0.732906` at `1e-3`). No tolerance or shader was changed. Full
+workspace: 634 passed / 45 ignored; clippy, rustfmt, WASM release build,
+packaged SDK types/ESM/worker checks, 16 SDK tests and workflow actionlint pass.
+
+The authorized local Chrome harness could not complete its debugging handshake;
+local Chrome was not tested for this PR. Hosted Chromium was actually executed.
+Firefox, WebKit, physical GPU CI, independent reference generation/tokenizer
+fixtures, GPU prefill/more quantization/context coverage, fully offline startup
+and stable performance baselines remain outstanding. This is **Refs #521**,
+not closure of the issue. The synthetic tokenizer and regression outputs are
+not an independent trusted model reference; see `fixture.json` provenance.
+
+---
+
 # Issue #527 validation — October 2, 2026
 
 ## Established cause and fix

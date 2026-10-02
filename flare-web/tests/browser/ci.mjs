@@ -56,7 +56,9 @@ window.runCI = async ({ gpu = false } = {}) => {
     assert(text.startsWith('€') && chunks[0] === '' && chunks[1] === '' && chunks[2] === '€', 'UTF-8 bytes did not stream across token boundaries');
     assert(times.length === 5, 'Missing token events');
     report.metrics.ttftMs = times[0] - start;
-    report.metrics.decodeTokensPerSecond = 1000 * (times.length - 1) / (times.at(-1) - times[0]);
+    report.metrics.decodeIntervalMs = times.at(-1) - times[0];
+    report.metrics.decodeTokensPerSecond = report.metrics.decodeIntervalMs > 0
+      ? 1000 * (times.length - 1) / report.metrics.decodeIntervalMs : null;
     record('actual CPU inference and Unicode streaming', { generated, chunks });
     let count = 0;
     await rejects(flare.generate({ ...options, onToken: () => { if (++count === 1) flare.cancel(); } }), 'ABORTED');
@@ -96,7 +98,7 @@ window.runCI = async ({ gpu = false } = {}) => {
       let steps = 0;
       while (!engine.stream_done) {
         assert(await engine.next_token_async() !== undefined, 'Context boundary ended early');
-        assert(engine.last_logits.length === 128 && engine.last_logits.every(Number.isFinite), 'Boundary logits invalid');
+        assert(engine.last_logits.length === 128 && engine.last_logits.every(Number.isFinite) && engine.last_logits.some(v => Math.abs(v) > 0.01), 'Boundary logits invalid');
         steps++;
       }
       assert(steps === 5, 'Context boundary must decode all five steps');

@@ -60,6 +60,7 @@ self.onmessage = async ({ data: { mode = 'normal', synthetic = false } }) => {
       assert(cpu.length === 5 && gpu.length === 5, 'Compare multiple decode steps');
       result.steps = cpu.map((reference, index) => {
         const actual = gpu[index];
+        assert(reference.logits.length === 128 && actual.logits.length === 128, 'Compare the entire vocabulary');
         assert(reference.token === actual.token, 'Fixture context diverged');
         assert(actual.logits.some(v => Math.abs(v) > 0.01), 'Fixture output must be nonzero');
         let maxAbsoluteError = 0;
