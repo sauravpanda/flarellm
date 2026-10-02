@@ -68,7 +68,7 @@ See [`BENCHMARK_HISTORY.md`](BENCHMARK_HISTORY.md) for the full performance log.
 - Llama, Qwen2, Mistral, Phi-3, Gemma 2 architectures
 - Grouped-query attention (GQA)
 - Ring-buffer KV cache with Q8 and Q2 quantization options
-- BPE tokenizer (HuggingFace `tokenizer.json` compatible)
+- Byte-level BPE tokenizer ([supported Hugging Face tokenizer.json configurations](flare-core/tests/fixtures/tokenizer/README.md))
 - 6 chat templates: Llama3, ChatML, Phi3, Gemma, Alpaca, Raw
 
 ### Browser / WASM

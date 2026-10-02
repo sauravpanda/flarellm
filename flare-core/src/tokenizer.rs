@@ -31,6 +31,8 @@ struct TokenizerJson {
     model: ModelSection,
     #[serde(default)]
     added_tokens: Vec<AddedToken>,
+    #[serde(default)]
+    pre_tokenizer: Option<serde_json::Value>,
 }
 
 #[derive(Deserialize)]
@@ -53,8 +55,102 @@ struct AddedToken {
 // BPE tokenizer implementation
 // ---------------------------------------------------------------------------
 
+/// Explicit tokenizer.json pipelines are deliberately limited to the independently
+/// tested SmolLM2 sequence. Missing/null retains the historical whole-chunk BPE.
+enum PreTokenizer {
+    Legacy,
+    DigitsByteLevel {
+        numbers: regex::Regex,
+        byte_level: regex::Regex,
+    },
+}
+
+impl PreTokenizer {
+    fn from_json(value: Option<&serde_json::Value>) -> Result<Self, TokenizerError> {
+        let Some(value) = value else {
+            return Ok(Self::Legacy);
+        };
+        let supported = value["type"] == "Sequence"
+            && value["pretokenizers"].as_array().is_some_and(|parts| {
+                parts.len() == 2
+                    && parts[0]["type"] == "Digits"
+                    && parts[0]["individual_digits"] == true
+                    && parts[1]["type"] == "ByteLevel"
+                    && parts[1]["add_prefix_space"] == false
+                    && parts[1]["use_regex"] == true
+            });
+        if !supported {
+            return Err(TokenizerError::LoadError(
+                "unsupported pre_tokenizer: expected Digits(individual_digits=true) followed by ByteLevel(add_prefix_space=false, use_regex=true)".into(),
+            ));
+        }
+        let compile = |pattern| {
+            regex::Regex::new(pattern)
+                .map_err(|e| TokenizerError::LoadError(format!("pre-tokenizer regex: {e}")))
+        };
+        Ok(Self::DigitsByteLevel {
+            numbers: compile(r"\p{N}")?,
+            // GPT-2 ByteLevel expression, with its negative lookahead handled
+            // below. Contractions are intentionally case-sensitive.
+            byte_level: compile(
+                r"'s|'t|'re|'ve|'m|'ll|'d| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+",
+            )?,
+        })
+    }
+
+    fn pieces<'a>(&self, text: &'a str) -> Vec<&'a str> {
+        let Self::DigitsByteLevel {
+            numbers,
+            byte_level,
+        } = self
+        else {
+            return vec![text];
+        };
+        // Digits isolates EACH Unicode Number (Nd, Nl, No), not only ASCII
+        // or decimal digits. ByteLevel then runs separately on each segment.
+        let mut segments = Vec::new();
+        let mut start = 0;
+        for number in numbers.find_iter(text) {
+            if start < number.start() {
+                segments.push(&text[start..number.start()]);
+            }
+            segments.push(number.as_str());
+            start = number.end();
+        }
+        if start < text.len() {
+            segments.push(&text[start..]);
+        }
+        let mut pieces = Vec::new();
+        for segment in segments {
+            let mut offset = 0;
+            while let Some(m) = byte_level.find_at(segment, offset) {
+                let mut end = m.end();
+                // Emulate \s+(?!\S)|\s+: before non-whitespace the first
+                // alternative backtracks one scalar, leaving it for the next
+                // match (possibly the optional ASCII space before a word).
+                // At segment end all whitespace stays together.
+                if end < segment.len() && m.as_str().chars().all(char::is_whitespace) {
+                    if let Some((last, _)) = m.as_str().char_indices().next_back() {
+                        if last > 0 {
+                            end = m.start() + last;
+                        }
+                    }
+                }
+                pieces.push(&segment[m.start()..end]);
+                offset = end;
+            }
+        }
+        pieces
+    }
+}
+
 /// A working byte-level BPE tokenizer that loads from HuggingFace
 /// `tokenizer.json` files.
+///
+/// Supports SmolLM2's Digits(individual_digits=true) -> ByteLevel(false, regex)
+/// pre-tokenizer. Other explicit pipelines return a load error; missing/null
+/// retains legacy whole-chunk byte BPE. Encoding does not insert BOS/EOS or run
+/// post-processors. See tests/fixtures/tokenizer/README.md for the tested scope.
 #[allow(dead_code)]
 pub struct BpeTokenizer {
     /// token string -> token id
@@ -73,6 +169,7 @@ pub struct BpeTokenizer {
     /// BOS / EOS
     bos_id: Option<u32>,
     eos_id: Option<u32>,
+    pre_tokenizer: PreTokenizer,
 }
 
 impl BpeTokenizer {
@@ -115,6 +212,7 @@ impl BpeTokenizer {
         let tj: TokenizerJson =
             serde_json::from_str(json).map_err(|e| TokenizerError::LoadError(e.to_string()))?;
 
+        let pre_tokenizer = PreTokenizer::from_json(tj.pre_tokenizer.as_ref())?;
         let vocab = tj.model.vocab;
 
         // Build reverse map
@@ -174,6 +272,7 @@ impl BpeTokenizer {
             special_token_strings,
             bos_id,
             eos_id,
+            pre_tokenizer,
         })
     }
 
@@ -197,6 +296,7 @@ impl BpeTokenizer {
             special_token_strings: HashMap::new(),
             bos_id,
             eos_id,
+            pre_tokenizer: PreTokenizer::Legacy,
         }
     }
 
@@ -320,43 +420,44 @@ impl Tokenizer for BpeTokenizer {
                 continue;
             }
 
-            // Convert chunk to initial character tokens
-            let initial = self.text_to_initial_tokens(chunk);
+            for piece in self.pre_tokenizer.pieces(chunk) {
+                // BPE must never cross a pre-tokenizer boundary.
+                let initial = self.text_to_initial_tokens(piece);
 
-            // Apply BPE merges
-            let merged = self.bpe_merge(&initial);
+                // Apply BPE merges
+                let merged = self.bpe_merge(&initial);
 
-            // Map each merged token to its vocab id
-            for token_str in &merged {
-                match self.vocab.get(token_str) {
-                    Some(&id) => output_ids.push(id),
-                    None => {
-                        // Fallback: try encoding each byte of the token individually.
-                        // This handles unknown characters by splitting to byte-level tokens.
-                        let mut found_all = true;
-                        let mut byte_ids = Vec::new();
-                        for ch in token_str.chars() {
-                            let cs = ch.to_string();
-                            if let Some(&id) = self.vocab.get(&cs) {
-                                byte_ids.push(id);
-                            } else {
-                                found_all = false;
-                                break;
+                // Map each merged token to its vocab id
+                for token_str in &merged {
+                    match self.vocab.get(token_str) {
+                        Some(&id) => output_ids.push(id),
+                        None => {
+                            // Fallback: try encoding each byte of the token individually.
+                            // This handles unknown characters by splitting to byte-level tokens.
+                            let mut found_all = true;
+                            let mut byte_ids = Vec::new();
+                            for ch in token_str.chars() {
+                                let cs = ch.to_string();
+                                if let Some(&id) = self.vocab.get(&cs) {
+                                    byte_ids.push(id);
+                                } else {
+                                    found_all = false;
+                                    break;
+                                }
                             }
-                        }
-                        if found_all {
-                            output_ids.extend(byte_ids);
-                        } else {
-                            return Err(TokenizerError::EncodeError(format!(
-                                "token not in vocab: {:?}",
-                                token_str
-                            )));
+                            if found_all {
+                                output_ids.extend(byte_ids);
+                            } else {
+                                return Err(TokenizerError::EncodeError(format!(
+                                    "token not in vocab: {:?}",
+                                    token_str
+                                )));
+                            }
                         }
                     }
                 }
             }
         }
-
         Ok(output_ids)
     }
 

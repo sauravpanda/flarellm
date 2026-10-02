@@ -31,6 +31,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Q4_K_M, Q6_K, Q5_K dequantization support (#12, #45, #60)
 
 ### Changed
+- Original SmolLM2 tokenizer JSON now honors ordered Digits/ByteLevel boundaries (#530). Unsupported explicit pre-tokenizer pipelines return a load error instead of being silently ignored; missing/null retains legacy behavior. Exact IDs are checked against pinned Hugging Face fixtures in Rust and packaged browser WASM.
 - Renamed workspace crates to `flarellm-*` namespace for crates.io (#66)
 - Bumped `flarellm` umbrella crate to 0.1.0
 - `Model` now uses `Box<dyn ComputeBackend>` for pluggable CPU/GPU compute (#58)

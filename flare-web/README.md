@@ -79,8 +79,13 @@ CPU is the default. Selecting WebGPU fails loading when device initialization
 fails. Capability detection is not an inference correctness guarantee. The
 embedded GGUF tokenizer has limited model coverage. GPT-2 byte-level BPE GGUF
 models (including SmolLM2) require an original `tokenizerUrl`; loading fails with
-a helpful error if it is missing. Pre-tokenizer boundary parity remains
-tracked in #530. Known engine/model issues (#526 Q/K layout, #527 GPU attention,
+a helpful error if it is missing. Original SmolLM2 JSON supports the ordered
+`Digits(individual_digits=true)` → `ByteLevel(add_prefix_space=false,
+use_regex=true)` pipeline, validated against Hugging Face tokenizers 0.22.2.
+Other explicit pre-tokenizer pipelines now fail at load; missing/null pipelines
+retain legacy whole-chunk BPE. Encoding does not insert BOS/EOS automatically.
+See [tokenizer support and fixture provenance](../flare-core/tests/fixtures/tokenizer/README.md).
+The embedded GGUF tokenizer is unchanged. Known engine/model issues (#526 Q/K layout, #527 GPU attention,
 #529 Q4 loading) can affect real answers. This SDK does not repair those issues.
 
 Serve the package directory to try `demo/`. `demo/advanced.html` retains the

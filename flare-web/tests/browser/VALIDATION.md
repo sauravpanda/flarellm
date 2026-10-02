@@ -1,3 +1,42 @@
+# Issue #530 tokenizer parity — October 2, 2026
+
+On latest main `8302852`, the new independent Rust test failed for literal
+`a\n\nb`: Flare returned `[81,1116,82]` instead of `[81,198,198,82]`.
+The fixed implementation respects Digits-before-ByteLevel boundaries. `a  b`
+now returns `[81,216,278]` rather than `[81,256,82]`; trailing `x\n\n`
+remains `[104,1116]`.
+
+Local validation passed on macOS ARM64, Node 25.6.1, Playwright 1.58.2 /
+Chromium headless shell **145.0.7632.6**, with GPU disabled. The actual installed
+npm tarball's `FlareTokenizer` matched **81 cases / 498 IDs** for both the full
+original SmolLM2 JSON and the committed reduced fixture. Expectations came from
+Hugging Face tokenizers **0.22.2**, `add_special_tokens=False`. Provenance,
+checksums, license and regeneration are in
+[the fixture README](../../../flare-core/tests/fixtures/tokenizer/README.md).
+
+Both browser runs also checked the old behavior through an explicit null
+pre-tokenizer negative control, and rejected an unsupported explicit pipeline.
+Existing CPU inference, streaming, cancellation, cache and context-boundary
+stages passed. The established runner saves the usual JSON, screenshot, log
+and trace artifacts. Local Chrome via browser-harness remained unavailable
+because its debugging handshake could not attach; the isolated automated
+Chromium runner was actually tested. Firefox, WebKit and new GPU runs were not
+performed for this tokenizer-only change.
+
+Other checks: **638 workspace tests passed, 47 ignored**, all-target workspace
+check, clippy with warnings denied, rustfmt, WASM release build (`wasm-pack
+0.13.1 --no-opt`, wasm-bindgen 0.2.117), strict SDK/packed-consumer TypeScript,
+all 16 SDK tests, packed ESM/worker syntax and WASM initialization. No native
+GPU tests were newly executed; the ignored count remains explicit.
+
+Scope: the exact ordered Digits/ByteLevel pipeline is supported; other explicit
+pipelines now return a load error. Missing/null preserves legacy behavior.
+BOS/EOS insertion and the embedded GGUF tokenizer remain unchanged. Independent
+generation parity, #520 real-answer acceptance, #526 Q/K layout and #529 Q4_0
+loading remain separate. No package was published.
+
+---
+
 # PR #537 follow-up: native CI driver compatibility
 
 The native job now uses **Ubuntu 22.04, Mesa 23.2.1-1ubuntu3.1~22.04.4,

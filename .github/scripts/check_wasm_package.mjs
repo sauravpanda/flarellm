@@ -24,6 +24,8 @@ try {
   await cp(join(source, 'tests/browser/index.html'), join(consumer, 'index.html'));
   await cp(join(source, 'tests/browser/consumer.mjs'), join(consumer, 'consumer.mjs'));
   await cp(join(source, 'tests/browser/ci.mjs'), join(consumer, 'ci.mjs'));
+  await cp(join(source, 'tests/browser/tokenizer-parity.mjs'), join(consumer, 'tokenizer-parity.mjs'));
+  await cp(join(source, '../flare-core/tests/fixtures/tokenizer'), join(consumer, 'tokenizer-parity'), { recursive: true });
   await cp(join(source, 'tests/browser/fixture.json'), join(consumer, 'fixture.json'));
   await cp(join(source, 'tests/browser/gpu-regression.mjs'), join(consumer, 'gpu-regression.mjs'));
   await cp(join(source, 'tests/browser/probe-worker.mjs'), join(consumer, 'probe-worker.mjs'));
