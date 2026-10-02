@@ -6689,6 +6689,72 @@ mod tests {
         }
     }
 
+    // Exercise both u32-aligned and half-word-aligned block starts, multiple
+    // batches/rows, and the second iteration of the 64-lane block-stride loop.
+    fn check_packed_matvec_block_boundaries(q6k: bool) {
+        use flare_loader::quantize::{dequant_q3k_block, dequant_q6k_block};
+
+        let backend = pollster::block_on(WebGpuBackend::new()).expect("GPU backend unavailable");
+        let block_bytes = if q6k { 210 } else { 110 };
+        let rows = 3;
+        let batch = 2;
+        for blocks in [1, 2, 65] {
+            let cols = blocks * 256;
+            let mut raw = vec![0u8; rows * blocks * block_bytes];
+            let mut weights = vec![0.0; rows * cols];
+            for (index, block) in raw.chunks_exact_mut(block_bytes).enumerate() {
+                for (offset, value) in block.iter_mut().enumerate() {
+                    *value = ((index * 37 + offset * 13 + offset / 7) % 256) as u8;
+                }
+                block[block_bytes - 2..]
+                    .copy_from_slice(&half::f16::from_f32(0.015625).to_le_bytes());
+                let mut decoded = [0.0; 256];
+                if q6k {
+                    dequant_q6k_block(block, &mut decoded);
+                } else {
+                    dequant_q3k_block(block, &mut decoded);
+                }
+                weights[index * 256..(index + 1) * 256].copy_from_slice(&decoded);
+            }
+            let input: Vec<f32> = (0..batch * cols)
+                .map(|i| ((i * 7 % 23) as f32 - 11.0) / 16.0)
+                .collect();
+            let actual = if q6k {
+                backend.dequant_matvec_q6k(&raw, &input, rows, blocks, batch)
+            } else {
+                backend.dequant_matvec_q3k(&raw, &input, rows, blocks, batch)
+            };
+            assert_eq!(actual.len(), rows * batch);
+            for b in 0..batch {
+                for row in 0..rows {
+                    let expected: f32 = weights[row * cols..(row + 1) * cols]
+                        .iter()
+                        .zip(&input[b * cols..(b + 1) * cols])
+                        .map(|(w, x)| w * x)
+                        .sum();
+                    let value = actual[b * rows + row];
+                    assert!(value.is_finite());
+                    assert!(
+                        (value - expected).abs() <= 0.01 + 1e-5 * expected.abs(),
+                        "q6k={q6k} blocks={blocks} batch={b} row={row}: {value} vs {expected}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "requires a GPU adapter"]
+    fn test_dequant_matvec_q3k_block_boundaries() {
+        check_packed_matvec_block_boundaries(false);
+    }
+
+    #[test]
+    #[ignore = "requires a GPU adapter"]
+    fn test_dequant_matvec_q6k_block_boundaries() {
+        check_packed_matvec_block_boundaries(true);
+    }
+
     /// Verify dequant_matvec_q5_0 single-block GPU result matches CPU reference.
     ///
     /// Requires a GPU adapter; run with: `cargo test -p flarellm-gpu -- --ignored`

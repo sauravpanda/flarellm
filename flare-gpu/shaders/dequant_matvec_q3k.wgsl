@@ -54,6 +54,11 @@ struct Params {
 /// Workgroup-shared partial sums for the tree reduction.
 var<workgroup> partials: array<f32, 64>;
 
+/// Extract one byte at the given absolute byte offset from the u32 storage array.
+fn read_byte(byte_offset: u32) -> u32 {
+    return (raw[byte_offset / 4u] >> ((byte_offset % 4u) * 8u)) & 0xFFu;
+}
+
 @compute @workgroup_size(64)
 fn dequant_matvec_q3k(
     @builtin(local_invocation_id) lid: vec3<u32>,
@@ -82,15 +87,15 @@ fn dequant_matvec_q3k(
         let vec_base = batch * in_cols + b * 256u;
 
         // d at bytes 108-109 of this block (LE f16).
-        let d_packed = ((raw[(bb + 108u) / 4u] >> (((bb + 108u) % 4u) * 8u)) & 0xFFu) | (((raw[(bb + 109u) / 4u] >> (((bb + 109u) % 4u) * 8u)) & 0xFFu) << 8u);
+        let d_packed = read_byte(bb + 108u) | (read_byte(bb + 109u) << 8u);
         let d = unpack2x16float(d_packed).x;
 
         // Decode 8 scales from block bytes 96..108 using kmask transform.
         var scales: array<i32, 8>;
         for (var k = 0u; k < 4u; k = k + 1u) {
-            let bk  = ((raw[(bb + 96u + k) / 4u] >> (((bb + 96u + k) % 4u) * 8u)) & 0xFFu);
-            let bk4 = ((raw[(bb + 96u + k + 4u) / 4u] >> (((bb + 96u + k + 4u) % 4u) * 8u)) & 0xFFu);
-            let bk8 = ((raw[(bb + 96u + k + 8u) / 4u] >> (((bb + 96u + k + 8u) % 4u) * 8u)) & 0xFFu);
+            let bk  = read_byte(bb + 96u + k);
+            let bk4 = read_byte(bb + 96u + k + 4u);
+            let bk8 = read_byte(bb + 96u + k + 8u);
             scales[k]      = i32((bk  & 0x0Fu) | (((bk8 >> 4u) & 3u) << 4u)) - 32;
             scales[k + 4u] = i32((bk4 & 0x0Fu) | (((bk8 >> 6u) & 3u) << 4u)) - 32;
         }
@@ -105,11 +110,11 @@ fn dequant_matvec_q3k(
 
                 for (var l = 0u; l < 32u; l = l + 1u) {
                     // qs byte: block byte at 32 + oi*32 + l
-                    let qs_byte  = ((raw[(bb + 32u + oi * 32u + l) / 4u] >> (((bb + 32u + oi * 32u + l) % 4u) * 8u)) & 0xFFu);
+                    let qs_byte  = read_byte(bb + 32u + oi * 32u + l);
                     let low2     = (qs_byte >> shift) & 3u;
 
                     // hmask byte: block byte at l (same l for all si in this oi)
-                    let hmask_byte = ((raw[(bb + l) / 4u] >> (((bb + l) % 4u) * 8u)) & 0xFFu);
+                    let hmask_byte = read_byte(bb + l);
                     let sub = select(4, 0, (hmask_byte & m) != 0u);
                     let q   = i32(low2) - sub; // range [-4, 3]
 

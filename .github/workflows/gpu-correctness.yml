@@ -18,7 +18,7 @@ env:
 jobs:
   native-vulkan:
     name: Ignored GPU tests / Mesa software Vulkan
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-22.04
     timeout-minutes: 25
     env:
       FLARE_REQUIRE_GPU: '1'
