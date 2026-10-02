@@ -313,7 +313,7 @@ impl<'a> Generator<'a> {
                     token_id: verified_token,
                     logits,
                 });
-                if eos == Some(verified_token) {
+                if self.model.config().is_eos_token(verified_token, eos) {
                     break;
                 }
             } else {
@@ -419,7 +419,7 @@ impl<'a> Generator<'a> {
                     token_id: verified_token,
                     logits,
                 });
-                if eos == Some(verified_token) {
+                if self.model.config().is_eos_token(verified_token, eos) {
                     break;
                 }
             } else {
@@ -479,11 +479,9 @@ impl<'a> Generator<'a> {
                     for result in spec_results {
                         generated.push(result.token_id);
 
-                        if let Some(eos) = eos_token {
-                            if result.token_id == eos {
-                                should_break = true;
-                                break;
-                            }
+                        if self.model.config().is_eos_token(result.token_id, eos_token) {
+                            should_break = true;
+                            break;
                         }
 
                         if !on_token(result.token_id, step) {
@@ -514,11 +512,9 @@ impl<'a> Generator<'a> {
                         generated.push(result.token_id);
 
                         // Check EOS
-                        if let Some(eos) = eos_token {
-                            if result.token_id == eos {
-                                should_break = true;
-                                break;
-                            }
+                        if self.model.config().is_eos_token(result.token_id, eos_token) {
+                            should_break = true;
+                            break;
                         }
 
                         if !on_token(result.token_id, step) {
@@ -544,10 +540,8 @@ impl<'a> Generator<'a> {
             generated.push(result.token_id);
 
             // Check EOS
-            if let Some(eos) = eos_token {
-                if result.token_id == eos {
-                    break;
-                }
+            if self.model.config().is_eos_token(result.token_id, eos_token) {
+                break;
             }
 
             // Callback — return false to stop
@@ -636,6 +630,8 @@ mod tests {
             w_gate: make_tensor(inter * dim),
             w_up: make_tensor(inter * dim),
             w_down: make_tensor(dim * inter),
+            attn_q_norm: None,
+            attn_k_norm: None,
             attn_q_bias: None,
             attn_k_bias: None,
             attn_v_bias: None,
@@ -1183,6 +1179,8 @@ mod tests {
             w_gate: make_tensor(inter * dim),
             w_up: make_tensor(inter * dim),
             w_down: make_tensor(dim * inter),
+            attn_q_norm: None,
+            attn_k_norm: None,
             attn_q_bias: None,
             attn_k_bias: None,
             attn_v_bias: None,

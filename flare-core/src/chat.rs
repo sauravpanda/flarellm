@@ -28,6 +28,8 @@ pub enum ChatTemplate {
     Llama3,
     /// ChatML format (Qwen, Mistral, many others)
     ChatML,
+    /// Qwen3 text-only template with enable_thinking=false.
+    Qwen3,
     /// Phi-3 / Phi-3.5 instruct format (`<|user|>...<|end|>`)
     Phi3,
     /// Gemma 2 instruct format (`<start_of_turn>...<end_of_turn>`)
@@ -57,6 +59,7 @@ impl ChatTemplate {
     pub fn from_architecture(arch: &str) -> Self {
         match arch.to_lowercase().as_str() {
             "llama" => ChatTemplate::Llama3,
+            "qwen3" => ChatTemplate::Qwen3,
             "qwen2" | "mistral" => ChatTemplate::ChatML,
             "phi3" => ChatTemplate::Phi3,
             "gemma2" => ChatTemplate::Gemma,
@@ -67,7 +70,9 @@ impl ChatTemplate {
     /// Detect template from the GGUF `tokenizer.chat_template` Jinja string.
     /// Falls back to architecture-based detection if the template is unrecognized.
     pub fn from_gguf_template(template_str: &str, arch: &str) -> Self {
-        if template_str.contains("<|im_start|>") {
+        if arch.eq_ignore_ascii_case("qwen3") {
+            ChatTemplate::Qwen3
+        } else if template_str.contains("<|im_start|>") {
             ChatTemplate::ChatML
         } else if template_str.contains("<|start_header_id|>") {
             ChatTemplate::Llama3
@@ -88,12 +93,69 @@ impl ChatTemplate {
         match self {
             ChatTemplate::Llama3 => format_llama3(messages),
             ChatTemplate::ChatML => format_chatml(messages),
+            ChatTemplate::Qwen3 => format_qwen3(messages),
             ChatTemplate::Phi3 => format_phi3(messages),
             ChatTemplate::Gemma => format_gemma(messages),
             ChatTemplate::Alpaca => format_alpaca(messages),
             ChatTemplate::Raw => format_raw(messages),
         }
     }
+}
+
+/// Implements the official text-message subset, without tools or Jinja evaluation.
+fn format_qwen3(messages: &[ChatMessage]) -> String {
+    let last_query = messages
+        .iter()
+        .rposition(|m| {
+            m.role == Role::User
+                && !(m.content.starts_with("<tool_response>")
+                    && m.content.ends_with("</tool_response>"))
+        })
+        .unwrap_or(messages.len().saturating_sub(1));
+    let mut out = String::new();
+    for (index, message) in messages.iter().enumerate() {
+        let role = match message.role {
+            Role::System => "system",
+            Role::User => "user",
+            Role::Assistant => "assistant",
+        };
+        out.push_str(&format!("<|im_start|>{role}\n"));
+        if message.role == Role::Assistant {
+            let (reasoning, content) = if message.content.contains("</think>") {
+                let first = message.content.split("</think>").next().unwrap_or("");
+                (
+                    first
+                        .trim_end_matches('\n')
+                        .rsplit("<think>")
+                        .next()
+                        .unwrap_or("")
+                        .trim_start_matches('\n'),
+                    message
+                        .content
+                        .rsplit("</think>")
+                        .next()
+                        .unwrap_or("")
+                        .trim_start_matches('\n'),
+                )
+            } else {
+                ("", message.content.as_str())
+            };
+            if index > last_query && (index + 1 == messages.len() || !reasoning.is_empty()) {
+                out.push_str(&format!(
+                    "<think>\n{}\n</think>\n\n{}",
+                    reasoning.trim_matches('\n'),
+                    content.trim_start_matches('\n')
+                ));
+            } else {
+                out.push_str(content);
+            }
+        } else {
+            out.push_str(&message.content);
+        }
+        out.push_str("<|im_end|>\n");
+    }
+    out.push_str("<|im_start|>assistant\n<think>\n\n</think>\n\n");
+    out
 }
 
 /// Llama 3 instruct format:

@@ -236,3 +236,10 @@ for selected-logit checks. Add `--gpu` for hosted Linux SwiftShader, or
 features and each actual backend are included in the report. These options
 launch a dedicated test browser and do not touch existing user tabs. Real-model
 checks require the original tokenizer checksum and verify the exact prompt IDs.
+
+## Qwen3
+
+The same CI runner includes the independent Qwen3 GQA/QK-normalization fixture
+and original-tokenizer subset. GPU jobs verify its explicit CPU fallback.
+See [Qwen3 reproduction](../../../QWEN3.md) for opt-in full-model, original
+tokenizer, normal/chunked loading and repeated SDK chat checks.

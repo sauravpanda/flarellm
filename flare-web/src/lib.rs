@@ -695,9 +695,10 @@ impl FlareEngine {
             .unwrap_or("")
             .to_string();
         let metadata_json = build_metadata_json(&gguf);
-        let config = gguf
+        let mut config = gguf
             .to_model_config()
             .map_err(|e| JsError::new(&format!("Model config error: {e}")))?;
+        limit_browser_context(&mut config);
         let skip_names =
             matmul_skip_set(&gguf).map_err(|e| JsError::new(&format!("Skip set error: {e}")))?;
 
@@ -753,9 +754,10 @@ impl FlareEngine {
             .to_string();
         let gguf_vocab = GgufVocab::from_gguf(&gguf).ok();
         let metadata_json = build_metadata_json(&gguf);
-        let config = gguf
+        let mut config = gguf
             .to_model_config()
             .map_err(|e| JsError::new(&format!("Model config error: {e}")))?;
+        limit_browser_context(&mut config);
         // Single-pass load with deferred f32 matmul dequant.
         //
         // For per-layer matmul weights (wq/wk/wv/wo/w_gate/w_up/w_down) we keep
@@ -866,6 +868,12 @@ impl FlareEngine {
     /// ```
     #[wasm_bindgen]
     pub async fn init_gpu(&mut self) -> bool {
+        if self.model.config().architecture == flare_core::config::Architecture::Qwen3 {
+            web_sys::console::warn_1(&JsValue::from_str(
+                "Qwen3 uses WASM CPU: resident WebGPU Q/K normalization is not implemented",
+            ));
+            return false;
+        }
         if !webgpu_available() {
             return false;
         }
@@ -908,6 +916,12 @@ impl FlareEngine {
     /// ```
     #[wasm_bindgen]
     pub async fn init_gpu_with_cache(&mut self, cache_data: &[u8]) -> bool {
+        if self.model.config().architecture == flare_core::config::Architecture::Qwen3 {
+            web_sys::console::warn_1(&JsValue::from_str(
+                "Qwen3 uses WASM CPU: resident WebGPU Q/K normalization is not implemented",
+            ));
+            return false;
+        }
         if !webgpu_available() {
             return false;
         }
@@ -1195,6 +1209,7 @@ impl FlareEngine {
         match self.chat_template {
             ChatTemplate::Llama3 => "Llama3".to_string(),
             ChatTemplate::ChatML => "ChatML".to_string(),
+            ChatTemplate::Qwen3 => "Qwen3 (non-thinking)".to_string(),
             ChatTemplate::Phi3 => "Phi3".to_string(),
             ChatTemplate::Gemma => "Gemma".to_string(),
             ChatTemplate::Alpaca => "Alpaca".to_string(),
@@ -2127,7 +2142,11 @@ impl FlareEngine {
         }
         self.stream_remaining -= 1;
 
-        if self.eos_token_id == Some(token_id) {
+        if self
+            .model
+            .config()
+            .is_eos_token(token_id, self.eos_token_id)
+        {
             self.last_decode_ms = now_ms() - self.stream_decode_start_ms;
             self.stream_done = true;
             self.stream_stop_reason = "eos".to_string();
@@ -2256,7 +2275,11 @@ impl FlareEngine {
         }
         self.stream_remaining -= 1;
 
-        if self.eos_token_id == Some(token_id) {
+        if self
+            .model
+            .config()
+            .is_eos_token(token_id, self.eos_token_id)
+        {
             self.last_decode_ms = now_ms() - self.stream_decode_start_ms;
             self.stream_done = true;
             self.stream_stop_reason = "eos".to_string();
@@ -2946,9 +2969,10 @@ impl FlareProgressiveLoader {
             .to_string();
         let gguf_vocab = GgufVocab::from_gguf(&gguf).ok();
         let metadata_json = build_metadata_json(&gguf);
-        let config = gguf
+        let mut config = gguf
             .to_model_config()
             .map_err(|e| JsError::new(&format!("model config error: {e}")))?;
+        limit_browser_context(&mut config);
 
         // Use the progress-aware loader so layer parsing is also trackable in logs
         let weights = load_model_weights_with_progress(&gguf, &mut cursor, |current, total| {
@@ -3246,3 +3270,10 @@ pub async fn storage_estimate() -> Result<JsValue, JsValue> {
 
 #[cfg(test)]
 mod tests;
+
+// The source context is a positional limit, not a browser allocation budget.
+fn limit_browser_context(config: &mut flare_core::config::ModelConfig) {
+    if config.architecture == flare_core::config::Architecture::Qwen3 {
+        config.max_seq_len = config.max_seq_len.min(512);
+    }
+}

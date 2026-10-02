@@ -255,6 +255,7 @@ impl GgufFile {
         let architecture = match arch_str.to_lowercase().as_str() {
             "llama" => Architecture::Llama,
             "qwen2" => Architecture::Qwen2,
+            "qwen3" => Architecture::Qwen3,
             "mistral" => Architecture::Mistral,
             "phi3" => Architecture::Phi3,
             "gemma2" => Architecture::Gemma2,
@@ -287,14 +288,35 @@ impl GgufFile {
         if num_heads == 0
             || num_kv_heads == 0
             || hidden_dim == 0
-            || hidden_dim % num_heads != 0
+            || (architecture != Architecture::Qwen3 && hidden_dim % num_heads != 0)
             || num_heads % num_kv_heads != 0
         {
             return Err(GgufError::InvalidFormat(
                 "invalid attention head dimensions".into(),
             ));
         }
-        let head_dim = hidden_dim / num_heads;
+        let head_dim = if architecture == Architecture::Qwen3 {
+            let key = self.meta_usize("qwen3.attention.key_length")?;
+            let value = self.meta_usize("qwen3.attention.value_length")?;
+            let rotary = self.meta_usize("qwen3.rope.dimension_count").unwrap_or(key);
+            if key == 0 || key % 2 != 0 || key != value || key != rotary {
+                return Err(GgufError::InvalidFormat(
+                    "Qwen3 requires equal, even key/value/full rotary dimensions".into(),
+                ));
+            }
+            if self
+                .metadata
+                .get("qwen3.rope.scaling.type")
+                .is_some_and(|v| !matches!(v, MetadataValue::String(s) if s == "none"))
+            {
+                return Err(GgufError::InvalidFormat(
+                    "Qwen3 RoPE scaling is not supported".into(),
+                ));
+            }
+            key
+        } else {
+            hidden_dim / num_heads
+        };
 
         let intermediate_dim = self
             .meta_usize(&format!("{prefix}.feed_forward_length"))
@@ -332,6 +354,42 @@ impl GgufFile {
             .or_else(|_| self.meta_usize(&format!("{prefix}.expert_used_count")))
             .unwrap_or(0);
         let moe = num_experts > 0 && num_experts_per_token > 0;
+
+        if architecture == Architecture::Qwen3 {
+            if moe {
+                return Err(GgufError::InvalidFormat("Qwen3 MoE is unsupported".into()));
+            }
+            for i in 0..num_layers {
+                for (name, shape) in [
+                    ("attn_q", vec![hidden_dim, num_heads * head_dim]),
+                    ("attn_k", vec![hidden_dim, num_kv_heads * head_dim]),
+                    ("attn_v", vec![hidden_dim, num_kv_heads * head_dim]),
+                    ("attn_output", vec![num_heads * head_dim, hidden_dim]),
+                    ("attn_q_norm", vec![head_dim]),
+                    ("attn_k_norm", vec![head_dim]),
+                    ("attn_norm", vec![hidden_dim]),
+                    ("ffn_norm", vec![hidden_dim]),
+                    ("ffn_gate", vec![hidden_dim, intermediate_dim]),
+                    ("ffn_up", vec![hidden_dim, intermediate_dim]),
+                    ("ffn_down", vec![intermediate_dim, hidden_dim]),
+                ] {
+                    let name = format!("blk.{i}.{name}.weight");
+                    let info = self
+                        .find_tensor(&name)
+                        .ok_or_else(|| GgufError::TensorNotFound(name.clone()))?;
+                    if !matches!(info.dtype, QuantFormat::F32 | QuantFormat::Q8_0) {
+                        return Err(GgufError::InvalidFormat(
+                            "Qwen3 currently supports F32 and Q8_0 tensors only".into(),
+                        ));
+                    }
+                    if info.dimensions != shape.iter().map(|&n| n as u64).collect::<Vec<_>>() {
+                        return Err(GgufError::InvalidFormat(format!(
+                            "invalid Qwen3 tensor shape: {name}"
+                        )));
+                    }
+                }
+            }
+        }
 
         Ok(ModelConfig {
             architecture,

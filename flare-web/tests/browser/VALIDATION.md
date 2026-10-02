@@ -1,3 +1,59 @@
+# Qwen3-0.6B validation — October 2, 2026
+
+The official Qwen3-0.6B Q8_0 file and original tokenizer are pinned in
+[the support guide](../../../QWEN3.md). The independent oracle is llama.cpp
+`f3f1a8f2760f28325a5ec20c05b171e5b7c83a29` CPU. Full provenance, checksums and
+regeneration tools are committed in the Qwen3 numerical/tokenizer fixture folders.
+
+## Executed results
+
+- Native ARM CPU passes the three real-model prompts and reset, matching all
+  22 greedy decisions including EOS, within the documented selected-logit bound.
+- Installed npm tarball, Playwright Chromium 145.0.7632.6 on macOS: all three
+  prompts pass normal and chunked loading with full-vocabulary comparisons
+  (151,936 logits per step), then two SDK chat requests separated by reset.
+  Maximum absolute errors are 0.6910, 0.6173 and 0.5846. First-token prefill and
+  all subsequent decode decisions are checked independently.
+- France output is `The capital of France is **Paris**.`; arithmetic output is
+  `2 + 2 = 4.`. The exact-word instruction outputs `Hello!` in both engines,
+  so it demonstrates parity while failing the literal instruction.
+- SDK localhost load: 1.26–1.41 s. TTFT: 4.49–4.81 s. Decode: 3.11–3.18 tok/s.
+  Observed WASM capacity: 2,193,555,456 bytes, excluding JS and browser overhead.
+  These are short, single-host observations, not performance gates.
+- SwiftShader run passes existing Llama reference and GPU lifecycle/error tests,
+  plus Qwen3 small/full-model checks. Qwen3 `init_gpu()` returns false, emits its
+  diagnostic and leaves CPU execution active. Reported Qwen3 GPU device list is
+  empty. The other GPU tests use Google SwiftShader, with no shader-f16 feature.
+  No Qwen3 GPU decode or physical-GPU claim is made.
+- The small Qwen3 fixture tests 16 independent decisions, all logits, wider Q
+  than hidden dimensions, GQA, nonuniform Q/K norms and tied output. Ordinary CI
+  uses it for f32, raw, chunked and raw-attachment loading. The original-tokenizer
+  subset has 89 cases / 545 exact IDs and four officially rendered conversations.
+- Native tests cover async prefill/decode and consumption of both official EOS
+  IDs in sync/async streaming. Llama #539 normalization and old regression
+  tolerances remain unchanged.
+
+Initial WASM Q8 input re-quantization exceeded the proposed real-model bound.
+Qwen3 now retains f32 activations with packed Q8 weights and exact SiLU; the
+bound was not widened. A native raw-only load also exposed dispatch to an empty
+f32 projection, now covered by the skipped-f32 reference path. Tensor clones
+share storage until mutation so the 622 MB f32 embedding/output is not duplicated.
+
+Workspace Rust tests/check/clippy/fmt, release WASM build, strict SDK/package
+checks and 16 SDK tests pass. The optional full-model Rust test passes. The local
+SmolLM2 benchmark is recorded in BENCHMARK_HISTORY.md; it is informational and
+does not establish a stable regression baseline. Build used wasm-pack 0.13.1
+with `--no-opt`. The authorized local Chrome harness was not exercised in this
+task; isolated automated Chromium is the browser actually run.
+
+Limits: CPU Qwen3 only, 512 browser tokens, text-only non-thinking templates,
+Q8_0/F32 GGUF. No new Q4, SafeTensors auto-inference, tools, thinking parser,
+Qwen3.5, NanoJev checkpoint/head or typed-decision baseline support. The published
+GGUF does not name its original converter commit; the audit converter is pinned
+separately. No package is published and unrelated issues are not closed.
+
+---
+
 # GGUF Q/K reference validation — October 2, 2026
 
 ## Reproduction and fix

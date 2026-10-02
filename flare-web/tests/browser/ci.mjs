@@ -16,13 +16,13 @@ const workerRun = mode => new Promise((resolve, reject) => {
   worker.onerror = event => { finish(); reject(new Error(event.message)); };
   worker.postMessage({ mode, synthetic: true });
 });
-const ropeRun = (gpu, forceF32 = false) => new Promise((resolve, reject) => {
+const ropeRun = (gpu, forceF32 = false, qwen = false) => new Promise((resolve, reject) => {
   const worker = new Worker('./rope-reference.mjs', { type: 'module' });
   const timer = setTimeout(() => { worker.terminate(); reject(new Error('Reference timed out')); }, 120000);
   const finish = () => { clearTimeout(timer); worker.terminate(); };
   worker.onmessage = ({ data }) => { finish(); data.passed ? resolve(data) : reject(new Error(JSON.stringify(data))); };
   worker.onerror = e => { finish(); reject(new Error(e.message)); };
-  worker.postMessage({ gpu, forceF32 });
+  worker.postMessage({ gpu, forceF32, qwen });
 });
 window.runCI = async ({ gpu = false, originalTokenizer = false } = {}) => {
   const report = { passed: false, platform: navigator.platform, userAgent: navigator.userAgent,
@@ -39,6 +39,8 @@ window.runCI = async ({ gpu = false, originalTokenizer = false } = {}) => {
     await init();
     record('independent Llama GGUF logits and load paths', await ropeRun(gpu));
     if (gpu) record('independent Llama GGUF logits with f32 KV', await ropeRun(true, true));
+    record('independent Qwen3 logits, tied output, dimensions and load paths', await ropeRun(gpu, false, true));
+    record('independent Qwen3 tokenizer IDs', await tokenizerParity('/qwen3-tokenizer/qwen3-reduced.json', true));
     const parity = await tokenizerParity();
     if (originalTokenizer) record('full original-tokenizer IDs', await tokenizerParity('/original-tokenizer.json'));
     record('independent original-tokenizer IDs', parity);

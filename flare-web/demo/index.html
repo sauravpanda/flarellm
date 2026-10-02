@@ -8,6 +8,8 @@ body{max-width:760px;margin:3rem auto;padding:0 1rem;font:16px system-ui;color:#
 </style>
 <h1>Flare browser SDK</h1>
 <p>Local inference in a worker. Your prompt stays in this browser.</p>
+<button id="qwen">Use Qwen3-0.6B Q8_0</button>
+<small>Qwen3: 639 MB download, CPU, 512-token total context, non-thinking text chat. Requires several GB of free memory.</small>
 <label>GGUF model URL<input id="model" placeholder="/models/model.gguf"></label>
 <label>Tokenizer JSON URL (optional)<input id="tokenizer" placeholder="/models/tokenizer.json"></label>
 <label>Backend <select id="backend"><option value="cpu">CPU</option><option value="webgpu">WebGPU</option></select></label>
@@ -21,6 +23,12 @@ body{max-width:760px;margin:3rem auto;padding:0 1rem;font:16px system-ui;color:#
 import { Flare } from '../dist/index.js';
 const $ = id => document.getElementById(id);
 let flare;
+$('qwen').onclick=()=>{
+  $('model').value='https://huggingface.co/Qwen/Qwen3-0.6B-GGUF/resolve/23749fefcc72300e3a2ad315e1317431b06b590a/Qwen3-0.6B-Q8_0.gguf';
+  $('tokenizer').value='https://huggingface.co/Qwen/Qwen3-0.6B/resolve/c1899de289a04d12100db370d81485cdf75e47ca/tokenizer.json';
+  $('backend').value='cpu';
+  $('prompt').value='What is the capital of France?';
+};
 function active(busy) { $('load').disabled=busy; $('send').disabled=busy || !flare; $('cancel').disabled=!busy; $('dispose').disabled=!flare; }
 function error(e) { $('status').textContent=`${e.code ?? e.name}: ${e.message}`; }
 $('load').onclick=async()=>{

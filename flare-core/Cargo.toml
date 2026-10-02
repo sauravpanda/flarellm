@@ -19,6 +19,7 @@ log = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 regex = "=1.12.3"
+unicode-normalization = "=0.1.24"
 
 [features]
 default = []

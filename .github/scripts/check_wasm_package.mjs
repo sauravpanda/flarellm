@@ -28,6 +28,8 @@ try {
   await cp(join(source, '../flare-core/tests/fixtures/tokenizer'), join(consumer, 'tokenizer-parity'), { recursive: true });
   await cp(join(source, 'tests/browser/rope-reference.mjs'), join(consumer, 'rope-reference.mjs'));
   await cp(join(source, '../flare-loader/tests/fixtures/rope'), join(consumer, 'rope-reference'), { recursive: true });
+  await cp(join(source, '../flare-loader/tests/fixtures/qwen3'), join(consumer, 'qwen3-reference'), { recursive: true });
+  await cp(join(source, '../flare-core/tests/fixtures/qwen3'), join(consumer, 'qwen3-tokenizer'), { recursive: true });
   await cp(join(source, 'tests/browser/fixture.json'), join(consumer, 'fixture.json'));
   await cp(join(source, 'tests/browser/gpu-regression.mjs'), join(consumer, 'gpu-regression.mjs'));
   await cp(join(source, 'tests/browser/probe-worker.mjs'), join(consumer, 'probe-worker.mjs'));

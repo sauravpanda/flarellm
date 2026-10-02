@@ -15,6 +15,8 @@ use crate::quantize::QuantFormat;
 
 #[derive(Debug, Error)]
 pub enum SafeTensorsError {
+    #[error("unsupported model configuration: {0}")]
+    UnsupportedConfig(String),
     #[error("I/O error: {0}")]
     Io(#[from] io::Error),
     #[error("JSON header parse error: {0}")]

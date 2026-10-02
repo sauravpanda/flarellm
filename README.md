@@ -66,10 +66,11 @@ See [`BENCHMARK_HISTORY.md`](BENCHMARK_HISTORY.md) for the full performance log.
 ### Model Support
 - GGUF and SafeTensors formats
 - Llama, Qwen2, Mistral, Phi-3, Gemma 2 architectures
+- [Qwen3-0.6B Q8_0](QWEN3.md): native/browser CPU, non-thinking text chat
 - Grouped-query attention (GQA)
 - Ring-buffer KV cache with Q8 and Q2 quantization options
 - Byte-level BPE tokenizer ([supported Hugging Face tokenizer.json configurations](flare-core/tests/fixtures/tokenizer/README.md))
-- 6 chat templates: Llama3, ChatML, Phi3, Gemma, Alpaca, Raw
+- Chat templates: Llama3, ChatML, Qwen3 non-thinking, Phi3, Gemma, Alpaca, Raw
 
 ### Browser / WASM
 - Progressive model loading with download progress

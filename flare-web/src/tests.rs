@@ -185,3 +185,68 @@ fn chat_history_uses_the_detected_template() {
     let prompt = e.apply_chat_messages(r#"[{"role":"system","content":"Brief"},{"role":"user","content":"Hi"},{"role":"assistant","content":"Hello"},{"role":"user","content":"Again"}]"#).expect("valid history");
     assert_eq!(prompt, "<|im_start|>system\nBrief<|im_end|>\n<|im_start|>user\nHi<|im_end|>\n<|im_start|>assistant\nHello<|im_end|>\n<|im_start|>user\nAgain<|im_end|>\n<|im_start|>assistant\n");
 }
+
+fn qwen3_fixture_model() -> Model {
+    let mut reader = std::io::Cursor::new(include_bytes!(
+        "../../flare-loader/tests/fixtures/qwen3/gqa.gguf"
+    ));
+    let gguf = GgufFile::parse_header(&mut reader).unwrap();
+    let (weights, raw) = load_model_weights_with_raw_opt(&gguf, &mut reader, true).unwrap();
+    let mut model = Model::new(gguf.to_model_config().unwrap(), weights);
+    model.set_raw_weights(raw.unwrap());
+    model
+}
+
+#[test]
+fn qwen3_stream_consumes_both_eos_tokens_sync_and_async() {
+    for eos in [151643, 151645] {
+        for asynchronous in [false, true] {
+            let mut stream = engine();
+            stream.model = qwen3_fixture_model();
+            stream.eos_token_id = Some(151645);
+            let mut logits = vec![-10.0; 151646];
+            logits[eos] = 10.0;
+            stream.stream_pending_logits = Some(logits);
+            stream.stream_remaining = 2;
+            stream.stream_done = false;
+            let token = if asynchronous {
+                pollster::block_on(stream.next_token_async()).unwrap()
+            } else {
+                stream.next_token()
+            };
+            assert_eq!(token, None);
+            assert_eq!(stream.stream_stop_reason(), "eos");
+            assert!(stream.stream_done);
+        }
+    }
+}
+
+#[test]
+fn qwen3_async_prefill_and_decode_match_independent_fixture() {
+    let mut model = qwen3_fixture_model();
+    let reference: serde_json::Value = serde_json::from_str(include_str!(
+        "../../flare-loader/tests/fixtures/qwen3/reference.json"
+    ))
+    .unwrap();
+    let mut logits = pollster::block_on(model.forward_prefill_async(&[2, 4, 7]));
+    for (step, expected) in reference["steps"].as_array().unwrap().iter().enumerate() {
+        let token = expected["token"].as_u64().unwrap() as u32;
+        let actual = logits
+            .data()
+            .iter()
+            .enumerate()
+            .max_by(|a, b| a.1.total_cmp(b.1))
+            .unwrap()
+            .0 as u32;
+        assert_eq!(actual, token);
+        for (actual, value) in logits
+            .data()
+            .iter()
+            .zip(expected["logits"].as_array().unwrap())
+        {
+            let value = value.as_f64().unwrap() as f32;
+            assert!((actual - value).abs() <= 0.04 + 0.002 * value.abs());
+        }
+        logits = pollster::block_on(model.try_forward_async(token, 3 + step)).unwrap();
+    }
+}

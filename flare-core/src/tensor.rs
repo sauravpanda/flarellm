@@ -1,10 +1,11 @@
-use std::fmt;
+use std::{fmt, sync::Arc};
 
 /// Lightweight tensor type for CPU-side operations.
+/// Clones share storage until mutation, so tied embedding/output weights use one allocation.
 /// GPU tensors are managed separately in flare-gpu via wgpu buffers.
 #[derive(Clone)]
 pub struct Tensor {
-    data: Vec<f32>,
+    data: Arc<Vec<f32>>,
     shape: Vec<usize>,
     strides: Vec<usize>,
 }
@@ -14,7 +15,7 @@ impl Tensor {
         let size: usize = shape.iter().product();
         let strides = compute_strides(shape);
         Self {
-            data: vec![0.0; size],
+            data: Arc::new(vec![0.0; size]),
             shape: shape.to_vec(),
             strides,
         }
@@ -30,7 +31,7 @@ impl Tensor {
         }
         let strides = compute_strides(shape);
         Ok(Self {
-            data,
+            data: Arc::new(data),
             shape: shape.to_vec(),
             strides,
         })
@@ -49,7 +50,7 @@ impl Tensor {
     }
 
     pub fn data_mut(&mut self) -> &mut [f32] {
-        &mut self.data
+        Arc::make_mut(&mut self.data).as_mut_slice()
     }
 
     pub fn numel(&self) -> usize {
@@ -82,7 +83,7 @@ impl Tensor {
                 got: other.numel(),
             });
         }
-        for (a, b) in self.data.iter_mut().zip(other.data.iter()) {
+        for (a, b) in self.data_mut().iter_mut().zip(other.data.iter()) {
             *a += b;
         }
         Ok(())
@@ -90,7 +91,7 @@ impl Tensor {
 
     /// Multiply all elements by a scalar
     pub fn scale(&mut self, factor: f32) {
-        for v in &mut self.data {
+        for v in self.data_mut() {
             *v *= factor;
         }
     }
@@ -122,6 +123,16 @@ impl fmt::Debug for Tensor {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn clones_share_storage_until_mutated() {
+        let original = Tensor::from_vec(vec![1.0, 2.0], &[2]).unwrap();
+        let mut tied = original.clone();
+        assert!(std::ptr::eq(original.data().as_ptr(), tied.data().as_ptr()));
+        tied.scale(2.0);
+        assert_eq!(original.data(), &[1.0, 2.0]);
+        assert_eq!(tied.data(), &[2.0, 4.0]);
+    }
 
     #[test]
     fn test_zeros() {
