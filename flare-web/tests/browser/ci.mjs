@@ -1,4 +1,5 @@
 // The same installed consumer is driven by CI and the local Chrome harness.
+import { tokenizerParity } from './tokenizer-parity.mjs';
 import { Flare } from '@sauravpanda/flare';
 import init, { FlareEngine, FlareTokenizer } from '@sauravpanda/flare/wasm';
 const assert = (value, message) => { if (!value) throw new Error(message); };
@@ -15,10 +16,10 @@ const workerRun = mode => new Promise((resolve, reject) => {
   worker.onerror = event => { finish(); reject(new Error(event.message)); };
   worker.postMessage({ mode, synthetic: true });
 });
-window.runCI = async ({ gpu = false } = {}) => {
+window.runCI = async ({ gpu = false, originalTokenizer = false } = {}) => {
   const report = { passed: false, platform: navigator.platform, userAgent: navigator.userAgent,
     stages: [], metrics: { backend: 'cpu', informational: true }, coverage: { chromium: 'running', firefox: 'not run', webkit: 'not run',
-      gpu: gpu ? 'required' : 'skipped: CPU job', independentReference: 'not implemented' } };
+      gpu: gpu ? 'required' : 'skipped: CPU job', independentReference: 'tokenizer pending; generation not implemented' } };
   const record = (name, detail = {}) => {
     report.stages.push({ name, status: 'passed', ...detail });
     document.querySelector('#result').textContent = JSON.stringify(report, null, 2);
@@ -28,6 +29,10 @@ window.runCI = async ({ gpu = false } = {}) => {
     const fixture = await (await fetch('/fixture.json')).json();
     report.fixture = fixture;
     await init();
+    const parity = await tokenizerParity();
+    if (originalTokenizer) record('full original-tokenizer IDs', await tokenizerParity('/original-tokenizer.json'));
+    record('independent original-tokenizer IDs', parity);
+    report.coverage.independentReference = 'SmolLM2 tokenizer passed; generation not implemented';
     const tokenizer = FlareTokenizer.from_json(await (await fetch('/tokenizer.json')).text());
     try { equal(Array.from(tokenizer.encode(fixture.prompt)), fixture.promptIds, 'Pinned synthetic tokenizer IDs'); }
     finally { tokenizer.free(); }

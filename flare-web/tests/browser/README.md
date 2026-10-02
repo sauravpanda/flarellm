@@ -118,7 +118,8 @@ during a long-running prefill; the original manual real-model check remains.
 
 These are synthetic regression expectations from Flare, **not an independent
 trusted generation reference**. `referenceImplementation` is explicitly null.
-They do not establish real-answer quality or original model tokenizer parity.
+They do not establish real-answer quality. Original tokenizer parity is checked
+separately by the independent fixtures described below.
 
 ### GPU jobs and capability requirements
 
@@ -168,8 +169,8 @@ are informational: hosted runner variance and software GPUs are unsuitable for
 physical GPU performance gates. Gather repeated baselines on a stable physical
 runner before adding thresholds. No speed threshold is enforced.
 
-Remaining #521 work: independent versioned reference fixtures, original tokenizer
-parity, GPU prefill/more quantization/context coverage, fully offline startup,
+Remaining #521 work: independent generation reference fixtures, additional tokenizer
+configurations, GPU prefill/more quantization/context coverage, fully offline startup,
 other browser/platform configurations, physical adapters and stable performance
 baselines. This change deliberately references rather than closes #521.
 
@@ -178,3 +179,31 @@ explicit missing-WebGPU error and exit 1. This deliberate failure has its own
 artifact subdirectory; setup failures cannot satisfy that assertion. For a
 checksum negative test, alter `fixture.gguf` in a disposable consumer and run the
 driver: it must exit 1 with `Fixture checksum: fixture.gguf` before browser startup.
+
+## Independent SmolLM2 tokenizer parity (#530)
+
+Every ordinary packed-consumer run also executes `tokenizer-parity.mjs` through
+the installed `FlareTokenizer` WASM binding. It compares 81 cases / 498 IDs with
+Hugging Face tokenizers 0.22.2 expectations, verifies the reduced JSON checksum,
+checks unsupported-pipeline errors, and reproduces the old incorrect IDs by
+explicitly selecting legacy (null pre-tokenizer) behavior. Failures propagate
+through the existing report/trace/exit-status path. GPU runs use the same check;
+no model inference or GPU is needed for tokenizer parity.
+
+The ~18 KiB committed subset preserves original IDs and all relevant merges,
+including forbidden cross-boundary merges for the negative controls. It is
+verified independently against the full original during fixture generation.
+See [provenance, regeneration and supported semantics](../../../flare-core/tests/fixtures/tokenizer/README.md).
+CI requires no downloads or Python tokenizer installation. The older synthetic
+inference fixture's `referenceImplementation: null` remains accurate.
+
+To additionally test the full, checksum-pinned original JSON with the same runner:
+
+```sh
+ORIGINAL_TOKENIZER_JSON=/absolute/path/tokenizer.json \
+  node flare-web/tests/browser/run.mjs /tmp/flare-consumer
+```
+
+This adds a separate full-original stage to the report. The runner copies the
+verified file into the consumer. In a manually served consumer with that file,
+call `await runCI({originalTokenizer: true})`.

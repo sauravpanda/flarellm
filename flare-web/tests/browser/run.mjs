@@ -1,7 +1,7 @@
 // Portable CI driver. Local interactive testing can call runCI via Chrome CDP.
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, writeFile, copyFile } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -11,6 +11,8 @@ const here = dirname(fileURLToPath(import.meta.url));
 const consumer = resolve(process.argv[2] || '/tmp/flare-consumer');
 const output = resolve(process.env.BROWSER_ARTIFACTS || 'browser-artifacts');
 const gpu = process.argv.includes('--gpu');
+// Optional local full-source check; ordinary CI needs only the committed subset.
+const originalTokenizer = process.env.ORIGINAL_TOKENIZER_JSON;
 const port = Number(process.env.BROWSER_PORT || 8520);
 await mkdir(output, { recursive: true });
 let browser, server, context, page;
@@ -22,6 +24,12 @@ try {
   const fixture = JSON.parse(await readFile(resolve(consumer, 'fixture.json'), 'utf8'));
   for (const [name, hash] of Object.entries(fixture.sha256)) {
     assert.equal(createHash('sha256').update(await readFile(resolve(consumer, name))).digest('hex'), hash, `Fixture checksum: ${name}`);
+  }
+  const reference = JSON.parse(await readFile(resolve(consumer, 'tokenizer-parity/reference.json'), 'utf8'));
+  assert.equal(createHash('sha256').update(await readFile(resolve(consumer, 'tokenizer-parity/smollm2-reduced.json'))).digest('hex'), reference.fixtureSha256, 'Tokenizer parity fixture checksum');
+  if (originalTokenizer) {
+    assert.equal(createHash('sha256').update(await readFile(originalTokenizer)).digest('hex'), reference.originalSha256, 'Original tokenizer checksum');
+    await copyFile(originalTokenizer, resolve(consumer, 'original-tokenizer.json'));
   }
   server = spawn('python3', [resolve(here, 'serve.py'), consumer, resolve(consumer, 'fixture.gguf'), '--ci', '--port', String(port)]);
   server.stdout.on('data', data => logs.push(`server: ${data}`));
@@ -49,7 +57,7 @@ try {
   await page.goto(url);
   await page.waitForFunction(() => typeof window.runCI === 'function');
   // The timeout also bounds a stuck worker or WASM request.
-  await page.evaluate(gpu => { window.runCI({ gpu }); }, gpu);
+  await page.evaluate(options => { window.runCI(options); }, { gpu, originalTokenizer: Boolean(originalTokenizer) });
   await page.waitForFunction(() => window.ciValidation, null, { timeout: 180000 });
   report.result = await page.evaluate(() => window.ciValidation);
   assert(report.result.passed, JSON.stringify(report.result.error));
