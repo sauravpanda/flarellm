@@ -2,6 +2,8 @@
 name = "flarellm-loader"
 version.workspace = true
 edition.workspace = true
+# Keep Clippy suggestions compatible with the Docker builder.
+rust-version = "1.85"
 license.workspace = true
 repository.workspace = true
 description = "Model weight loading for Flare (GGUF, SafeTensors, progressive streaming)"

@@ -375,7 +375,7 @@ pub struct FlareEngine {
     architecture: String,
     /// Model display name from `general.name` in GGUF metadata, or empty string if absent.
     model_name: String,
-    /// Number of tokens consumed in the current KV-cache session (prompt + generated).
+    /// Number of tokens forwarded in the current KV-cache session.
     /// Updated after every generation call; reset to 0 by `engine.reset()`.
     kv_pos: usize,
     // --- Token-by-token streaming state ---
@@ -383,15 +383,17 @@ pub struct FlareEngine {
     stream_params: SamplingParams,
     /// LCG RNG state for streaming sampling; reset on each begin_stream call.
     stream_rng_state: u32,
-    /// Last token fed to the model (updated by begin_stream / next_token).
+    /// Last sampled token, forwarded on the next decode call after prefill.
     stream_last_token: u32,
+    /// Prefill logits waiting for the first decode call.
+    stream_pending_logits: Option<Vec<f32>>,
     /// Rolling window of recent token IDs for repetition penalty.
     /// Seeded from the tail of the prompt and extended with each generated token.
     stream_recent_tokens: Vec<u32>,
     /// Maximum number of recent tokens tracked for repetition penalty.
     /// 0 disables repetition penalty entirely. Default: 64.
     repeat_last_n: usize,
-    /// Current sequence position (prompt length + tokens generated so far).
+    /// Position of the next token to forward; sampling prefill logits does not advance it.
     stream_pos: usize,
     /// Remaining budget of tokens to generate in the current stream.
     stream_remaining: usize,
@@ -625,6 +627,7 @@ impl FlareLoader {
             },
             stream_rng_state: 0x12345678,
             stream_last_token: 0,
+            stream_pending_logits: None,
             stream_recent_tokens: Vec::new(),
             repeat_last_n: 64,
             stream_pos: 0,
@@ -824,6 +827,7 @@ impl FlareEngine {
             },
             stream_rng_state: 0x12345678,
             stream_last_token: 0,
+            stream_pending_logits: None,
             stream_recent_tokens: Vec::new(),
             repeat_last_n: 64,
             stream_pos: 0,
@@ -1051,8 +1055,10 @@ impl FlareEngine {
         let _logits = self.model.forward(0, 0);
         // Restore clean KV state so the engine is ready for real inference.
         self.model.reset();
-        self.kv_pos = 0;
+        self.stream_pending_logits = None;
         self.stream_done = true;
+        self.stream_remaining = 0;
+        self.kv_pos = 0;
         self.stream_stop_reason.clear();
         true
     }
@@ -1127,6 +1133,9 @@ impl FlareEngine {
     #[wasm_bindgen]
     pub fn reset(&mut self) {
         self.model.reset();
+        self.stream_pending_logits = None;
+        self.stream_done = true;
+        self.stream_remaining = 0;
         self.kv_pos = 0;
         self.stream_recent_tokens.clear();
         self.stop_sequences.clear();
@@ -1567,7 +1576,7 @@ impl FlareEngine {
         self.last_prefill_ms = now_ms() - t0;
         self.last_decode_ms = 0.0;
         self.last_tokens_generated = generated.len() as u32;
-        self.kv_pos = prompt_tokens.len() + generated.len();
+        self.kv_pos = gen.position();
         match &self.gguf_vocab {
             Some(vocab) => vocab.decode(&generated),
             None => String::new(),
@@ -1671,13 +1680,15 @@ impl FlareEngine {
         // is safe to split-borrow after the encode above.
         let generated = {
             let mut gen = Generator::new(&mut self.model, params);
-            gen.generate(
+            let result = gen.generate(
                 &prompt_tokens,
                 max_tokens as usize,
                 eos,
                 || 0.5,
                 |_, _| true,
-            )
+            );
+            self.kv_pos = gen.position();
+            result
         };
         let mut count = 0u32;
         if let Some(vocab) = &self.gguf_vocab {
@@ -1762,7 +1773,10 @@ impl FlareEngine {
     ///
     /// Runs the prefill pass on `prompt_tokens`, then initialises internal
     /// state so that subsequent calls to `next_token()` each produce one
-    /// output token.  Call `engine.reset()` before `begin_stream()` to start
+    /// output token. The first call samples prefill logits without advancing
+    /// the KV cache. With no prompt or BOS, token 0 seeds the first forward pass.
+    /// A zero token budget still prefills the prompt but produces no output.
+    /// Call `engine.reset()` before `begin_stream()` to start
     /// a fresh conversation.
     ///
     /// # JS example
@@ -1880,17 +1894,10 @@ impl FlareEngine {
             .await;
     }
 
-    /// Begin a token-by-token stream, healing the last prompt token.
+    /// Compatibility alias for `begin_stream`.
     ///
-    /// Identical to `begin_stream` but avoids double-processing the final prompt
-    /// token: the prefill runs only tokens `[0 .. n-2]`, then the first
-    /// `next_token()` call processes the last prompt token at its correct
-    /// position `n-1` and produces the first output token.  This keeps RoPE
-    /// positional embeddings consistent and is recommended when the prompt
-    /// ends at a natural token boundary (e.g. when encoding a user turn in a
-    /// chat template).
-    ///
-    /// Falls back to `begin_stream` for prompts shorter than 2 tokens.
+    /// Both APIs sample the first output from prefill logits, processing every
+    /// prompt token exactly once. This does not perform partial-token healing.
     ///
     /// # JS example
     /// ```javascript
@@ -1958,16 +1965,12 @@ impl FlareEngine {
     fn begin_stream_impl(&mut self, prompt_tokens: &[u32], max_tokens: u32) {
         let effective = self.with_bos(prompt_tokens);
         let t0 = now_ms();
-        // Batched prefill: one pass over all prompt tokens using the tuned
-        // batched_dequant_matmul path (2×4 tile on aarch64 / 2×2 on wasm+
-        // simd128) instead of N sequential single-token forward() calls.
-        // Dramatically lower TTFT on multi-token prompts.
-        let pos = if effective.is_empty() {
-            0
+        self.stream_pending_logits = if effective.is_empty() {
+            None
         } else {
-            let _ = self.model.forward_prefill(&effective);
-            effective.len()
+            Some(self.model.forward_prefill(&effective).data().to_vec())
         };
+        let pos = self.model.kv_cache().position();
         self.last_prefill_ms = now_ms() - t0;
         self.last_decode_ms = 0.0;
         self.last_tokens_generated = 0;
@@ -2000,81 +2003,12 @@ impl FlareEngine {
     /// see the doc comment on `begin_stream_with_params_async` for why
     /// the GPU async-readback path was disabled on wasm32.
     async fn begin_stream_async_impl(&mut self, prompt_tokens: &[u32], max_tokens: u32) {
-        let effective = self.with_bos(prompt_tokens);
-        let t0 = now_ms();
-        let pos = if effective.is_empty() {
-            0
-        } else {
-            let _ = self.model.forward_prefill(&effective);
-            effective.len()
-        };
-        self.last_prefill_ms = now_ms() - t0;
-        self.last_decode_ms = 0.0;
-        self.last_tokens_generated = 0;
-        self.stream_decode_start_ms = 0.0;
-        self.stream_pos = pos;
-        self.kv_pos = pos;
-        self.stream_last_token = *effective.last().unwrap_or(&0);
-        self.stream_remaining = max_tokens as usize;
-        self.stream_done = false;
-        self.stream_stop_reason.clear();
-        let window = self.repeat_last_n;
-        let n = if window == 0 {
-            0
-        } else {
-            effective.len().min(window)
-        };
-        self.stream_recent_tokens.clear();
-        if n > 0 {
-            self.stream_recent_tokens
-                .extend_from_slice(&effective[effective.len() - n..]);
-        }
-        self.stream_text_accum.clear();
+        self.begin_stream_impl(prompt_tokens, max_tokens);
     }
 
-    /// Healed prefill: run tokens `[0 .. n-2]` during prefill, leave the last
-    /// prompt token for the first `next_token()` call at its correct position.
+    /// Compatibility alias: ordinary streaming also processes each prompt token once.
     fn begin_stream_healed_impl(&mut self, prompt_tokens: &[u32], max_tokens: u32) {
-        let effective = self.with_bos(prompt_tokens);
-        // Short prompt: fall back to standard prefill.
-        if effective.len() < 2 {
-            self.begin_stream_impl(prompt_tokens, max_tokens);
-            return;
-        }
-        let last_idx = effective.len() - 1;
-        let t0 = now_ms();
-        // Batched prefill for the all-but-last tokens; the last prompt token
-        // is held back so next_token() runs it at its correct RoPE position.
-        let pos = if last_idx == 0 {
-            0
-        } else {
-            let _ = self.model.forward_prefill(&effective[..last_idx]);
-            last_idx
-        };
-        self.last_prefill_ms = now_ms() - t0;
-        self.last_decode_ms = 0.0;
-        self.last_tokens_generated = 0;
-        self.stream_decode_start_ms = 0.0;
-        // Leave stream_pos = last_idx so next_token() runs the last prompt
-        // token at its correct position (last_idx), keeping RoPE consistent.
-        self.stream_pos = pos; // == last_idx
-        self.kv_pos = pos;
-        self.stream_last_token = effective[last_idx];
-        self.stream_remaining = max_tokens as usize;
-        self.stream_done = false;
-        self.stream_stop_reason.clear();
-        let window = self.repeat_last_n;
-        let n = if window == 0 {
-            0
-        } else {
-            effective.len().min(window)
-        };
-        self.stream_recent_tokens.clear();
-        if n > 0 {
-            self.stream_recent_tokens
-                .extend_from_slice(&effective[effective.len() - n..]);
-        }
-        self.stream_text_accum.clear();
+        self.begin_stream_impl(prompt_tokens, max_tokens);
     }
 
     /// Generate and return the next token ID, or `undefined` when the stream
@@ -2100,46 +2034,54 @@ impl FlareEngine {
             self.stream_decode_start_ms = now_ms();
         }
 
-        let logits_tensor = self.model.forward(self.stream_last_token, self.stream_pos);
+        let raw_logits = if let Some(logits) = self.stream_pending_logits.take() {
+            logits
+        } else {
+            let output = self.model.forward(self.stream_last_token, self.stream_pos);
+            self.stream_pos += 1;
+            output.data().to_vec()
+        };
         // Capture raw pre-temperature logits for last_logits() getter.
-        self.last_logits = logits_tensor.data().to_vec();
+        self.last_logits = raw_logits.clone();
         // Compute top-N log-probabilities if requested.
         if self.top_logprobs_n > 0 {
             self.top_logprobs_data =
                 compute_top_logprobs(&self.last_logits, self.top_logprobs_n as usize);
         }
-        let token_id = if self.stream_params.temperature == 0.0 {
-            sampling::sample_greedy(logits_tensor.data())
-        } else {
-            let mut logits = logits_tensor.data().to_vec();
-            // Apply repetition penalty before temperature so penalty operates on
-            // raw logits (consistent with Generator::step and the llama.cpp convention).
-            sampling::apply_repeat_penalty(
-                &mut logits,
-                &self.stream_recent_tokens,
-                self.stream_params.repeat_penalty,
-            );
-            sampling::apply_temperature(&mut logits, self.stream_params.temperature);
-            // Advance LCG RNG state for this token.
-            self.stream_rng_state = self
-                .stream_rng_state
-                .wrapping_mul(1664525)
-                .wrapping_add(1013904223);
-            let rng_val = (self.stream_rng_state as f32) / (u32::MAX as f32);
-            // Mirror Generator::step() priority: top_p > min_p > top_k > full nucleus
-            if self.stream_params.top_p < 1.0 {
-                sampling::sample_top_p(&logits, self.stream_params.top_p, rng_val)
-            } else if self.stream_params.min_p > 0.0 {
-                sampling::sample_min_p(&logits, self.stream_params.min_p, rng_val)
-            } else if self.stream_params.top_k > 0 {
-                sampling::sample_top_k(&logits, self.stream_params.top_k, rng_val)
+        let token_id =
+            if self.stream_params.temperature == 0.0 && self.stream_params.repeat_penalty == 1.0 {
+                sampling::sample_greedy(&raw_logits)
             } else {
-                sampling::sample_top_p(&logits, 1.0, rng_val)
-            }
-        };
+                let mut logits = raw_logits.clone();
+                // Apply repetition penalty before temperature so penalty operates on
+                // raw logits (consistent with Generator::step and the llama.cpp convention).
+                sampling::apply_repeat_penalty(
+                    &mut logits,
+                    &self.stream_recent_tokens,
+                    self.stream_params.repeat_penalty,
+                );
+                sampling::apply_temperature(&mut logits, self.stream_params.temperature);
+                // Advance LCG RNG state for this token.
+                self.stream_rng_state = self
+                    .stream_rng_state
+                    .wrapping_mul(1664525)
+                    .wrapping_add(1013904223);
+                let rng_val = (self.stream_rng_state as f32) / (u32::MAX as f32);
+                // Mirror Generator::step() priority: top_p > min_p > top_k > full nucleus
+                if self.stream_params.temperature == 0.0 {
+                    sampling::sample_greedy(&logits)
+                } else if self.stream_params.top_p < 1.0 {
+                    sampling::sample_top_p(&logits, self.stream_params.top_p, rng_val)
+                } else if self.stream_params.min_p > 0.0 {
+                    sampling::sample_min_p(&logits, self.stream_params.min_p, rng_val)
+                } else if self.stream_params.top_k > 0 {
+                    sampling::sample_top_k(&logits, self.stream_params.top_k, rng_val)
+                } else {
+                    sampling::sample_top_p(&logits, 1.0, rng_val)
+                }
+            };
 
         self.stream_last_token = token_id;
-        self.stream_pos += 1;
         self.kv_pos = self.stream_pos;
         // Update rolling repetition-penalty window.
         if self.repeat_last_n > 0 {
@@ -2210,43 +2152,51 @@ impl FlareEngine {
             self.stream_decode_start_ms = now_ms();
         }
 
-        let logits_tensor = self
-            .model
-            .forward_async(self.stream_last_token, self.stream_pos)
-            .await;
-        self.last_logits = logits_tensor.data().to_vec();
+        let raw_logits = if let Some(logits) = self.stream_pending_logits.take() {
+            logits
+        } else {
+            let output = self
+                .model
+                .forward_async(self.stream_last_token, self.stream_pos)
+                .await;
+            self.stream_pos += 1;
+            output.data().to_vec()
+        };
+        self.last_logits = raw_logits.clone();
         if self.top_logprobs_n > 0 {
             self.top_logprobs_data =
                 compute_top_logprobs(&self.last_logits, self.top_logprobs_n as usize);
         }
-        let token_id = if self.stream_params.temperature == 0.0 {
-            sampling::sample_greedy(logits_tensor.data())
-        } else {
-            let mut logits = logits_tensor.data().to_vec();
-            sampling::apply_repeat_penalty(
-                &mut logits,
-                &self.stream_recent_tokens,
-                self.stream_params.repeat_penalty,
-            );
-            sampling::apply_temperature(&mut logits, self.stream_params.temperature);
-            self.stream_rng_state = self
-                .stream_rng_state
-                .wrapping_mul(1664525)
-                .wrapping_add(1013904223);
-            let rng_val = (self.stream_rng_state as f32) / (u32::MAX as f32);
-            if self.stream_params.top_p < 1.0 {
-                sampling::sample_top_p(&logits, self.stream_params.top_p, rng_val)
-            } else if self.stream_params.min_p > 0.0 {
-                sampling::sample_min_p(&logits, self.stream_params.min_p, rng_val)
-            } else if self.stream_params.top_k > 0 {
-                sampling::sample_top_k(&logits, self.stream_params.top_k, rng_val)
+        let token_id =
+            if self.stream_params.temperature == 0.0 && self.stream_params.repeat_penalty == 1.0 {
+                sampling::sample_greedy(&raw_logits)
             } else {
-                sampling::sample_top_p(&logits, 1.0, rng_val)
-            }
-        };
+                let mut logits = raw_logits.clone();
+                sampling::apply_repeat_penalty(
+                    &mut logits,
+                    &self.stream_recent_tokens,
+                    self.stream_params.repeat_penalty,
+                );
+                sampling::apply_temperature(&mut logits, self.stream_params.temperature);
+                self.stream_rng_state = self
+                    .stream_rng_state
+                    .wrapping_mul(1664525)
+                    .wrapping_add(1013904223);
+                let rng_val = (self.stream_rng_state as f32) / (u32::MAX as f32);
+                if self.stream_params.temperature == 0.0 {
+                    sampling::sample_greedy(&logits)
+                } else if self.stream_params.top_p < 1.0 {
+                    sampling::sample_top_p(&logits, self.stream_params.top_p, rng_val)
+                } else if self.stream_params.min_p > 0.0 {
+                    sampling::sample_min_p(&logits, self.stream_params.min_p, rng_val)
+                } else if self.stream_params.top_k > 0 {
+                    sampling::sample_top_k(&logits, self.stream_params.top_k, rng_val)
+                } else {
+                    sampling::sample_top_p(&logits, 1.0, rng_val)
+                }
+            };
 
         self.stream_last_token = token_id;
-        self.stream_pos += 1;
         self.kv_pos = self.stream_pos;
         if self.repeat_last_n > 0 {
             if self.stream_recent_tokens.len() >= self.repeat_last_n {
@@ -2434,7 +2384,7 @@ impl FlareEngine {
         self.last_prefill_ms = now_ms() - t0;
         self.last_decode_ms = 0.0;
         self.last_tokens_generated = result.len() as u32;
-        self.kv_pos = effective.len() + result.len();
+        self.kv_pos = gen.position();
         result
     }
 
@@ -2502,7 +2452,7 @@ impl FlareEngine {
         self.last_prefill_ms = now_ms() - t0;
         self.last_decode_ms = 0.0;
         self.last_tokens_generated = result.len() as u32;
-        self.kv_pos = effective.len() + result.len();
+        self.kv_pos = gen.position();
         result
     }
 
@@ -2540,6 +2490,9 @@ impl FlareEngine {
 
         // Reset before evaluation to start from a clean KV state.
         self.model.reset();
+        self.stream_pending_logits = None;
+        self.stream_done = true;
+        self.stream_remaining = 0;
 
         let n = tokens.len();
         let mut total_log_prob: f64 = 0.0;
@@ -2558,6 +2511,9 @@ impl FlareEngine {
 
         // Reset after evaluation, restoring clean state for subsequent inference.
         self.model.reset();
+        self.stream_pending_logits = None;
+        self.stream_done = true;
+        self.stream_remaining = 0;
         self.kv_pos = 0;
         self.stream_done = true;
 
@@ -2963,6 +2919,7 @@ impl FlareProgressiveLoader {
             },
             stream_rng_state: 0x12345678,
             stream_last_token: 0,
+            stream_pending_logits: None,
             stream_recent_tokens: Vec::new(),
             repeat_last_n: 64,
             stream_pos: 0,
@@ -3219,3 +3176,6 @@ pub async fn storage_estimate() -> Result<JsValue, JsValue> {
         usage, quota
     )))
 }
+
+#[cfg(test)]
+mod tests;
