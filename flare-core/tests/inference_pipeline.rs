@@ -4,70 +4,11 @@
 //! → Generator → token output, using tiny synthetic weights so no model
 //! file is needed and tests run in milliseconds.
 
-use flare_core::config::{Architecture, ModelConfig};
 use flare_core::generate::Generator;
-use flare_core::model::{LayerWeights, Model, ModelWeights};
 use flare_core::sampling::SamplingParams;
-use flare_core::tensor::Tensor;
 
-/// Build a tiny 2-layer model with vocab=16, hidden_dim=8.
-fn make_model() -> Model {
-    let config = ModelConfig {
-        architecture: Architecture::Llama,
-        vocab_size: 16,
-        hidden_dim: 8,
-        intermediate_dim: 16,
-        num_layers: 2,
-        num_heads: 2,
-        num_kv_heads: 2,
-        head_dim: 4,
-        max_seq_len: 32,
-        rope_theta: 10000.0,
-        rms_norm_eps: 1e-5,
-        attn_logit_softcap: 0.0,
-        final_logit_softcap: 0.0,
-        kv_cache_bits: 32,
-        moe: false,
-        num_experts: 0,
-        num_experts_per_token: 0,
-    };
-
-    let w = |n: usize| -> Vec<f32> { (0..n).map(|i| ((i % 7) as f32 - 3.0) * 0.1).collect() };
-
-    let dim = config.hidden_dim;
-    let nh = config.num_heads;
-    let nkvh = config.num_kv_heads;
-    let hd = config.head_dim;
-    let inter = config.intermediate_dim;
-    let vocab = config.vocab_size;
-
-    let make_layer = || LayerWeights {
-        attn_norm: Tensor::from_vec(vec![1.0; dim], &[dim]).unwrap(),
-        wq: Tensor::from_vec(w(nh * hd * dim), &[nh * hd * dim]).unwrap(),
-        wk: Tensor::from_vec(w(nkvh * hd * dim), &[nkvh * hd * dim]).unwrap(),
-        wv: Tensor::from_vec(w(nkvh * hd * dim), &[nkvh * hd * dim]).unwrap(),
-        wo: Tensor::from_vec(w(dim * nh * hd), &[dim * nh * hd]).unwrap(),
-        ffn_norm: Tensor::from_vec(vec![1.0; dim], &[dim]).unwrap(),
-        w_gate: Tensor::from_vec(w(inter * dim), &[inter * dim]).unwrap(),
-        w_up: Tensor::from_vec(w(inter * dim), &[inter * dim]).unwrap(),
-        w_down: Tensor::from_vec(w(dim * inter), &[dim * inter]).unwrap(),
-        attn_q_bias: None,
-        attn_k_bias: None,
-        attn_v_bias: None,
-        post_attn_norm: None,
-        post_ffn_norm: None,
-        moe: None,
-    };
-
-    let weights = ModelWeights {
-        token_embedding: Tensor::from_vec(w(vocab * dim), &[vocab * dim]).unwrap(),
-        layers: vec![make_layer(), make_layer()],
-        output_norm: Tensor::from_vec(vec![1.0; dim], &[dim]).unwrap(),
-        output_weight: Tensor::from_vec(w(vocab * dim), &[vocab * dim]).unwrap(),
-    };
-
-    Model::new(config, weights)
-}
+mod common;
+use common::make_model;
 
 /// Greedy RNG: always returns 0.0, forcing argmax selection.
 fn greedy() -> impl FnMut() -> f32 {
@@ -199,4 +140,177 @@ fn test_reset_allows_second_generation() {
         tokens_first, tokens_second,
         "reset should allow identical generation from a fresh state"
     );
+}
+
+#[test]
+fn first_generated_token_matches_prefill_logits() {
+    let prompt = [4, 2];
+    let mut reference = make_model();
+    let logits = reference.forward_prefill(&prompt);
+    let expected = flare_core::sampling::sample_greedy(logits.data());
+    let mut actual = make_model();
+    let params = SamplingParams {
+        temperature: 0.0,
+        repeat_penalty: 1.0,
+        ..Default::default()
+    };
+    let output =
+        Generator::new(&mut actual, params).generate(&prompt, 1, None, || 0.0, |_, _| true);
+    assert_eq!(output, vec![expected]);
+    assert_eq!(actual.kv_cache().position(), prompt.len());
+}
+
+#[test]
+fn generation_matches_sequential_forward_and_cache_positions() {
+    use flare_core::sampling::*;
+    for prompt in [vec![], vec![2], vec![4, 2], vec![4, 2, 4, 2]] {
+        for temperature in [0.0, 0.8] {
+            for penalty in [1.0, 1.2] {
+                for filter in 0..4 {
+                    let params = SamplingParams {
+                        temperature,
+                        repeat_penalty: penalty,
+                        top_p: if filter == 0 { 0.9 } else { 1.0 },
+                        min_p: if filter == 1 { 0.1 } else { 0.0 },
+                        top_k: if filter == 2 { 4 } else { 0 },
+                        ..Default::default()
+                    };
+                    let mut reference = make_model();
+                    let mut history = prompt.clone();
+                    let mut logits = Vec::new();
+                    for (pos, &token) in prompt.iter().enumerate() {
+                        logits = reference.forward(token, pos).data().to_vec();
+                    }
+                    let mut actual = make_model();
+                    let mut generator = Generator::new(&mut actual, params.clone());
+                    let batched = generator.prefill(&prompt);
+                    for (a, b) in batched.iter().zip(&logits) {
+                        assert!((a - b).abs() < 1e-4, "prefill logits {a} != {b}");
+                    }
+                    for step in 0..4 {
+                        if step > 0 || prompt.is_empty() {
+                            logits = reference
+                                .forward(
+                                    *history.last().unwrap_or(&0),
+                                    reference.kv_cache().position(),
+                                )
+                                .data()
+                                .to_vec();
+                        }
+                        apply_repeat_penalty(&mut logits, &history, penalty);
+                        apply_temperature(&mut logits, temperature);
+                        let expected = if temperature == 0.0 {
+                            sample_greedy(&logits)
+                        } else if params.top_p < 1.0 {
+                            sample_top_p(&logits, params.top_p, 0.37)
+                        } else if params.min_p > 0.0 {
+                            sample_min_p(&logits, params.min_p, 0.37)
+                        } else if params.top_k > 0 {
+                            sample_top_k(&logits, params.top_k, 0.37)
+                        } else {
+                            sample_top_p(&logits, 1.0, 0.37)
+                        };
+                        assert_eq!(generator.step(0.37).token_id, expected);
+                        assert_eq!(generator.position(), reference.kv_cache().position());
+                        history.push(expected);
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn generation_budget_eos_and_reuse() {
+    for speculative in [false, true] {
+        for self_speculative in [false, true] {
+            let params = SamplingParams {
+                temperature: 0.0,
+                repeat_penalty: 1.0,
+                speculative,
+                self_speculative,
+                ..Default::default()
+            };
+            let prompt = [4, 2, 4, 2];
+            let mut expected_model = make_model();
+            let expected = Generator::new(
+                &mut expected_model,
+                SamplingParams {
+                    speculative: false,
+                    self_speculative: false,
+                    ..params.clone()
+                },
+            )
+            .generate(&prompt, 28, None, || 0.0, |_, _| true);
+            for budget in [0, 1, 2, 8, 28] {
+                let mut model = make_model();
+                for _ in 0..2 {
+                    model.reset();
+                    let mut generator = Generator::new(&mut model, params.clone());
+                    let output = generator.generate(&prompt, budget, None, || 0.0, |_, _| true);
+                    assert_eq!(
+                        output,
+                        expected[..budget],
+                        "spec={speculative}, self={self_speculative}, budget={budget}"
+                    );
+                    assert_eq!(
+                        generator.position(),
+                        prompt.len() + budget.saturating_sub(1)
+                    );
+                    assert_eq!(generator.tokens().len(), prompt.len() + budget);
+                }
+            }
+            let mut model = make_model();
+            let mut generator = Generator::new(&mut model, params.clone());
+            let output = generator.generate(
+                &prompt,
+                8,
+                Some(expected[0]),
+                || 0.0,
+                |_, _| panic!("EOS must precede callback"),
+            );
+            assert_eq!(output, expected[..1]);
+            assert_eq!(generator.position(), prompt.len());
+            let mut model = make_model();
+            let mut generator = Generator::new(&mut model, params);
+            let output = generator.generate(&prompt, 8, None, || 0.0, |_, step| step < 2);
+            assert_eq!(output, expected[..3]);
+            assert_eq!(generator.position(), prompt.len() + 2);
+            assert_eq!(generator.tokens().len(), prompt.len() + 3);
+            assert_eq!(generator.step(0.0).token_id, expected[3]);
+        }
+    }
+}
+
+#[test]
+fn prefill_continuation_and_existing_cache_use_actual_position() {
+    let params = SamplingParams {
+        temperature: 0.0,
+        repeat_penalty: 1.0,
+        ..Default::default()
+    };
+    let mut model = make_model();
+    let mut generator = Generator::new(&mut model, params.clone());
+    assert!(generator
+        .generate(
+            &[4, 2],
+            0,
+            None,
+            || panic!("zero budget must not sample"),
+            |_, _| true
+        )
+        .is_empty());
+    assert_eq!(generator.position(), 2);
+    assert_eq!(
+        generator.generate(&[], 1, None, || 0.0, |_, _| true),
+        vec![3]
+    );
+    assert_eq!(generator.position(), 2);
+    drop(generator);
+    let mut generator = Generator::new(&mut model, params);
+    generator.prefill(&[1]);
+    generator.step(0.0);
+    assert_eq!(generator.position(), 3);
+    drop(generator);
+    assert_eq!(model.kv_cache().position(), 3);
 }

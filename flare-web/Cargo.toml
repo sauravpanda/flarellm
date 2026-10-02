@@ -67,3 +67,6 @@ wasm_threads = ["wasm-bindgen-rayon", "flare-core/wasm_threads"]
 # Requires browser support for the relaxed-simd WASM proposal.
 # Build: wasm-pack build flare-web --target web --features relaxed_simd
 relaxed_simd = ["flare-core/relaxed_simd", "flare-simd/relaxed_simd"]
+
+[dev-dependencies]
+pollster = "0.4"

@@ -107,17 +107,21 @@ pub struct Generator<'a> {
     params: SamplingParams,
     tokens: Vec<u32>,
     position: usize,
+    /// Logits for a fully processed prompt, consumed by the next step.
+    pending_logits: Option<Vec<f32>>,
     ngram_cache: NgramCache,
     speculative_stats: SpeculativeStats,
 }
 
 impl<'a> Generator<'a> {
     pub fn new(model: &'a mut Model, params: SamplingParams) -> Self {
+        let position = model.kv_cache().position();
         Self {
             model,
             params,
             tokens: Vec::new(),
-            position: 0,
+            position,
+            pending_logits: None,
             ngram_cache: NgramCache::new(),
             speculative_stats: SpeculativeStats::default(),
         }
@@ -138,6 +142,7 @@ impl<'a> Generator<'a> {
     /// Uses `Model::forward_prefill` which computes all Q/K/V projections
     /// in-order for the full sequence and does causal attention inline,
     /// then writes the entire K/V batch into the KV cache at once.
+    /// The next `step` samples these logits without forwarding a token again.
     pub fn prefill(&mut self, prompt_tokens: &[u32]) -> Vec<f32> {
         if prompt_tokens.is_empty() {
             return Vec::new();
@@ -160,7 +165,9 @@ impl<'a> Generator<'a> {
             self.record_prompt_ngrams();
         }
 
-        output.data().to_vec()
+        let logits = output.data().to_vec();
+        self.pending_logits = Some(logits.clone());
+        logits
     }
 
     /// Record n-grams from the entire current token sequence (used after prefill).
@@ -183,13 +190,18 @@ impl<'a> Generator<'a> {
     }
 
     /// Generate a single next token, returning the token ID.
+    /// Samples pending prefill logits first; otherwise forwards the last sampled
+    /// token. Without a prompt, token 0 seeds the first forward pass.
     pub fn step(&mut self, rng_val: f32) -> GenerationStep {
         let last_token = *self.tokens.last().unwrap_or(&0);
 
         // Fast path: greedy decoding without repeat penalty can use
         // forward_greedy() which fuses the argmax into the output projection,
         // avoiding a 512KB+ logits buffer write and the subsequent scan.
-        if self.params.temperature == 0.0 && self.params.repeat_penalty == 1.0 {
+        if self.pending_logits.is_none()
+            && self.params.temperature == 0.0
+            && self.params.repeat_penalty == 1.0
+        {
             let (token_id, _logit_val) = self.model.forward_greedy(last_token, self.position);
 
             self.tokens.push(token_id);
@@ -207,8 +219,13 @@ impl<'a> Generator<'a> {
         }
 
         // Standard path: compute full logits for sampling or repeat penalty.
-        let logits_tensor = self.model.forward(last_token, self.position);
-        let mut logits = logits_tensor.data().to_vec();
+        let mut logits = if let Some(logits) = self.pending_logits.take() {
+            logits
+        } else {
+            let output = self.model.forward(last_token, self.position);
+            self.position += 1;
+            output.data().to_vec()
+        };
 
         // Apply sampling transforms
         sampling::apply_repeat_penalty(&mut logits, &self.tokens, self.params.repeat_penalty);
@@ -228,7 +245,6 @@ impl<'a> Generator<'a> {
         };
 
         self.tokens.push(token_id);
-        self.position += 1;
 
         // Update n-gram cache after generating a token.
         if self.is_speculative() {
@@ -241,21 +257,32 @@ impl<'a> Generator<'a> {
     /// Attempt speculative decoding: look up draft tokens from the n-gram
     /// cache, run forward passes to verify each one, and return all accepted
     /// tokens.  Returns an empty vec if no drafts are available or none match.
-    fn speculative_step(&mut self) -> Vec<GenerationStep> {
+    fn speculative_step(&mut self, budget: usize, eos: Option<u32>) -> Vec<GenerationStep> {
+        // A callback may stop inside the batch. Rollback is only valid before
+        // the ring buffer overwrites entries from the existing context.
+        let budget = budget.min(
+            self.model
+                .config()
+                .max_seq_len
+                .saturating_sub(self.model.kv_cache().len() + 1),
+        );
+        if budget == 0 {
+            return Vec::new();
+        }
         let drafts = self.ngram_cache.lookup_drafts(&self.tokens);
         if drafts.is_empty() {
             return Vec::new();
         }
 
         self.speculative_stats.attempts += 1;
-        self.speculative_stats.drafted += drafts.len();
+        self.speculative_stats.drafted += drafts.len().min(budget);
 
         let mut accepted = Vec::new();
 
         // Use the fused greedy path when no repeat penalty is active.
         let use_greedy_fused = self.params.repeat_penalty == 1.0;
 
-        for &draft_token in &drafts {
+        for &draft_token in drafts.iter().take(budget) {
             let last_token = *self.tokens.last().unwrap_or(&0);
 
             let (verified_token, logits) = if use_greedy_fused {
@@ -286,6 +313,9 @@ impl<'a> Generator<'a> {
                     token_id: verified_token,
                     logits,
                 });
+                if eos == Some(verified_token) {
+                    break;
+                }
             } else {
                 // Mismatch — accept the verified token (which differs from
                 // the draft) and stop speculation.  The verified token is the
@@ -311,14 +341,20 @@ impl<'a> Generator<'a> {
     /// Returns all accepted tokens (at least one — the verified token at
     /// the first position).  Returns an empty vec if the model has fewer
     /// than 2 layers (layer skipping would be pointless).
-    fn self_speculative_step(&mut self) -> Vec<GenerationStep> {
+    fn self_speculative_step(&mut self, budget: usize, eos: Option<u32>) -> Vec<GenerationStep> {
+        let budget = budget.min(
+            self.model
+                .config()
+                .max_seq_len
+                .saturating_sub(self.model.kv_cache().len() + 1),
+        );
         let num_layers = self.model.config().num_layers;
-        if num_layers < 2 {
+        if num_layers < 2 || budget == 0 {
             return Vec::new();
         }
 
         let draft_skip = self.params.draft_skip.max(2);
-        let max_drafts = self.params.draft_tokens.max(1);
+        let max_drafts = self.params.draft_tokens.max(1).min(budget);
 
         // Build the set of layer indices to use for drafting (skip layers).
         let draft_layers: Vec<usize> = (0..num_layers).step_by(draft_skip).collect();
@@ -383,6 +419,9 @@ impl<'a> Generator<'a> {
                     token_id: verified_token,
                     logits,
                 });
+                if eos == Some(verified_token) {
+                    break;
+                }
             } else {
                 // Mismatch — accept the verified token (correct output for
                 // this position) and stop.
@@ -407,6 +446,8 @@ impl<'a> Generator<'a> {
     /// Generate up to `max_tokens` tokens, calling the callback for each.
     /// Returns the full list of generated token IDs.
     /// The callback receives (token_id, step_number) and returns true to continue.
+    /// Even with a zero budget, the prompt is prefilled and its logits remain
+    /// available to `step`. Reset the model before starting a new conversation.
     pub fn generate<F>(
         &mut self,
         prompt_tokens: &[u32],
@@ -421,6 +462,9 @@ impl<'a> Generator<'a> {
         // Prefill
         self.prefill(prompt_tokens);
 
+        let initial_tokens = self.tokens.len();
+        let initial_position = self.position;
+        let has_prefill_logits = self.pending_logits.is_some();
         let mut generated = Vec::new();
         let mut step = 0;
         let use_speculation = self.is_speculative();
@@ -429,7 +473,7 @@ impl<'a> Generator<'a> {
         while step < max_tokens {
             // Self-speculative decoding (layer-skipping draft + full verify)
             if use_self_speculation && step > 0 {
-                let spec_results = self.self_speculative_step();
+                let spec_results = self.self_speculative_step(max_tokens - step, eos_token);
                 if !spec_results.is_empty() {
                     let mut should_break = false;
                     for result in spec_results {
@@ -463,7 +507,7 @@ impl<'a> Generator<'a> {
             // N-gram speculative decoding
             if use_speculation && step > 0 {
                 // Try speculative decoding first.
-                let spec_results = self.speculative_step();
+                let spec_results = self.speculative_step(max_tokens - step, eos_token);
                 if !spec_results.is_empty() {
                     let mut should_break = false;
                     for result in spec_results {
@@ -514,6 +558,20 @@ impl<'a> Generator<'a> {
             step += 1;
         }
 
+        // A callback can stop inside a verified speculative batch. Discard the
+        // unreturned suffix so subsequent steps resume at the returned token.
+        let unused = self.tokens.len() - initial_tokens - generated.len();
+        if unused > 0 {
+            self.tokens.truncate(initial_tokens + generated.len());
+            self.position = initial_position + generated.len()
+                - usize::from(has_prefill_logits && !generated.is_empty());
+            self.model
+                .truncate_kv_cache(self.model.kv_cache().len() - unused);
+            self.ngram_cache = NgramCache::new();
+            if self.is_speculative() {
+                self.record_prompt_ngrams();
+            }
+        }
         generated
     }
 
@@ -521,6 +579,7 @@ impl<'a> Generator<'a> {
         &self.tokens
     }
 
+    /// Number of tokens forwarded to the model; the newest sampled token is pending.
     pub fn position(&self) -> usize {
         self.position
     }
@@ -769,7 +828,7 @@ mod tests {
 
         let generated = gen.generate(&prompt, 3, None, || 0.5, |_, _| true);
 
-        assert_eq!(gen.position(), prompt.len() + generated.len());
+        assert_eq!(gen.position(), prompt.len() + generated.len() - 1);
         assert_eq!(gen.tokens().len(), prompt.len() + generated.len());
         // First tokens are the prompt
         assert_eq!(&gen.tokens()[..prompt.len()], &prompt[..]);

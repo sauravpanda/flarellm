@@ -508,6 +508,7 @@ dependencies = [
  "flarellm-simd",
  "js-sys",
  "log",
+ "pollster",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
