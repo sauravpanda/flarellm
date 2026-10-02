@@ -67,9 +67,8 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: "20"
-      - name: Verify npm package contents (dry run)
-        working-directory: flare-web
-        run: npm pack --dry-run
+      - name: Verify packaged ESM syntax, import, and WASM initialization
+        run: node .github/scripts/check_wasm_package.mjs
 
   doc:
     name: Doc build
