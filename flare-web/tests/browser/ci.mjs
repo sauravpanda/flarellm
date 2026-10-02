@@ -16,6 +16,14 @@ const workerRun = mode => new Promise((resolve, reject) => {
   worker.onerror = event => { finish(); reject(new Error(event.message)); };
   worker.postMessage({ mode, synthetic: true });
 });
+const ropeRun = (gpu, forceF32 = false) => new Promise((resolve, reject) => {
+  const worker = new Worker('./rope-reference.mjs', { type: 'module' });
+  const timer = setTimeout(() => { worker.terminate(); reject(new Error('Reference timed out')); }, 120000);
+  const finish = () => { clearTimeout(timer); worker.terminate(); };
+  worker.onmessage = ({ data }) => { finish(); data.passed ? resolve(data) : reject(new Error(JSON.stringify(data))); };
+  worker.onerror = e => { finish(); reject(new Error(e.message)); };
+  worker.postMessage({ gpu, forceF32 });
+});
 window.runCI = async ({ gpu = false, originalTokenizer = false } = {}) => {
   const report = { passed: false, platform: navigator.platform, userAgent: navigator.userAgent,
     stages: [], metrics: { backend: 'cpu', informational: true }, coverage: { chromium: 'running', firefox: 'not run', webkit: 'not run',
@@ -29,10 +37,12 @@ window.runCI = async ({ gpu = false, originalTokenizer = false } = {}) => {
     const fixture = await (await fetch('/fixture.json')).json();
     report.fixture = fixture;
     await init();
+    record('independent Llama GGUF logits and load paths', await ropeRun(gpu));
+    if (gpu) record('independent Llama GGUF logits with f32 KV', await ropeRun(true, true));
     const parity = await tokenizerParity();
     if (originalTokenizer) record('full original-tokenizer IDs', await tokenizerParity('/original-tokenizer.json'));
     record('independent original-tokenizer IDs', parity);
-    report.coverage.independentReference = 'SmolLM2 tokenizer passed; generation not implemented';
+    report.coverage.independentReference = 'SmolLM2 tokenizer and pinned llama.cpp GQA logits passed';
     const tokenizer = FlareTokenizer.from_json(await (await fetch('/tokenizer.json')).text());
     try { equal(Array.from(tokenizer.encode(fixture.prompt)), fixture.promptIds, 'Pinned synthetic tokenizer IDs'); }
     finally { tokenizer.free(); }

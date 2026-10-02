@@ -34,7 +34,8 @@ where
     R: Read + Seek,
     F: Fn(usize, usize),
 {
-    let tensors = gguf.load_all_tensors(reader)?;
+    let mut tensors = gguf.load_all_tensors(reader)?;
+    crate::rope_layout::normalize_maps(gguf, &mut tensors, &mut HashMap::new())?;
     let config = gguf.to_model_config()?;
 
     // Token embedding — try common name variants
@@ -145,9 +146,10 @@ pub fn matmul_skip_set(gguf: &GgufFile) -> Result<HashSet<String>, GgufError> {
 /// the maps tensor-by-tensor.
 pub fn assemble_model_weights_from_maps(
     gguf: &GgufFile,
-    tensors: HashMap<String, flare_core::tensor::Tensor>,
+    mut tensors: HashMap<String, flare_core::tensor::Tensor>,
     mut raw_map: HashMap<String, RawWeight>,
 ) -> Result<(ModelWeights, Option<Vec<RawLayerWeights>>), GgufError> {
+    crate::rope_layout::normalize_maps(gguf, &mut tensors, &mut raw_map)?;
     let config = gguf.to_model_config()?;
 
     let token_embedding = find_tensor(
@@ -647,6 +649,21 @@ pub fn load_model_weights_from_safetensors<R: Read + Seek>(
         },
         config,
     ))
+}
+
+/// Load one raw layer in Flare's split-half rotary order for later attachment.
+/// Low-level `GgufFile` tensor readers retain GGUF file order; do not attach
+/// their Llama Q/K bytes directly to a model or normalize assembled weights twice.
+pub fn load_raw_layer_weights<R: Read + Seek>(
+    gguf: &GgufFile,
+    reader: &mut R,
+    layer: usize,
+) -> Result<Option<RawLayerWeights>, GgufError> {
+    let mut raw = gguf.load_raw_layer_weights(reader, layer)?;
+    if let Some(ref mut weights) = raw {
+        crate::rope_layout::normalize_raw_layer(gguf, layer, weights)?;
+    }
+    Ok(raw)
 }
 
 #[cfg(test)]

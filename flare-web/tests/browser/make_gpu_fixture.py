@@ -1,6 +1,7 @@
 """Write a deterministic, nonzero two-layer Q8_0 fixture (no downloads).
 
-Square 128-wide tensors keep GGUF layout (#526) out of this regression.
+Q/K are exported in GGUF adjacent-pair order; the loader restores the original
+split-half rows. This preserves the established lifecycle/GPU regression tokens.
 Two 64-element heads meet WebGPU's 256-byte f32 binding alignment.
 """
 import struct
@@ -40,6 +41,13 @@ def tensor(name, norm=False, quant=False):
             (((i * 13 + i // 128 * 7 + seed) % 37) - 18) * 0.01
             for i in range(128 * 128)
         ])
+    if name.endswith(('attn_q.weight', 'attn_k.weight')):
+        # Preserve the pre-#526 fixture's model semantics by applying the pinned
+        # Llama converter mapping to its original split-half Q/K row blocks.
+        width = len(data) // 128
+        order = [h * 64 + half * 32 + pair for h in range(2)
+                 for pair in range(32) for half in range(2)]
+        data = b''.join(data[r * width:(r + 1) * width] for r in order)
     tensors.append((name, dims, 8 if quant else 0, data))
 
 tensor('token_embd.weight')

@@ -1089,12 +1089,26 @@ impl FlareEngine {
             Ok(g) => g,
             Err(_) => return false,
         };
-        let num_layers = self.model.config().num_layers;
+        let source = match gguf.to_model_config() {
+            Ok(config) => config,
+            Err(_) => return false,
+        };
+        let target = self.model.config();
+        if source.architecture != target.architecture
+            || source.num_layers != target.num_layers
+            || source.hidden_dim != target.hidden_dim
+            || source.num_heads != target.num_heads
+            || source.num_kv_heads != target.num_kv_heads
+            || source.head_dim != target.head_dim
+        {
+            return false;
+        }
+        let num_layers = target.num_layers;
         let mut raw_layers = Vec::with_capacity(num_layers);
         let mut all_ok = true;
 
         for layer_idx in 0..num_layers {
-            match gguf.load_raw_layer_weights(&mut reader, layer_idx) {
+            match flare_loader::weights::load_raw_layer_weights(&gguf, &mut reader, layer_idx) {
                 Ok(Some(rw)) => raw_layers.push(rw),
                 _ => {
                     all_ok = false;
