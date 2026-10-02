@@ -17,7 +17,7 @@ const workerRun = mode => new Promise((resolve, reject) => {
 });
 window.runCI = async ({ gpu = false } = {}) => {
   const report = { passed: false, platform: navigator.platform, userAgent: navigator.userAgent,
-    stages: [], metrics: {}, coverage: { chromium: 'running', firefox: 'not run', webkit: 'not run',
+    stages: [], metrics: { backend: 'cpu', informational: true }, coverage: { chromium: 'running', firefox: 'not run', webkit: 'not run',
       gpu: gpu ? 'required' : 'skipped: CPU job', independentReference: 'not implemented' } };
   const record = (name, detail = {}) => {
     report.stages.push({ name, status: 'passed', ...detail });
@@ -112,7 +112,14 @@ window.runCI = async ({ gpu = false } = {}) => {
         device: adapter.info?.device, description: adapter.info?.description },
         features: [...adapter.features], storage: adapter.limits.maxComputeWorkgroupStorageSize };
       for (const mode of ['fixture', 'fixture-f32', 'adapter16', 'device16', 'pipeline', 'dispatch']) {
-        record(`GPU ${mode}`, { result: await workerRun(mode) });
+        const result = await workerRun(mode);
+        if (mode === 'fixture') {
+          report.coverage.shaderF16 = result.devices.some(device => device.features.includes('shader-f16'))
+            ? 'passed' : 'skipped: adapter/device did not enable shader-f16';
+          report.coverage.subgroups = result.devices.some(device => device.features.includes('subgroups'))
+            ? 'enabled' : 'skipped: device did not enable subgroups';
+        }
+        record(`GPU ${mode}`, { result });
       }
       report.coverage.gpu = 'passed';
     }

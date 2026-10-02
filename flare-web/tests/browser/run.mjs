@@ -15,6 +15,7 @@ const port = Number(process.env.BROWSER_PORT || 8520);
 await mkdir(output, { recursive: true });
 let browser, server, context, page;
 const logs = [];
+const pageErrors = [];
 const report = { passed: false, node: process.version, platform: process.platform,
   gpuRequested: gpu, adapterDisabled: process.argv.includes('--disable-adapter'), backend: gpu ? 'SwiftShader software Vulkan (correctness only)' : 'CPU/WASM, GPU disabled' };
 try {
@@ -43,7 +44,7 @@ try {
   await context.tracing.start({ screenshots: true, snapshots: true, sources: true });
   page = await context.newPage();
   page.on('console', message => logs.push(`console ${message.type()}: ${message.text()}`));
-  page.on('pageerror', error => logs.push(`pageerror: ${error.stack}`));
+  page.on('pageerror', error => { pageErrors.push(String(error)); logs.push(`pageerror: ${error.stack}`); });
   page.on('requestfailed', request => logs.push(`requestfailed: ${request.url()} ${request.failure()?.errorText}`));
   await page.goto(url);
   await page.waitForFunction(() => typeof window.runCI === 'function');
@@ -57,6 +58,7 @@ try {
     assert.equal(adapter, false, 'CPU fallback job unexpectedly has a GPU adapter');
     report.cpuWithoutAdapter = 'passed';
   }
+  assert.equal(pageErrors.length, 0, `Uncaught page errors: ${pageErrors.join('; ')}`);
   report.passed = true;
 } catch (error) {
   report.error = { message: error.message, stack: error.stack };

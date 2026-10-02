@@ -97,6 +97,23 @@ fn required_workgroup_storage(supported: u32, subgroups: bool) -> Result<u32, Gp
     Ok(required)
 }
 
+// Small models and kernel tests do not require 1 GiB bindings. Negotiate
+// within the adapter's actual limits (software Vulkan commonly offers 128 MiB).
+fn required_device_limits(
+    supported: wgpu::Limits,
+    subgroups: bool,
+) -> Result<wgpu::Limits, GpuError> {
+    Ok(wgpu::Limits {
+        max_compute_workgroup_storage_size: required_workgroup_storage(
+            supported.max_compute_workgroup_storage_size,
+            subgroups,
+        )?,
+        max_buffer_size: supported.max_buffer_size.min(1 << 30),
+        max_storage_buffer_binding_size: supported.max_storage_buffer_binding_size.min(1 << 30),
+        ..wgpu::Limits::default()
+    })
+}
+
 /// GPU-resident weight buffer for a single quantized weight matrix.
 ///
 /// Holds the raw bytes (packed GGUF data) in a persistent GPU storage buffer,
@@ -279,21 +296,13 @@ impl WebGpuBackend {
             log::info!("flare-gpu: subgroup operations enabled");
         }
 
-        let workgroup_storage = required_workgroup_storage(
-            adapter.limits().max_compute_workgroup_storage_size,
-            has_subgroups,
-        )?;
+        let required_limits = required_device_limits(adapter.limits(), has_subgroups)?;
         let (device, queue) = adapter
             .request_device(
                 &wgpu::DeviceDescriptor {
                     label: Some("flare-gpu"),
                     required_features: extra_features,
-                    required_limits: wgpu::Limits {
-                        max_compute_workgroup_storage_size: workgroup_storage,
-                        max_buffer_size: 1 << 30,                 // 1 GiB
-                        max_storage_buffer_binding_size: 1 << 30, // 1 GiB
-                        ..wgpu::Limits::default()
-                    },
+                    required_limits,
                     ..Default::default()
                 },
                 None,
@@ -5569,6 +5578,29 @@ fn uniform_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
 mod tests {
     use super::*;
     use flare_core::tensor::Tensor;
+
+    #[test]
+    fn device_limits_fit_software_and_large_adapters() {
+        for storage in [128 << 20, 1 << 30, 2 << 30] {
+            let supported = wgpu::Limits {
+                max_storage_buffer_binding_size: storage,
+                max_buffer_size: u64::from(storage) * 2,
+                max_compute_workgroup_storage_size: 32768,
+                ..wgpu::Limits::default()
+            };
+            let requested = required_device_limits(supported.clone(), false).unwrap();
+            assert!(requested.check_limits(&supported));
+            assert_eq!(
+                requested.max_storage_buffer_binding_size,
+                storage.min(1 << 30)
+            );
+            assert_eq!(
+                requested.max_buffer_size,
+                (u64::from(storage) * 2).min(1 << 30)
+            );
+        }
+        assert!(required_device_limits(wgpu::Limits::default(), false).is_err());
+    }
 
     #[test]
     fn attention_storage_limits() {

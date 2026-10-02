@@ -128,6 +128,10 @@ They do not establish real-answer quality or original model tokenizer parity.
   library/integration tests with `--no-fail-fast`. `FLARE_REQUIRE_GPU=1` converts
   the integration helper's optional adapter skip into an explicit failure.
   Existing unit tests and decode error tests already require an adapter.
+  Device creation caps buffer limits at the adapter's advertised values (up to
+  1 GiB); the previous unconditional 1 GiB binding request prevented llvmpipe's
+  128 MiB adapter from running even tiny kernels. Large-model sharding on these
+  lower-limit adapters is not certified by the tiny fixtures.
 - Browser: pinned Chromium + SwiftShader, requiring WebGPU initialization. It runs
   f16/default and forced f32 KV comparisons and adapter/device storage, invalid
   pipeline and oversized-dispatch fault regressions against the generated model.
@@ -160,3 +164,9 @@ Remaining #521 work: independent versioned reference fixtures, original tokenize
 parity, GPU prefill/more quantization/context coverage, fully offline startup,
 other browser/platform configurations, physical adapters and stable performance
 baselines. This change deliberately references rather than closes #521.
+
+The ordinary job also runs `run.mjs ... --gpu --disable-adapter` and requires an
+explicit missing-WebGPU error and exit 1. This deliberate failure has its own
+artifact subdirectory; setup failures cannot satisfy that assertion. For a
+checksum negative test, alter `fixture.gguf` in a disposable consumer and run the
+driver: it must exit 1 with `Fixture checksum: fixture.gguf` before browser startup.

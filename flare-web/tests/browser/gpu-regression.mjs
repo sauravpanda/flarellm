@@ -23,7 +23,7 @@ self.onmessage = async ({ data: { mode = 'normal', synthetic = false } }) => {
       const device = await requestDevice.call(this, descriptor);
       result.devices.push({ adapterStorage: this.limits.maxComputeWorkgroupStorageSize,
         requestedStorage: descriptor.requiredLimits.maxComputeWorkgroupStorageSize,
-        deviceStorage: device.limits.maxComputeWorkgroupStorageSize });
+        features: [...device.features], deviceStorage: device.limits.maxComputeWorkgroupStorageSize });
       device.addEventListener('uncapturederror', ({ error }) => result.errors.push(error.message));
       return device;
     };
