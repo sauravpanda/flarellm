@@ -31,12 +31,13 @@ texts = [
     '<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\nHello!\n\nCafé ١٢٣?<|im_end|>\n<|im_start|>assistant\nHi.<|im_end|>\n<|im_start|>user\nDon\'t repeat.\tExplain ².<|im_end|>\n<|im_start|>assistant\n',
 ]
 # Deterministic boundary matrix: whitespace before letters, punctuation, numbers
-# and end-of-input; tests Digits-before-ByteLevel ordering and UTF-8 offsets.
+# and end-of-input; tests Split boundaries and UTF-8 offsets.
 for whitespace in [' ', '  ', '\n\n', '\r\n', '\t\t', '\t ', '\u00a0\u00a0', '\u2003 ']:
     for suffix in ['b', '!', '12', '²Ⅷ', '']:
         texts.append('a' + whitespace + suffix)
 # Independently render the pinned official Jinja template with thinking disabled.
 import jinja2
+assert jinja2.__version__ == '3.1.6'
 config_source = Path(sys.argv[1]).with_name('tokenizer_config.json').read_bytes()
 assert hashlib.sha256(config_source).hexdigest() == 'd5d09f07b48c3086c508b30d1c9114bd1189145b74e982a265350c923acd8101'
 template = jinja2.Environment().from_string(json.loads(config_source)['chat_template'])

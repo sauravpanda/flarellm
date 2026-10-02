@@ -79,6 +79,15 @@ self.onmessage = async ({ data: { gpu = false, real = false, forceF32 = false, q
       result.paths.push({ path, backend: onGpu && !qwen ? 'async WebGPU decode; CPU prefill' : 'CPU/WASM', gpuRejected: onGpu && qwen, loadMs, prefillMs, decodeMs: performance.now() - decodeStart, wasmMemoryBytes: wasm.memory.buffer.byteLength, steps });
       engine.free(); engine = undefined;
     }
+    if (qwen) {
+      const requestedGpu = await Flare.init({ backend: 'webgpu', cache: false });
+      let rejected = false;
+      try { await requestedGpu.loadModel('/qwen3-reference/gqa.gguf'); }
+      catch (error) { rejected = error.code === 'LOAD' && error.message.includes('Qwen3 WebGPU execution is unsupported'); }
+      finally { requestedGpu.dispose(); }
+      assert(rejected, 'Explicit SDK Qwen3 GPU request must reject with a CPU diagnostic');
+      result.sdkGpuRejection = 'passed';
+    }
     if (real && qwen) {
       // Exercise the public worker-backed SDK with the original tokenizer and
       // official chat template, including EOS consumption and a second request.

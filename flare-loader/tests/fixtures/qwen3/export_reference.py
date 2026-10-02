@@ -1,7 +1,7 @@
 """Package output from reference.cpp; expectations never come from Flare.
 
 Usage: python3 export_reference.py /path/to/pinned/llama.cpp /path/to/reference-executable
-Optional real-model reference: add /path/to/smollm2.gguf /path/to/tokenizer.json.
+Optional real-model reference: add /path/to/Qwen3-0.6B-Q8_0.gguf /path/to/tokenizer.json.
 """
 import hashlib
 import json
@@ -33,6 +33,7 @@ r.update(schema=1, referenceImplementation=implementation, modelSha256=digest(sm
 
 if len(sys.argv) > 4:
     import tokenizers, jinja2
+    assert jinja2.__version__ == '3.1.6'
     assert tokenizers.__version__ == '0.22.2'
     model, tokenizer = Path(sys.argv[3]), Path(sys.argv[4])
     assert digest(model) == '9465e63a22add5354d9bb4b99e90117043c7124007664907259bd16d043bb031'

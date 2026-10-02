@@ -30,3 +30,26 @@ fn independent_qwen3_token_ids_and_official_non_thinking_template() {
     assert_eq!(tokenizer.encode("<think>").unwrap(), [151667]);
     assert_eq!(tokenizer.encode("</think>").unwrap(), [151668]);
 }
+
+#[test]
+fn qwen3_rejects_modified_explicit_pipelines() {
+    let original: Value =
+        serde_json::from_str(include_str!("fixtures/qwen3/qwen3-reduced.json")).unwrap();
+    for case in 0..5 {
+        let mut doc = original.clone();
+        match case {
+            0 => doc["pre_tokenizer"]["pretokenizers"]
+                .as_array_mut()
+                .unwrap()
+                .reverse(),
+            1 => doc["pre_tokenizer"]["pretokenizers"][0]["pattern"]["Regex"] = "\\p{L}+".into(),
+            2 => doc["pre_tokenizer"]["pretokenizers"][1]["use_regex"] = true.into(),
+            3 => doc["pre_tokenizer"]["pretokenizers"][0]["behavior"] = "Removed".into(),
+            _ => doc["normalizer"]["type"] = "NFKC".into(),
+        }
+        assert!(
+            BpeTokenizer::from_json(&doc.to_string()).is_err(),
+            "case {case}"
+        );
+    }
+}
