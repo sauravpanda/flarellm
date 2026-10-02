@@ -43,6 +43,23 @@ jobs:
         run: |
           set -o pipefail
           python3 .github/scripts/run_gpu_tests.py gpu-artifacts 2>&1 | tee gpu-artifacts/tests.log
+      - name: Diagnose native driver crash
+        if: failure()
+        run: |
+          sudo apt-get install -y gdb
+          python3 - <<'PYTHON'
+          import json, os, subprocess
+          from pathlib import Path
+          failures = [t for t in json.loads(Path('gpu-artifacts/results.json').read_text())['tests'] if t.get('returncode') == -11]
+          for index, case in enumerate(failures):
+              args = [case['executable'], case['name'], '--exact', '--ignored', '--nocapture']
+              if index == 0:
+                  with open('gpu-artifacts/backtrace.log', 'w') as log:
+                      subprocess.run(['gdb', '--batch', '-ex', 'run', '-ex', 'bt', '--args', *args], stdout=log, stderr=subprocess.STDOUT, timeout=120)
+              with open(f'gpu-artifacts/no-opt-{index}.log', 'w') as log:
+                  result = subprocess.run(args, env={**os.environ, 'GALLIVM_PERF': 'nopt', 'MESA_SHADER_CACHE_DISABLE': 'true'}, stdout=log, stderr=subprocess.STDOUT, timeout=120)
+                  log.write(f'\nexit={result.returncode}\n')
+          PYTHON
       - name: Save adapter metadata and test failures
         if: always()
         uses: actions/upload-artifact@v4
