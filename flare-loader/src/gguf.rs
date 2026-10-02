@@ -284,6 +284,16 @@ impl GgufFile {
         let num_kv_heads = self
             .meta_usize(&format!("{prefix}.attention.head_count_kv"))
             .unwrap_or(num_heads);
+        if num_heads == 0
+            || num_kv_heads == 0
+            || hidden_dim == 0
+            || hidden_dim % num_heads != 0
+            || num_heads % num_kv_heads != 0
+        {
+            return Err(GgufError::InvalidFormat(
+                "invalid attention head dimensions".into(),
+            ));
+        }
         let head_dim = hidden_dim / num_heads;
 
         let intermediate_dim = self
@@ -649,7 +659,9 @@ impl GgufFile {
         }))
     }
 
-    /// Load raw (non-dequantized) layer weights for a single transformer layer.
+    /// Load raw (non-dequantized) layer weights in GGUF file order.
+    /// For model attachment use [`crate::weights::load_raw_layer_weights`], which
+    /// also converts Llama Q/K to Flare's split-half rotary order.
     ///
     /// Returns `None` if any of the seven required weight tensors (wq, wk, wv,
     /// wo, w_gate, w_up, w_down) is missing or uses an unsupported format.
@@ -687,7 +699,7 @@ impl GgufFile {
 }
 
 /// Map a `QuantFormat` to a GPU-accelerated `WeightFormat`, if one exists.
-fn quant_to_weight_format(q: QuantFormat) -> Option<WeightFormat> {
+pub(crate) fn quant_to_weight_format(q: QuantFormat) -> Option<WeightFormat> {
     match q {
         QuantFormat::BF16 => Some(WeightFormat::BF16),
         QuantFormat::F16 => Some(WeightFormat::F16),

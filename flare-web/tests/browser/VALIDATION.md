@@ -1,3 +1,103 @@
+# GGUF Q/K reference validation — October 2, 2026
+
+## Reproduction and fix
+
+Issue #526 was closed as completed at 18:41:57 UTC with no closing commit in its
+timeline. Main `f031c0a` includes tokenizer PR #538, whose description explicitly
+excludes Q/K layout. Closure did not establish correctness. Using the issue's
+checksum-pinned SmolLM2-360M Q8_0 file, the original tokenizer from #538 and 46
+identical prompt IDs, the previous packaged WASM produced
+`The director of the 20000000000`. The normalized loader produces
+`The director of Aster is Mira Vale.` All ten reference decisions, including
+EOS, match pinned llama.cpp `f3f1a8f2760f28325a5ec20c05b171e5b7c83a29` CPU.
+Hugging Face tokenizers 0.22.2 independently verifies all prompt IDs.
+
+Low-level GGUF readers retain file order. Model assembly and the new normalized
+raw-attachment helper restore Llama Q/K weights and biases to split-half order,
+using separate Q and KV head counts. Tests cover row mapping, f32/raw equivalence,
+quantized byte preservation, malformed dimensions/blocks, skipped-f32 and chunked
+loads, separate raw attachment, other architectures and SafeTensors. Disabling
+the normalization makes three regression tests fail, including the first
+reference-prefill logit assertion. No issue was reopened or rewritten.
+
+## Local evidence
+
+- 645 workspace tests pass, 47 ignored. Workspace check, clippy with warnings
+  denied, rustfmt, WASM build, strict SDK types, packaged ESM/worker imports and
+  all 16 SDK tests pass.
+- Actual packaged Chromium 145.0.7632.6 on macOS passes CPU lifecycle checks and
+  all four load routes against the new independent GQA reference: three prompt
+  IDs, 16 steps, all 128 logits. Original full-tokenizer parity also passes.
+- The real-model Chromium CPU run compares all 49,152 logits over ten steps,
+  including EOS. Maximum absolute error is 0.718062 under the documented coarse
+  `0.8 + 0.02 * abs(reference)` bound. This establishes token parity and one
+  factual answer, not precise logits or broad answer quality.
+- Local Chromium SwiftShader passes both default and forced-f32 independent
+  reference modes, plus the existing CPU/GPU numerical and fault-recovery suite.
+  This adapter has no shader-f16. Default and forced-f32 use f32 KV; CPU prefill
+  precedes async GPU decode. No uncaptured GPU errors occur.
+- The system-adapter Chromium run also selected SwiftShader, not physical Metal.
+  It passed the real 360M model on async GPU decode, matching all ten decisions
+  with maximum absolute logit error 0.636692. Physical f16 coverage is not claimed.
+- The previous lifecycle model's expected tokens remain `[36,28,20,12,4]`.
+  Its writer now interleaves Q/K row blocks before storing GGUF, preserving the
+  exact original split-half model after loading; only its GGUF checksum changes.
+
+The real Chrome browser-harness connection failed its existing debugging
+handshake. It was not used for inference. Isolated Playwright Chromium is the
+browser actually tested. Initial GPU runs hit a report serialization error
+(`GPUAdapterInfo` is not structured-cloneable); plain metadata fields fix it.
+
+## Benchmark comment follow-up
+
+The benchmark job's green status does **not** mean performance passed a gate.
+Its comparison is informational and `benchmarks/baseline.json` explicitly labels
+its numbers as placeholders. The initial PR comment reported short decode
+31.05 vs 35 tok/s and peak prefill 70.46 vs 120 tok/s; sustained decode was
+35.32 vs 25 tok/s. The preceding #538 run was also much faster, so these warnings
+must not be dismissed solely because the baseline is provisional.
+
+Inspection found two missed callers: `e2e_bench` and `prefill_profile` attached
+raw rows using the low-level GGUF reader. Both now use the normalized attachment
+helper, matching the model's f32 layout. The public browser paths were already
+covered. No benchmark threshold or expected score was changed.
+
+Six interleaved local native runs (three before and three after this example-only
+correction, same existing 135M Q8_0 file) gave medians:
+
+| Metric | Previous PR examples | Corrected examples |
+|---|---:|---:|
+| Short decode, tok/s | 68.30 | 68.03 |
+| Peak prefill, tok/s | 296.74 | 310.16 |
+| Sustained decode, tok/s | 56.67 | 56.42 |
+
+This does not reproduce the hosted slowdown or explain its cause. It compares
+the two benchmark loader paths on this PR, not main versus the PR on an identical
+hosted runner. The first before-run short decode was 47.82, illustrating timing
+variability; all measurements are retained locally. Examples compile, clippy and
+format checks pass. Native ARM's separate activation correctness limitation still
+applies, so these figures are throughput measurements, not quality scores.
+
+## Scope and remaining limits
+
+Reference generation, model/tokenizer revisions and SHA-256, numerical bounds,
+regeneration tools and reference-client source are committed under
+`flare-loader/tests/fixtures/rope`. The small fixture is independently generated
+and redistributable. The real-model reference commits selected logits and all
+tokens; the local full-vocabulary report remains available separately. Models
+are never downloaded by ordinary CI. The existing browser harness runs the new
+fixture in ordinary CPU CI and the existing software GPU workflow.
+
+Native ARM's existing approximate NEON SiLU path still produces an incorrect
+real-model answer. A temporary diagnostic using scalar SiLU for that path
+restored all ten reference decisions; the diagnostic was reverted. Native x86 macOS cross-compilation also exposes a pre-existing
+`matvec` cfg overlap; neither implementation was changed. Native Metal resident
+limitations remain as recorded below. Qwen3, Q4_0 execution, other browser engines,
+GPU prefill and broad model quality remain outside this change. No package was
+published and no PR was merged.
+
+---
+
 # Issue #530 tokenizer parity — October 2, 2026
 
 On latest main `8302852`, the new independent Rust test failed for literal

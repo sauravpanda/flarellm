@@ -51,8 +51,7 @@ The `normal` mode requires the local real model and tokenizer. It checks eight
 steps, including GPU decode after CPU prefill, and records tokens and logit
 statistics. `fixture` and `fixture-f32` compare five CPU/GPU steps with absolute
 plus relative tolerance `0.002 + 0.002 * abs(cpu_logit)`. The generated two-layer
-Q8_0 fixture has deterministic nonzero weights, 128-wide square tensors (to
-isolate GGUF layout #526), two 64-element heads, and a 128-token vocabulary.
+Q8_0 fixture has deterministic nonzero weights, 128-wide square tensors with Q/K exported in GGUF adjacent-pair order, two 64-element heads, and a 128-token vocabulary.
 The f32 mode omits the optional shader-f16 device feature to exercise f32 KV.
 
 Fault modes override browser APIs only inside their dedicated worker:
@@ -207,3 +206,33 @@ ORIGINAL_TOKENIZER_JSON=/absolute/path/tokenizer.json \
 This adds a separate full-original stage to the report. The runner copies the
 verified file into the consumer. In a manually served consumer with that file,
 call `await runCI({originalTokenizer: true})`.
+
+## Independent GGUF Q/K reference (#526)
+
+The same packed-consumer runner now checks a checksum-pinned GQA model against
+16 steps of external llama.cpp logits and tokens. It exercises bulk raw loading,
+chunked raw loading, progressive f32 loading and separate raw attachment. GPU
+runs cover default and forced-f32 KV; prefill still runs on CPU. Source, pinned
+revision, regeneration, tolerances and limitations are documented in
+`flare-loader/tests/fixtures/rope/README.md`.
+
+The earlier lifecycle fixture retains its exact token expectations. Its generator
+now interleaves the original split-half Q/K rows when writing GGUF, so the new
+loader restores exactly the original model weights. Only the GGUF checksum
+changes; no generated token expectations were replaced.
+
+An optional real-model comparison uses local assets and the same runner:
+
+```sh
+ORIGINAL_TOKENIZER_JSON=/path/to/tokenizer.json \
+REFERENCE_MODEL_GGUF=/path/to/smollm2-360m-instruct-q8_0.gguf \
+REFERENCE_LOGITS_JSON=/path/to/full.reference.json \
+node flare-web/tests/browser/run.mjs /tmp/flare-consumer
+```
+
+The committed `smollm2-reference.json` can also serve as `REFERENCE_LOGITS_JSON`
+for selected-logit checks. Add `--gpu` for hosted Linux SwiftShader, or
+`--gpu-system` to use the system adapter in isolated Chromium. Adapter fields,
+features and each actual backend are included in the report. These options
+launch a dedicated test browser and do not touch existing user tabs. Real-model
+checks require the original tokenizer checksum and verify the exact prompt IDs.

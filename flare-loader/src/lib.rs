@@ -19,6 +19,7 @@ pub mod gguf;
 pub mod lora;
 pub mod progressive;
 pub mod quantize;
+mod rope_layout;
 pub mod safetensors;
 pub mod tokenizer;
 pub mod weights;

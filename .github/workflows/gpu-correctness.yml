@@ -5,6 +5,9 @@ on:
   pull_request:
     paths:
       - '.github/workflows/gpu-correctness.yml'
+      - 'flare-loader/src/rope_layout.rs'
+      - 'flare-loader/tests/fixtures/rope/**'
+      - 'flare-web/tests/browser/rope-reference.mjs'
   workflow_dispatch:
   schedule:
     - cron: '23 8 * * 1'
