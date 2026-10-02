@@ -41,6 +41,11 @@ jobs:
           node-version: "20"
           registry-url: "https://registry.npmjs.org"
 
+      - name: Build and test browser SDK
+        run: |
+          npm ci --prefix flare-web
+          npm run build:sdk --prefix flare-web
+          npm run test:sdk --prefix flare-web
       - name: Pack (dry run inspection)
         working-directory: flare-web
         run: npm pack --dry-run

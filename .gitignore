@@ -31,3 +31,6 @@ models/
 
 # Agent worktrees
 .claude/
+
+# Compiled browser SDK
+flare-web/dist/

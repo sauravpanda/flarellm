@@ -3,29 +3,39 @@
   "version": "0.2.21",
   "description": "WASM-first LLM inference engine with WebGPU acceleration — run LLMs in the browser with zero server costs",
   "type": "module",
-  "main": "pkg/flare_web.js",
-  "module": "pkg/flare_web.js",
-  "types": "pkg/flare_web.d.ts",
+  "main": "dist/index.js",
+  "module": "dist/index.js",
+  "types": "dist/index.d.ts",
   "files": [
     "pkg/flare_web_bg.wasm",
     "pkg/flare_web_bg.wasm.d.ts",
     "pkg/flare_web.js",
     "pkg/flare_web.d.ts",
     "pkg/package.json",
-    "js/",
     "demo/",
-    "LICENSE"
+    "LICENSE",
+    "dist/"
   ],
   "scripts": {
-    "build": "wasm-pack build --target web --out-dir pkg",
+    "build": "wasm-pack build --target web --out-dir pkg && npm run build:sdk",
     "build:node": "wasm-pack build --target nodejs --out-dir pkg-node",
     "build:bundler": "wasm-pack build --target bundler --out-dir pkg-bundler",
-    "prepublishOnly": "npm run build"
+    "prepublishOnly": "npm run build",
+    "build:sdk": "tsc -p tsconfig.json",
+    "test:sdk": "node --test tests/*.test.mjs"
   },
   "exports": {
     ".": {
-      "import": "./pkg/flare_web.js",
-      "types": "./pkg/flare_web.d.ts"
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./wasm": {
+      "types": "./pkg/flare_web.d.ts",
+      "import": "./pkg/flare_web.js"
+    },
+    "./worker": {
+      "types": "./dist/worker.d.ts",
+      "import": "./dist/worker.js"
     }
   },
   "keywords": [
@@ -55,5 +65,8 @@
   },
   "engines": {
     "node": ">=18"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.3"
   }
 }

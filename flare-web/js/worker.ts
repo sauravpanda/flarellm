@@ -1,159 +1,108 @@
-/**
- * Web Worker bootstrap for running Flare inference off the main thread.
- *
- * Architecture:
- * - Main thread sends messages: { type: 'init' | 'generate', ... }
- * - Worker runs WASM inference and posts back tokens as they're generated
- * - All GPU operations happen in the worker (WebGPU is available in workers)
- *
- * Usage from main thread:
- * ```typescript
- * const worker = new Worker(new URL('./worker.ts', import.meta.url), { type: 'module' });
- * worker.postMessage({ type: 'init' });
- * worker.postMessage({ type: 'generate', prompt: 'Hello', maxTokens: 128 });
- * worker.onmessage = (e) => {
- *   if (e.data.type === 'token') console.log(e.data.text);
- *   if (e.data.type === 'done') console.log('Generation complete');
- * };
- * ```
- */
+import init, { FlareEngine, FlareTokenizer, device_info } from '../pkg/flare_web.js';
+import type { WorkerRequest, WorkerResponse } from './protocol.js';
 
-// Message types from main thread to worker
-interface InitMessage {
-  type: 'init';
-  modelUrl?: string;
-  wasmUrl?: string;
-}
-
-interface GenerateMessage {
-  type: 'generate';
-  prompt: string;
-  maxTokens?: number;
-  temperature?: number;
-  topP?: number;
-  topK?: number;
-}
-
-interface AbortMessage {
-  type: 'abort';
-}
-
-type IncomingMessage = InitMessage | GenerateMessage | AbortMessage;
-
-// Message types from worker to main thread
-interface ReadyMessage {
-  type: 'ready';
-  webgpu: boolean;
-}
-
-interface TokenMessage {
-  type: 'token';
-  text: string;
-  tokenId: number;
-}
-
-interface DoneMessage {
-  type: 'done';
-  totalTokens: number;
-  tokensPerSecond: number;
-}
-
-interface ErrorMessage {
-  type: 'error';
-  message: string;
-}
-
-interface ProgressMessage {
-  type: 'progress';
-  loaded: number;
-  total: number;
-}
-
-type OutgoingMessage = ReadyMessage | TokenMessage | DoneMessage | ErrorMessage | ProgressMessage;
-
-// Worker state
+let engine: FlareEngine | undefined;
+let tokenizer: FlareTokenizer | undefined;
+let busy = false;
 let initialized = false;
-let aborted = false;
-
-function postResult(msg: OutgoingMessage) {
-  (self as unknown as { postMessage(msg: OutgoingMessage): void }).postMessage(msg);
-}
-
-async function handleInit(_msg: InitMessage) {
+const post = (message: WorkerResponse) => self.postMessage(message);
+self.onmessage = async ({ data: { id, type, args } }: MessageEvent<WorkerRequest>) => {
+  if (busy) { post({ id, type: 'error', code: 'BUSY', message: 'Worker is busy' }); return; }
+  busy = true;
   try {
-    // Import and initialize WASM module
-    // In a real build, this path comes from wasm-pack output
-    const flare = await import('../pkg/flare_web.js');
-    await flare.init();
-
-    const webgpu = flare.webgpu_available();
-    initialized = true;
-
-    postResult({ type: 'ready', webgpu });
-  } catch (err) {
-    postResult({
-      type: 'error',
-      message: `Init failed: ${err}`,
-    });
-  }
-}
-
-async function handleGenerate(msg: GenerateMessage) {
-  if (!initialized) {
-    postResult({ type: 'error', message: 'Worker not initialized. Send init message first.' });
-    return;
-  }
-
-  aborted = false;
-  const startTime = performance.now();
-  let tokenCount = 0;
-
-  try {
-    // TODO: Wire up actual WASM inference here
-    // For now, simulate token generation to validate the worker protocol
-    const maxTokens = msg.maxTokens ?? 128;
-
-    for (let i = 0; i < maxTokens && !aborted; i++) {
-      // In real implementation: call flare WASM generate step
-      tokenCount++;
-
-      postResult({
-        type: 'token',
-        text: ' ',
-        tokenId: i,
-      });
-
-      // Yield to allow abort messages to be processed
-      await new Promise((resolve) => setTimeout(resolve, 0));
+    let value: unknown;
+    if (type === 'init') {
+      await init(args.wasmUrl ? { module_or_path: args.wasmUrl } : undefined);
+      initialized = true;
+      value = JSON.parse(device_info());
+    } else {
+      if (!initialized) throw new Error('Worker is not initialized');
+      if (type === 'load') {
+        engine?.free(); engine = undefined;
+        tokenizer?.free(); tokenizer = undefined;
+        const cache = args.cache ? await caches.open('flare-models-v1') : undefined;
+        let response = await cache?.match(args.modelUrl);
+        if (!response) {
+          response = await fetch(args.modelUrl);
+          if (!response.ok) throw new Error(`Model HTTP ${response.status}`);
+        }
+        const total = Number(response.headers.get('content-length') || 0);
+        const reader = response.body!.getReader();
+        const chunks: Uint8Array[] = [];
+        let loaded = 0;
+        try {
+          while (true) {
+            const part = await reader.read(); if (part.done) break;
+            chunks.push(part.value); loaded += part.value.length;
+            post({ id, type: 'progress', loaded, total });
+          }
+        } finally { reader.releaseLock(); }
+        const bytes = new Uint8Array(loaded);
+        let offset = 0;
+        for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.length; }
+        chunks.length = 0;
+        engine = FlareEngine.load(bytes);
+        if (args.tokenizerUrl) {
+          const response = await fetch(args.tokenizerUrl);
+          if (!response.ok) throw new Error(`Tokenizer HTTP ${response.status}`);
+          tokenizer = FlareTokenizer.from_json(await response.text());
+        }
+        if (!tokenizer && JSON.parse(engine.metadata_json)['tokenizer.ggml.model'] === 'gpt2') {
+          throw new Error('This GGUF uses byte-level BPE; provide its original tokenizerUrl');
+        }
+        if (args.backend !== undefined && args.backend !== 'cpu' && args.backend !== 'webgpu') throw new Error('Unknown backend');
+        if (args.backend === 'webgpu' && !await engine.init_gpu()) throw new Error('WebGPU initialization failed');
+        // Cache only successfully parsed models. Cache failures surface to callers.
+        if (cache) await cache.put(args.modelUrl, new Response(bytes));
+      } else if (type === 'reset') { engine?.reset(); }
+      else if (type === 'generate') {
+        if (!engine) throw new Error('No model loaded');
+        const maxTokens = args.maxTokens ?? 128;
+        const temperature = args.temperature ?? 0;
+        const topP = args.topP ?? 1;
+        const topK = args.topK ?? 0;
+        const minP = args.minP ?? 0;
+        const repeatPenalty = args.repeatPenalty ?? 1;
+        if (!Number.isInteger(maxTokens) || maxTokens < 1 || maxTokens > engine.max_seq_len ||
+            !Number.isFinite(temperature) || temperature < 0 ||
+            !Number.isFinite(topP) || topP <= 0 || topP > 1 ||
+            !Number.isInteger(topK) || topK < 0 || topK > engine.vocab_size ||
+            !Number.isFinite(minP) || minP < 0 || minP > 1 ||
+            !Number.isFinite(repeatPenalty) || repeatPenalty <= 0) throw new Error('Invalid sampling options');
+        engine.reset();
+        if (args.seed !== undefined && (!Number.isInteger(args.seed) || args.seed < 0 || args.seed > 0xffffffff)) throw new Error('Invalid seed');
+        engine.set_rng_seed(args.seed ?? 0x12345678);
+        const prompt = 'messages' in args ? engine.apply_chat_messages(JSON.stringify(args.messages))
+          : 'message' in args ? engine.apply_chat_template(args.message ?? '', args.system ?? '') : args.prompt;
+        if (typeof prompt !== 'string') throw new Error('Provide prompt, message, or messages');
+        let tokens = tokenizer ? tokenizer.encode(prompt) : engine.encode_text(prompt);
+        if (engine.add_bos_token && engine.bos_token_id !== undefined && tokens[0] !== engine.bos_token_id) {
+          tokens = new Uint32Array([engine.bos_token_id, ...tokens]);
+        }
+        if (!tokens.length || tokens.length + maxTokens > engine.max_seq_len) throw new Error('Prompt and output exceed context or prompt is empty');
+        await engine.begin_stream_with_params_async(tokens, maxTokens, temperature, topP, topK, repeatPenalty, minP);
+        const decoder = new TextDecoder();
+        const tokenIds: number[] = [];
+        let text = '';
+        while (!engine.stream_done) {
+          const tokenId = await engine.next_token_async();
+          if (tokenId === undefined) break;
+          tokenIds.push(tokenId);
+          const chunk = tokenizer ? decoder.decode(tokenizer.decode_bytes(new Uint32Array([tokenId])), { stream: true }) : engine.decode_token_chunk(tokenId);
+          text += chunk; post({ id, type: 'token', text: chunk, tokenId });
+        }
+        const tail = tokenizer ? decoder.decode() : engine.flush_decode();
+        if (tail) { text += tail; post({ id, type: 'token', text: tail, tokenId: -1 }); }
+        value = { text, tokenIds, stopReason: engine.stream_stop_reason };
+      } else throw new Error(`Unknown operation: ${type}`);
     }
-
-    const elapsed = (performance.now() - startTime) / 1000;
-    postResult({
-      type: 'done',
-      totalTokens: tokenCount,
-      tokensPerSecond: tokenCount / elapsed,
-    });
-  } catch (err) {
-    postResult({
-      type: 'error',
-      message: `Generation failed: ${err}`,
-    });
-  }
-}
-
-// Message handler
-self.onmessage = async (event: MessageEvent<IncomingMessage>) => {
-  const msg = event.data;
-
-  switch (msg.type) {
-    case 'init':
-      await handleInit(msg);
-      break;
-    case 'generate':
-      await handleGenerate(msg);
-      break;
-    case 'abort':
-      aborted = true;
-      break;
-  }
+    post({ id, type: 'result', value });
+  } catch (error) {
+    // A WASM trap may leave a borrowed/invalid object. Cleanup must not hide the error.
+    if (type === 'load') {
+      try { engine?.free(); tokenizer?.free(); } catch { /* Worker termination remains available. */ }
+      engine = undefined; tokenizer = undefined;
+    }
+    post({ id, type: 'error', code: type.toUpperCase(), message: error instanceof Error ? error.message : String(error) });
+  } finally { busy = false; }
 };

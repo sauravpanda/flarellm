@@ -76,6 +76,40 @@ pub struct BpeTokenizer {
 }
 
 impl BpeTokenizer {
+    /// Decode bytes without losing UTF-8 sequences split across token boundaries.
+    pub fn decode_bytes(&self, tokens: &[u32]) -> Result<Vec<u8>, TokenizerError> {
+        let mut output = String::new();
+
+        for &id in tokens {
+            match self.id_to_token.get(&id) {
+                Some(token_str) => {
+                    output.push_str(token_str);
+                }
+                None => {
+                    return Err(TokenizerError::DecodeError(format!(
+                        "unknown token id: {}",
+                        id
+                    )));
+                }
+            }
+        }
+
+        // Decode byte-level BPE: convert unicode chars back to bytes
+        let mut bytes = Vec::new();
+        for c in output.chars() {
+            if let Some(b) = unicode_to_byte(c) {
+                bytes.push(b);
+            } else {
+                // Non-BPE character, encode as UTF-8
+                let mut buf = [0u8; 4];
+                let s = c.encode_utf8(&mut buf);
+                bytes.extend_from_slice(s.as_bytes());
+            }
+        }
+
+        Ok(bytes)
+    }
+
     /// Load a BPE tokenizer from the contents of a HuggingFace `tokenizer.json`.
     pub fn from_json(json: &str) -> Result<Self, TokenizerError> {
         let tj: TokenizerJson =
@@ -327,36 +361,7 @@ impl Tokenizer for BpeTokenizer {
     }
 
     fn decode(&self, tokens: &[u32]) -> Result<String, TokenizerError> {
-        let mut output = String::new();
-
-        for &id in tokens {
-            match self.id_to_token.get(&id) {
-                Some(token_str) => {
-                    output.push_str(token_str);
-                }
-                None => {
-                    return Err(TokenizerError::DecodeError(format!(
-                        "unknown token id: {}",
-                        id
-                    )));
-                }
-            }
-        }
-
-        // Decode byte-level BPE: convert unicode chars back to bytes
-        let mut bytes = Vec::new();
-        for c in output.chars() {
-            if let Some(b) = unicode_to_byte(c) {
-                bytes.push(b);
-            } else {
-                // Non-BPE character, encode as UTF-8
-                let mut buf = [0u8; 4];
-                let s = c.encode_utf8(&mut buf);
-                bytes.extend_from_slice(s.as_bytes());
-            }
-        }
-
-        Ok(String::from_utf8_lossy(&bytes).into_owned())
+        Ok(String::from_utf8_lossy(&self.decode_bytes(tokens)?).into_owned())
     }
 
     fn vocab_size(&self) -> usize {
@@ -707,5 +712,23 @@ mod tests {
             Err(TokenizerError::EncodeError(_)) => {}
             _ => panic!("expected EncodeError for unknown char"),
         }
+    }
+}
+
+#[cfg(test)]
+mod streaming_byte_tests {
+    use super::*;
+    #[test]
+    fn bytes_preserve_unicode_split_across_tokens() {
+        let tokenizer =
+            BpeTokenizer::from_json(r#"{"model":{"vocab":{"â":0,"Ĥ":1,"¬":2},"merges":[]}}"#)
+                .expect("fixture");
+        let mut bytes = Vec::new();
+        for id in 0..3 {
+            bytes.extend(tokenizer.decode_bytes(&[id]).expect("known token"));
+        }
+        assert_eq!(bytes, "€".as_bytes());
+        assert_eq!(tokenizer.decode(&[0, 1, 2]).expect("known tokens"), "€");
+        assert!(tokenizer.decode_bytes(&[9]).is_err());
     }
 }
