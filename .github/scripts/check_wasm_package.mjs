@@ -23,6 +23,7 @@ try {
   const directory = join(consumer, 'node_modules/@sauravpanda/flare');
   await cp(join(source, 'tests/browser/index.html'), join(consumer, 'index.html'));
   await cp(join(source, 'tests/browser/consumer.mjs'), join(consumer, 'consumer.mjs'));
+  await cp(join(source, 'tests/browser/gpu-regression.mjs'), join(consumer, 'gpu-regression.mjs'));
   await cp(join(source, 'tests/browser/probe-worker.mjs'), join(consumer, 'probe-worker.mjs'));
   await cp(join(source, 'tests/browser/consumer-typecheck.mts'), join(consumer, 'consumer-typecheck.mts'));
   execFileSync(process.execPath, [join(source, 'node_modules/typescript/bin/tsc'),

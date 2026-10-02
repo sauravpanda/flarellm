@@ -2,7 +2,7 @@
 
 use std::sync::Mutex;
 
-use flare_core::model::{ComputeBackend, RawWeight, WeightFormat};
+use flare_core::model::{ComputeBackend, ComputeError, RawWeight, WeightFormat};
 use flare_core::tensor::Tensor;
 use thiserror::Error;
 use wgpu::util::DeviceExt;
@@ -17,6 +17,10 @@ pub enum GpuError {
     NoAdapter,
     #[error("failed to request GPU device: {0}")]
     DeviceRequest(String),
+    #[error("GPU requires {required} bytes of workgroup storage; adapter supports {supported}")]
+    InsufficientWorkgroupStorage { required: u32, supported: u32 },
+    #[error("GPU execution failed: {0}")]
+    Execution(String),
     #[error("shader compilation error: {0}")]
     ShaderError(String),
     #[error("buffer operation error: {0}")]
@@ -70,6 +74,28 @@ const ATTENTION_F16_SHADER: &str = include_str!("../shaders/attention_f16.wgsl")
 #[allow(dead_code)] // Infrastructure for future f16 norm weight support
 const BATCHED_RMSNORM_F16_SHADER: &str = include_str!("../shaders/batched_rmsnorm_f16.wgsl");
 const F32_TO_F16_SHADER: &str = include_str!("../shaders/f32_to_f16.wgsl");
+
+// WebGPU accounts for each statically used workgroup variable rounded up to
+// 16 bytes. All attention variants use 4096 f32 scores and two scalar f32s.
+// The subgroup variant additionally uses 64 f32 reduction slots. Keep the
+// shader-layout regression test below in sync when adding shader variants.
+const ATTENTION_WORKGROUP_STORAGE: u32 = 4096 * 4 + 2 * 16;
+const SUBGROUP_ATTENTION_WORKGROUP_STORAGE: u32 = ATTENTION_WORKGROUP_STORAGE + 64 * 4;
+
+fn required_workgroup_storage(supported: u32, subgroups: bool) -> Result<u32, GpuError> {
+    let required = if subgroups {
+        SUBGROUP_ATTENTION_WORKGROUP_STORAGE
+    } else {
+        ATTENTION_WORKGROUP_STORAGE
+    };
+    if supported < required {
+        return Err(GpuError::InsufficientWorkgroupStorage {
+            required,
+            supported,
+        });
+    }
+    Ok(required)
+}
 
 /// GPU-resident weight buffer for a single quantized weight matrix.
 ///
@@ -253,12 +279,17 @@ impl WebGpuBackend {
             log::info!("flare-gpu: subgroup operations enabled");
         }
 
+        let workgroup_storage = required_workgroup_storage(
+            adapter.limits().max_compute_workgroup_storage_size,
+            has_subgroups,
+        )?;
         let (device, queue) = adapter
             .request_device(
                 &wgpu::DeviceDescriptor {
                     label: Some("flare-gpu"),
                     required_features: extra_features,
                     required_limits: wgpu::Limits {
+                        max_compute_workgroup_storage_size: workgroup_storage,
                         max_buffer_size: 1 << 30,                 // 1 GiB
                         max_storage_buffer_binding_size: 1 << 30, // 1 GiB
                         ..wgpu::Limits::default()
@@ -3953,6 +3984,10 @@ impl WebGpuBackend {
     /// Async variant — identical command-encoder build, but awaits the
     /// logits readback so WebGPU's `map_async` callback can fire.  This is
     /// the only path that works on wasm32 main thread and in Web Workers.
+    ///
+    /// # Panics
+    /// This compatibility wrapper panics on GPU failure. New callers should use
+    /// [`Self::try_forward_single_token_gpu_async`] to handle errors explicitly.
     #[allow(clippy::too_many_arguments)]
     pub async fn forward_single_token_gpu_async(
         &self,
@@ -3969,6 +4004,46 @@ impl WebGpuBackend {
         num_layers: usize,
         seq_len: usize,
     ) -> Vec<f32> {
+        self.try_forward_single_token_gpu_async(
+            token_embedding,
+            pos,
+            dim,
+            num_heads,
+            num_kv_heads,
+            head_dim,
+            intermediate_dim,
+            vocab_size,
+            rms_norm_eps,
+            rope_theta,
+            num_layers,
+            seq_len,
+        )
+        .await
+        .expect("GPU forward failed")
+    }
+
+    /// Checked decode: never returns logits after a GPU validation or mapping failure.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn try_forward_single_token_gpu_async(
+        &self,
+        token_embedding: &[f32],
+        pos: usize,
+        dim: usize,
+        num_heads: usize,
+        num_kv_heads: usize,
+        head_dim: usize,
+        intermediate_dim: usize,
+        vocab_size: usize,
+        rms_norm_eps: f32,
+        rope_theta: f32,
+        num_layers: usize,
+        seq_len: usize,
+    ) -> Result<Vec<f32>, GpuError> {
+        // Cover lazy pipeline creation, encoding and queue submission. Pop all
+        // scopes before the first await so another call cannot nest inside them.
+        self.device.push_error_scope(wgpu::ErrorFilter::OutOfMemory);
+        self.device.push_error_scope(wgpu::ErrorFilter::Internal);
+        self.device.push_error_scope(wgpu::ErrorFilter::Validation);
         let (staging, _size) = self.forward_single_token_gpu_submit(
             token_embedding,
             pos,
@@ -3984,6 +4059,17 @@ impl WebGpuBackend {
             seq_len,
         );
 
+        let validation = self.device.pop_error_scope();
+        let internal = self.device.pop_error_scope();
+        let oom = self.device.pop_error_scope();
+        #[cfg(not(target_arch = "wasm32"))]
+        self.device.poll(wgpu::Maintain::Wait);
+        let errors = [validation.await, internal.await, oom.await];
+        if let Some(error) = errors.into_iter().flatten().next() {
+            // Do not pool or read an output from a failed command buffer.
+            return Err(GpuError::Execution(error.to_string()));
+        }
+
         let slice = staging.slice(..);
         let (tx, rx) = futures_channel::oneshot::channel();
         slice.map_async(wgpu::MapMode::Read, move |result| {
@@ -3992,14 +4078,17 @@ impl WebGpuBackend {
         #[cfg(not(target_arch = "wasm32"))]
         self.device.poll(wgpu::Maintain::Wait);
         rx.await
-            .expect("GPU readback channel closed")
-            .expect("GPU readback failed");
+            .map_err(|e| GpuError::BufferError(e.to_string()))?
+            .map_err(|e| GpuError::BufferError(e.to_string()))?;
         let data = slice.get_mapped_range();
         let logits: Vec<f32> = bytemuck::cast_slice(&data).to_vec();
         drop(data);
         staging.unmap();
         self.pool.return_staging(staging);
-        logits
+        if logits.iter().any(|v| !v.is_finite()) {
+            return Err(GpuError::Execution("non-finite logits".into()));
+        }
+        Ok(logits)
     }
 
     /// Build the single-token forward command encoder + submit.  Returns the
@@ -5384,6 +5473,49 @@ impl ComputeBackend for WebGpuBackend {
             )
         })
     }
+    #[allow(clippy::too_many_arguments)]
+    fn try_forward_single_token_gpu_async<'a>(
+        &'a self,
+        token_embedding: &'a [f32],
+        pos: usize,
+        dim: usize,
+        num_heads: usize,
+        num_kv_heads: usize,
+        head_dim: usize,
+        intermediate_dim: usize,
+        vocab_size: usize,
+        rms_norm_eps: f32,
+        rope_theta: f32,
+        num_layers: usize,
+        seq_len: usize,
+    ) -> core::pin::Pin<
+        Box<dyn core::future::Future<Output = Result<Option<Vec<f32>>, ComputeError>> + 'a>,
+    > {
+        Box::pin(async move {
+            if !WebGpuBackend::has_gpu_weights(self) || !self.has_gpu_kv_cache() {
+                return Ok(None);
+            }
+            Ok(Some(
+                WebGpuBackend::try_forward_single_token_gpu_async(
+                    self,
+                    token_embedding,
+                    pos,
+                    dim,
+                    num_heads,
+                    num_kv_heads,
+                    head_dim,
+                    intermediate_dim,
+                    vocab_size,
+                    rms_norm_eps,
+                    rope_theta,
+                    num_layers,
+                    seq_len,
+                )
+                .await
+                .map_err(|e| ComputeError::Gpu(e.to_string()))?,
+            ))
+        })
+    }
 }
 
 // WASM is single-threaded; wgpu's JS-backed types don't impl Send/Sync but it's
@@ -5437,6 +5569,61 @@ fn uniform_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
 mod tests {
     use super::*;
     use flare_core::tensor::Tensor;
+
+    #[test]
+    fn attention_storage_limits() {
+        for subgroups in [false, true] {
+            assert!(matches!(
+                required_workgroup_storage(16384, subgroups),
+                Err(GpuError::InsufficientWorkgroupStorage {
+                    supported: 16384,
+                    ..
+                })
+            ));
+            let required = required_workgroup_storage(32768, subgroups).unwrap();
+            assert_eq!(required, if subgroups { 16672 } else { 16416 });
+            assert!(required_workgroup_storage(required - 1, subgroups).is_err());
+            assert_eq!(
+                required_workgroup_storage(required, subgroups).unwrap(),
+                required
+            );
+        }
+    }
+
+    #[test]
+    fn attention_storage_matches_shader_declarations() {
+        // Parse actual WGSL global declarations with Naga. Counting all globals
+        // is conservative if future entry points use only a subset. WebGPU
+        // rounds each variable to 16 bytes, including the two f32 scalars.
+        for (shader, expected) in [
+            (ATTENTION_SHADER, ATTENTION_WORKGROUP_STORAGE),
+            (ATTENTION_F16_SHADER, ATTENTION_WORKGROUP_STORAGE),
+            (PREFILL_ATTENTION_SHADER, ATTENTION_WORKGROUP_STORAGE),
+            (
+                ATTENTION_SUBGROUP_SHADER,
+                SUBGROUP_ATTENTION_WORKGROUP_STORAGE,
+            ),
+        ] {
+            let declarations = shader
+                .lines()
+                .filter(|l| l.trim_start().starts_with("var<workgroup>"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            let module = wgpu::naga::front::wgsl::parse_str(&declarations).unwrap();
+            let bytes: u32 = module
+                .global_variables
+                .iter()
+                .map(|(_, var)| {
+                    module.types[var.ty]
+                        .inner
+                        .size(module.to_ctx())
+                        .div_ceil(16)
+                        * 16
+                })
+                .sum();
+            assert_eq!(bytes, expected);
+        }
+    }
 
     /// CPU reference softmax — used as the ground truth in comparison tests.
     fn cpu_softmax(data: &[f32]) -> Vec<f32> {
