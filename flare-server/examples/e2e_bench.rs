@@ -30,7 +30,7 @@ use flare_core::model::Model;
 use flare_core::sampling::SamplingParams;
 use flare_gpu::WebGpuBackend;
 use flare_loader::gguf::GgufFile;
-use flare_loader::weights::load_model_weights;
+use flare_loader::weights::{load_model_weights, load_raw_layer_weights};
 
 const DEFAULT_MODEL_DIR: &str = "models";
 const DEFAULT_MODEL_NAME: &str = "smollm2-135m-instruct-q8_0.gguf";
@@ -88,7 +88,7 @@ fn main() {
         let mut all_ok = true;
 
         for layer_idx in 0..num_layers {
-            match gguf2.load_raw_layer_weights(&mut reader2, layer_idx) {
+            match load_raw_layer_weights(&gguf2, &mut reader2, layer_idx) {
                 Ok(Some(rw)) => raw_layers.push(rw),
                 _ => {
                     all_ok = false;

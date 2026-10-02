@@ -48,6 +48,36 @@ handshake. It was not used for inference. Isolated Playwright Chromium is the
 browser actually tested. Initial GPU runs hit a report serialization error
 (`GPUAdapterInfo` is not structured-cloneable); plain metadata fields fix it.
 
+## Benchmark comment follow-up
+
+The benchmark job's green status does **not** mean performance passed a gate.
+Its comparison is informational and `benchmarks/baseline.json` explicitly labels
+its numbers as placeholders. The initial PR comment reported short decode
+31.05 vs 35 tok/s and peak prefill 70.46 vs 120 tok/s; sustained decode was
+35.32 vs 25 tok/s. The preceding #538 run was also much faster, so these warnings
+must not be dismissed solely because the baseline is provisional.
+
+Inspection found two missed callers: `e2e_bench` and `prefill_profile` attached
+raw rows using the low-level GGUF reader. Both now use the normalized attachment
+helper, matching the model's f32 layout. The public browser paths were already
+covered. No benchmark threshold or expected score was changed.
+
+Six interleaved local native runs (three before and three after this example-only
+correction, same existing 135M Q8_0 file) gave medians:
+
+| Metric | Previous PR examples | Corrected examples |
+|---|---:|---:|
+| Short decode, tok/s | 68.30 | 68.03 |
+| Peak prefill, tok/s | 296.74 | 310.16 |
+| Sustained decode, tok/s | 56.67 | 56.42 |
+
+This does not reproduce the hosted slowdown or explain its cause. It compares
+the two benchmark loader paths on this PR, not main versus the PR on an identical
+hosted runner. The first before-run short decode was 47.82, illustrating timing
+variability; all measurements are retained locally. Examples compile, clippy and
+format checks pass. Native ARM's separate activation correctness limitation still
+applies, so these figures are throughput measurements, not quality scores.
+
 ## Scope and remaining limits
 
 Reference generation, model/tokenizer revisions and SHA-256, numerical bounds,

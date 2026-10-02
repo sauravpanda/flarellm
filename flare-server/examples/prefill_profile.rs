@@ -12,7 +12,7 @@ use std::path::Path;
 
 use flare_core::model::Model;
 use flare_loader::gguf::GgufFile;
-use flare_loader::weights::load_model_weights;
+use flare_loader::weights::{load_model_weights, load_raw_layer_weights};
 
 const MODEL: &str = "models/smollm2-135m-instruct-q8_0.gguf";
 const PROMPT_LEN: usize = 32;
@@ -47,7 +47,7 @@ fn main() {
         let mut raw = Vec::with_capacity(n);
         let mut ok = true;
         for li in 0..n {
-            match gguf2.load_raw_layer_weights(&mut reader2, li) {
+            match load_raw_layer_weights(&gguf2, &mut reader2, li) {
                 Ok(Some(rw)) => raw.push(rw),
                 _ => {
                     ok = false;
