@@ -42,7 +42,7 @@ jobs:
         shell: bash
         run: |
           set -o pipefail
-          cargo test -p flarellm-gpu --lib --tests --no-fail-fast -- --ignored --nocapture 2>&1 | tee gpu-artifacts/tests.log
+          cargo test -p flarellm-gpu --lib --tests --no-fail-fast -- --ignored --nocapture --test-threads=1 2>&1 | tee gpu-artifacts/tests.log
       - name: Save adapter metadata and test failures
         if: always()
         uses: actions/upload-artifact@v4
