@@ -1785,7 +1785,7 @@ impl FlareEngine {
     /// engine.begin_stream(promptIds, 128);
     /// function tick() {
     ///   const id = engine.next_token();
-    ///   if (id === undefined) { /* done */ return; }
+    ///   if (id === undefined) { return; }
     ///   output.textContent += tokenizer.decode_one(id);
     ///   requestAnimationFrame(tick);   // yield to browser, then continue
     /// }
