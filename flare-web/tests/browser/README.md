@@ -124,7 +124,7 @@ They do not establish real-answer quality or original model tokenizer parity.
 
 `GPU correctness (software Vulkan)` runs weekly, on workflow dispatch, and on PRs changing that workflow:
 
-- Native: Ubuntu 24.04 + Mesa software Vulkan; executes all ignored `flarellm-gpu`
+- Native: Ubuntu 22.04 + Mesa software Vulkan; executes all ignored `flarellm-gpu`
   library/integration tests through `.github/scripts/run_gpu_tests.py`.
   It discovers ignored tests from Cargo's actual test executables and runs each
   in a separate process, serially, with a 120-second per-test timeout. Crashes,
@@ -150,7 +150,11 @@ compares all logits over CPU prefill + four GPU decode steps with
 this is **not GPU prefill parity**. Q4/mixed-quantized layer formats and GPU context
 boundaries remain outside this fixture. No tolerance is widened to hide failures.
 Known native SiLU tolerance and resident shader issues described in VALIDATION.md
-remain unresolved. Hosted Mesa also crashes in Q3_K/Q6_K kernel tests; its failures are retained, not suppressed.
+remain unresolved on the affected native platforms. The configured Ubuntu 22.04
+Mesa 23.2.1 / LLVM 15 stack passes all 44 ignored tests. Ubuntu 24.04's Mesa 25.2.8 /
+LLVM 20 stack crashes in Q3_K/Q6_K kernels even with serial execution and LLVM
+optimization disabled; it is not the supported native CI stack. See VALIDATION.md
+for the comparison. Revalidate all tests before upgrading the runner/driver.
 
 ### Reports and performance
 

@@ -1,3 +1,31 @@
+# PR #537 follow-up: native CI driver compatibility
+
+The native job now uses **Ubuntu 22.04, Mesa 23.2.1-1ubuntu3.1~22.04.4,
+LLVM 15.0.7**, where **all 44 ignored GPU tests pass**. The test runner still
+requires an adapter, executes each test separately and fails on assertions,
+crashes or timeouts. The browser WebGPU job remains on Ubuntu 24.04 / SwiftShader.
+
+[Driver comparison and all-test artifacts](https://github.com/sauravpanda/flarellm/actions/runs/36982135714)
+confirm that the unchanged Q3_K/Q6_K shaders execute on the configured stack.
+On Ubuntu 24.04 with Mesa 25.2.8 / LLVM 20.1.2, the four original Q3_K/Q6_K tests
+exit with SIGSEGV. A GDB run stopped in generated shader code with corrupted
+stack frames. Disabling LLVM optimization and inlining byte reads did not resolve
+the failure; that source experiment was reverted. This narrows the compatibility
+problem to the software-driver stack but does not identify the exact upstream
+compiler defect. Ubuntu 24.04 native Mesa coverage remains unsupported.
+
+Two additional ignored tests compare each packed kernel against CPU dequantization
+and dot products using nonuniform bytes, three rows, two batches, and 1/2/65 blocks
+per row. They cover u32/half-word-aligned block starts, terminal padding and the
+second 64-lane loop iteration. These pass on local Metal and hosted Mesa 23.2.1;
+the existing numerical assertions and tolerances are retained.
+
+Workspace tests: 634 passed / 47 ignored. Clippy and rustfmt pass. The historical
+Metal SiLU mismatch and the broader #521 coverage gaps below remain separate.
+Revalidate this suite when upgrading the native CI image or software driver.
+
+---
+
 # Issue #521 automated coverage — October 2, 2026
 
 ## Browser CI evidence
