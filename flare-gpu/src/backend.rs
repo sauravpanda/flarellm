@@ -97,6 +97,23 @@ fn required_workgroup_storage(supported: u32, subgroups: bool) -> Result<u32, Gp
     Ok(required)
 }
 
+// Small models and kernel tests do not require 1 GiB bindings. Negotiate
+// within the adapter's actual limits (software Vulkan commonly offers 128 MiB).
+fn required_device_limits(
+    supported: wgpu::Limits,
+    subgroups: bool,
+) -> Result<wgpu::Limits, GpuError> {
+    Ok(wgpu::Limits {
+        max_compute_workgroup_storage_size: required_workgroup_storage(
+            supported.max_compute_workgroup_storage_size,
+            subgroups,
+        )?,
+        max_buffer_size: supported.max_buffer_size.min(1 << 30),
+        max_storage_buffer_binding_size: supported.max_storage_buffer_binding_size.min(1 << 30),
+        ..wgpu::Limits::default()
+    })
+}
+
 /// GPU-resident weight buffer for a single quantized weight matrix.
 ///
 /// Holds the raw bytes (packed GGUF data) in a persistent GPU storage buffer,
@@ -279,21 +296,13 @@ impl WebGpuBackend {
             log::info!("flare-gpu: subgroup operations enabled");
         }
 
-        let workgroup_storage = required_workgroup_storage(
-            adapter.limits().max_compute_workgroup_storage_size,
-            has_subgroups,
-        )?;
+        let required_limits = required_device_limits(adapter.limits(), has_subgroups)?;
         let (device, queue) = adapter
             .request_device(
                 &wgpu::DeviceDescriptor {
                     label: Some("flare-gpu"),
                     required_features: extra_features,
-                    required_limits: wgpu::Limits {
-                        max_compute_workgroup_storage_size: workgroup_storage,
-                        max_buffer_size: 1 << 30,                 // 1 GiB
-                        max_storage_buffer_binding_size: 1 << 30, // 1 GiB
-                        ..wgpu::Limits::default()
-                    },
+                    required_limits,
                     ..Default::default()
                 },
                 None,
@@ -5571,6 +5580,29 @@ mod tests {
     use flare_core::tensor::Tensor;
 
     #[test]
+    fn device_limits_fit_software_and_large_adapters() {
+        for storage in [128 << 20, 1 << 30, 2 << 30] {
+            let supported = wgpu::Limits {
+                max_storage_buffer_binding_size: storage,
+                max_buffer_size: u64::from(storage) * 2,
+                max_compute_workgroup_storage_size: 32768,
+                ..wgpu::Limits::default()
+            };
+            let requested = required_device_limits(supported.clone(), false).unwrap();
+            assert!(requested.check_limits(&supported));
+            assert_eq!(
+                requested.max_storage_buffer_binding_size,
+                storage.min(1 << 30)
+            );
+            assert_eq!(
+                requested.max_buffer_size,
+                (u64::from(storage) * 2).min(1 << 30)
+            );
+        }
+        assert!(required_device_limits(wgpu::Limits::default(), false).is_err());
+    }
+
+    #[test]
     fn attention_storage_limits() {
         for subgroups in [false, true] {
             assert!(matches!(
@@ -6655,6 +6687,72 @@ mod tests {
                 "row {i}: got {v}, expected {expected}"
             );
         }
+    }
+
+    // Exercise both u32-aligned and half-word-aligned block starts, multiple
+    // batches/rows, and the second iteration of the 64-lane block-stride loop.
+    fn check_packed_matvec_block_boundaries(q6k: bool) {
+        use flare_loader::quantize::{dequant_q3k_block, dequant_q6k_block};
+
+        let backend = pollster::block_on(WebGpuBackend::new()).expect("GPU backend unavailable");
+        let block_bytes = if q6k { 210 } else { 110 };
+        let rows = 3;
+        let batch = 2;
+        for blocks in [1, 2, 65] {
+            let cols = blocks * 256;
+            let mut raw = vec![0u8; rows * blocks * block_bytes];
+            let mut weights = vec![0.0; rows * cols];
+            for (index, block) in raw.chunks_exact_mut(block_bytes).enumerate() {
+                for (offset, value) in block.iter_mut().enumerate() {
+                    *value = ((index * 37 + offset * 13 + offset / 7) % 256) as u8;
+                }
+                block[block_bytes - 2..]
+                    .copy_from_slice(&half::f16::from_f32(0.015625).to_le_bytes());
+                let mut decoded = [0.0; 256];
+                if q6k {
+                    dequant_q6k_block(block, &mut decoded);
+                } else {
+                    dequant_q3k_block(block, &mut decoded);
+                }
+                weights[index * 256..(index + 1) * 256].copy_from_slice(&decoded);
+            }
+            let input: Vec<f32> = (0..batch * cols)
+                .map(|i| ((i * 7 % 23) as f32 - 11.0) / 16.0)
+                .collect();
+            let actual = if q6k {
+                backend.dequant_matvec_q6k(&raw, &input, rows, blocks, batch)
+            } else {
+                backend.dequant_matvec_q3k(&raw, &input, rows, blocks, batch)
+            };
+            assert_eq!(actual.len(), rows * batch);
+            for b in 0..batch {
+                for row in 0..rows {
+                    let expected: f32 = weights[row * cols..(row + 1) * cols]
+                        .iter()
+                        .zip(&input[b * cols..(b + 1) * cols])
+                        .map(|(w, x)| w * x)
+                        .sum();
+                    let value = actual[b * rows + row];
+                    assert!(value.is_finite());
+                    assert!(
+                        (value - expected).abs() <= 0.01 + 1e-5 * expected.abs(),
+                        "q6k={q6k} blocks={blocks} batch={b} row={row}: {value} vs {expected}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "requires a GPU adapter"]
+    fn test_dequant_matvec_q3k_block_boundaries() {
+        check_packed_matvec_block_boundaries(false);
+    }
+
+    #[test]
+    #[ignore = "requires a GPU adapter"]
+    fn test_dequant_matvec_q6k_block_boundaries() {
+        check_packed_matvec_block_boundaries(true);
     }
 
     /// Verify dequant_matvec_q5_0 single-block GPU result matches CPU reference.

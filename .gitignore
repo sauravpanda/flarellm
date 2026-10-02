@@ -34,3 +34,6 @@ models/
 
 # Compiled browser SDK
 flare-web/dist/
+
+# Browser CI artifacts
+/browser-artifacts/

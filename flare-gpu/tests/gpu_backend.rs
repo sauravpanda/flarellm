@@ -7,7 +7,12 @@ use flare_core::model::ComputeBackend;
 use flare_gpu::WebGpuBackend;
 
 fn try_create_gpu() -> Option<WebGpuBackend> {
-    pollster::block_on(WebGpuBackend::new()).ok()
+    let result = pollster::block_on(WebGpuBackend::new());
+    if std::env::var_os("FLARE_REQUIRE_GPU").is_some() {
+        Some(result.expect("FLARE_REQUIRE_GPU is set but the required adapter is unavailable"))
+    } else {
+        result.ok()
+    }
 }
 
 #[test]

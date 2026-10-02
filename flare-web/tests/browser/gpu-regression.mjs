@@ -1,7 +1,7 @@
 // Run only in a dedicated module worker. Fault injection stays inside this worker.
 import init, { FlareEngine, FlareTokenizer } from './node_modules/@sauravpanda/flare/pkg/flare_web.js';
 const assert = (value, message) => { if (!value) throw new Error(message); };
-self.onmessage = async ({ data: { mode = 'normal' } }) => {
+self.onmessage = async ({ data: { mode = 'normal', synthetic = false } }) => {
   const result = { mode, errors: [], devices: [] };
   let engine, tokenizer;
   try {
@@ -23,7 +23,7 @@ self.onmessage = async ({ data: { mode = 'normal' } }) => {
       const device = await requestDevice.call(this, descriptor);
       result.devices.push({ adapterStorage: this.limits.maxComputeWorkgroupStorageSize,
         requestedStorage: descriptor.requiredLimits.maxComputeWorkgroupStorageSize,
-        deviceStorage: device.limits.maxComputeWorkgroupStorageSize });
+        features: [...device.features], deviceStorage: device.limits.maxComputeWorkgroupStorageSize });
       device.addEventListener('uncapturederror', ({ error }) => result.errors.push(error.message));
       return device;
     };
@@ -60,6 +60,7 @@ self.onmessage = async ({ data: { mode = 'normal' } }) => {
       assert(cpu.length === 5 && gpu.length === 5, 'Compare multiple decode steps');
       result.steps = cpu.map((reference, index) => {
         const actual = gpu[index];
+        assert(reference.logits.length === 128 && actual.logits.length === 128, 'Compare the entire vocabulary');
         assert(reference.token === actual.token, 'Fixture context diverged');
         assert(actual.logits.some(v => Math.abs(v) > 0.01), 'Fixture output must be nonzero');
         let maxAbsoluteError = 0;
@@ -80,7 +81,7 @@ self.onmessage = async ({ data: { mode = 'normal' } }) => {
     tokenizer = FlareTokenizer.from_json(await (await fetch('/tokenizer.json')).text());
     const generate = async () => {
       engine.reset();
-      await engine.begin_stream_with_params_async(tokenizer.encode('Hello'), 8, 0, 1, 0, 1, 0);
+      await engine.begin_stream_with_params_async(tokenizer.encode(synthetic ? 'Hel' : 'Hello'), synthetic ? 5 : 8, 0, 1, 0, 1, 0);
       const run = { ids: [], logits: [] };
       try {
         while (!engine.stream_done) {
@@ -96,7 +97,7 @@ self.onmessage = async ({ data: { mode = 'normal' } }) => {
       return run;
     };
     result.cpu = await generate();
-    assert(!result.cpu.error && result.cpu.ids.length === 8, 'CPU baseline failed');
+    assert(!result.cpu.error && result.cpu.ids.length === (synthetic ? 5 : 8), 'CPU baseline failed');
     result.initialized = await engine.init_gpu();
     if (mode === 'adapter16') {
       assert(!result.initialized && result.devices.length === 0, 'Insufficient adapter must fail before requesting a device');
@@ -104,7 +105,7 @@ self.onmessage = async ({ data: { mode = 'normal' } }) => {
       assert(result.initialized, 'GPU initialization failed');
       result.gpu = await generate();
       if (mode === 'normal') {
-        assert(!result.gpu.error && result.gpu.ids.length === 8, 'Multiple GPU decode steps must succeed');
+        assert(!result.gpu.error && result.gpu.ids.length === (synthetic ? 5 : 8), 'Multiple GPU decode steps must succeed');
         assert(result.gpu.logits.every(x => x.finite && x.nonzero > 0), 'Meaningful model logits must be finite and nonzero');
       } else {
         assert(result.gpu.ids.length === 1 && result.gpu.error, 'Failure must reject after the CPU prefill token, without emitting a GPU token');

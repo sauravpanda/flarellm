@@ -1,0 +1,86 @@
+name: GPU correctness (software Vulkan)
+
+on:
+  # Validate changes to this workflow before it reaches the default branch.
+  pull_request:
+    paths:
+      - '.github/workflows/gpu-correctness.yml'
+  workflow_dispatch:
+  schedule:
+    - cron: '23 8 * * 1'
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  native-vulkan:
+    name: Ignored GPU tests / Mesa software Vulkan
+    # Mesa 23.2.1 / LLVM 15 executes every ignored test. Ubuntu 24.04's
+    # Mesa 25.2.8 / LLVM 20 JIT crashes in Q3_K/Q6_K; see VALIDATION.md.
+    runs-on: ubuntu-22.04
+    timeout-minutes: 25
+    env:
+      FLARE_REQUIRE_GPU: '1'
+      WGPU_BACKEND: vulkan
+      XDG_RUNTIME_DIR: /tmp/flare-xdg
+      RUST_BACKTRACE: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install software Vulkan and record capabilities
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y mesa-vulkan-drivers vulkan-tools
+          mkdir -p "$XDG_RUNTIME_DIR" gpu-artifacts
+          chmod 700 "$XDG_RUNTIME_DIR"
+          vulkaninfo --summary 2>&1 | tee gpu-artifacts/vulkan.txt
+          rustc -Vv | tee gpu-artifacts/rust.txt
+          uname -a | tee gpu-artifacts/platform.txt
+      - name: Execute all ignored GPU crate tests (adapter required)
+        shell: bash
+        run: |
+          set -o pipefail
+          python3 .github/scripts/run_gpu_tests.py gpu-artifacts 2>&1 | tee gpu-artifacts/tests.log
+      - name: Save adapter metadata and test failures
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-software-vulkan-${{ github.run_attempt }}
+          path: gpu-artifacts/
+
+  browser-webgpu:
+    name: Packaged Chromium / SwiftShader WebGPU
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Build WASM and installed consumer
+        run: |
+          cargo install wasm-pack --version 0.13.1 --locked
+          wasm-pack build flare-web --target web --no-opt
+          npm ci --prefix flare-web
+          npm run build:sdk --prefix flare-web
+          node .github/scripts/check_wasm_package.mjs /tmp/flare-consumer
+          python3 flare-web/tests/browser/make_ci_fixture.py /tmp/flare-consumer
+      - name: Install pinned Chromium
+        working-directory: flare-web
+        run: npx playwright install --with-deps chromium
+      - name: Run required WebGPU comparisons and fault regressions
+        run: node flare-web/tests/browser/run.mjs /tmp/flare-consumer --gpu
+      - name: Save browser results and trace
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: browser-software-webgpu-${{ github.run_attempt }}
+          path: browser-artifacts/

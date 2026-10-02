@@ -73,7 +73,30 @@ jobs:
           npm run build:sdk --prefix flare-web
           npm run test:sdk --prefix flare-web
       - name: Verify packaged ESM syntax, import, and WASM initialization
-        run: node .github/scripts/check_wasm_package.mjs
+        run: node .github/scripts/check_wasm_package.mjs /tmp/flare-consumer
+      - name: Generate and verify pinned browser fixture
+        run: python3 flare-web/tests/browser/make_ci_fixture.py /tmp/flare-consumer
+      - name: Install pinned Chromium
+        working-directory: flare-web
+        run: npx playwright install --with-deps chromium
+      - name: Run packaged CPU inference in Chromium without GPU
+        run: node flare-web/tests/browser/run.mjs /tmp/flare-consumer
+      - name: Verify required-adapter failure reporting
+        env:
+          BROWSER_ARTIFACTS: browser-artifacts/missing-adapter
+        run: |
+          if node flare-web/tests/browser/run.mjs /tmp/flare-consumer --gpu --disable-adapter; then
+            echo "Required-adapter negative test unexpectedly passed"
+            exit 1
+          fi
+          node --input-type=module -e "import fs from 'node:fs'; import assert from 'node:assert/strict'; const r = JSON.parse(fs.readFileSync('browser-artifacts/missing-adapter/result.json')); assert.equal(r.passed, false); assert.match(r.result?.error?.message ?? '', /Required WebGPU (API|adapter) unavailable/);"
+      - name: Save browser results and trace
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: browser-cpu-${{ github.run_attempt }}
+          path: browser-artifacts/
+          if-no-files-found: warn
 
   doc:
     name: Doc build
