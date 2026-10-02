@@ -266,14 +266,14 @@ fn decode_to_f32(data: &[u8], dtype: Dtype, numel: usize) -> Result<Vec<f32>, Sa
         Dtype::F32 => {
             let mut out = vec![0f32; numel];
             // Safe: we have verified that data.len() == numel * 4.
-            for (i, chunk) in data.chunks_exact(4).enumerate() {
+            for (i, chunk) in data.as_chunks::<4>().0.iter().enumerate() {
                 out[i] = f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
             }
             Ok(out)
         }
         Dtype::F16 => {
             let mut out = Vec::with_capacity(numel);
-            for chunk in data.chunks_exact(2) {
+            for chunk in data.as_chunks::<2>().0 {
                 let bits = u16::from_le_bytes([chunk[0], chunk[1]]);
                 out.push(f16_to_f32(bits));
             }
@@ -281,7 +281,7 @@ fn decode_to_f32(data: &[u8], dtype: Dtype, numel: usize) -> Result<Vec<f32>, Sa
         }
         Dtype::BF16 => {
             let mut out = Vec::with_capacity(numel);
-            for chunk in data.chunks_exact(2) {
+            for chunk in data.as_chunks::<2>().0 {
                 let bits = u16::from_le_bytes([chunk[0], chunk[1]]);
                 out.push(bf16_to_f32(bits));
             }
