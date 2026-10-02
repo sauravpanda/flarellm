@@ -1,6 +1,10 @@
 name: GPU correctness (software Vulkan)
 
 on:
+  # Validate changes to this workflow before it reaches the default branch.
+  pull_request:
+    paths:
+      - '.github/workflows/gpu-correctness.yml'
   workflow_dispatch:
   schedule:
     - cron: '23 8 * * 1'

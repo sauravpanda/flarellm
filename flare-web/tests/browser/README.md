@@ -122,7 +122,7 @@ They do not establish real-answer quality or original model tokenizer parity.
 
 ### GPU jobs and capability requirements
 
-`GPU correctness (software Vulkan)` runs weekly and on workflow dispatch:
+`GPU correctness (software Vulkan)` runs weekly, on workflow dispatch, and on PRs changing that workflow:
 
 - Native: Ubuntu 24.04 + Mesa software Vulkan; executes all ignored `flarellm-gpu`
   library/integration tests with `--no-fail-fast`. `FLARE_REQUIRE_GPU=1` converts
