@@ -45,13 +45,22 @@ jobs:
       - name: Build flare-web (release, target web)
         run: wasm-pack build flare-web --target web --out-dir pkg --release
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Build browser SDK
+        run: |
+          npm ci --prefix flare-web
+          npm run build:sdk --prefix flare-web
+
       - name: Assemble _site
         run: |
           mkdir -p _site/pkg
           # Copy demo HTML to site root, rewriting the relative import path
           # so the demo at / can find the WASM module at /pkg/.
-          sed 's|../pkg/flare_web.js|./pkg/flare_web.js|g' \
+          sed 's|../dist/index.js|./dist/index.js|g' \
             flare-web/demo/index.html > _site/index.html
+          cp -R flare-web/dist _site/dist
           # Copy the built WASM package.
           cp flare-web/pkg/flare_web.js        _site/pkg/
           cp flare-web/pkg/flare_web.d.ts      _site/pkg/

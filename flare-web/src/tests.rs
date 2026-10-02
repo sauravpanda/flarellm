@@ -148,3 +148,40 @@ fn first_logits_eos_reset_and_compatibility_alias() {
     assert_eq!(stream.kv_pos, 3);
     assert_eq!(stream.model.kv_cache().position(), 3);
 }
+
+#[test]
+fn streaming_utf8_flush_and_reset() {
+    let mut e = engine();
+    e.gguf_vocab = Some(GgufVocab {
+        id_to_token: vec![
+            "<0xE2>".into(),
+            "<0x82>".into(),
+            "<0xAC>".into(),
+            "!".into(),
+        ],
+        token_to_id: Default::default(),
+        scores: vec![],
+        token_types: vec![],
+        bos_id: None,
+        eos_id: None,
+        vocab_size: 4,
+    });
+    assert_eq!(e.decode_token_chunk(0), "");
+    assert_eq!(e.decode_token_chunk(1), "");
+    assert_eq!(e.decode_token_chunk(2), "€");
+    assert_eq!(e.flush_decode(), "");
+    assert_eq!(e.decode_token_chunk(0), "");
+    assert_eq!(e.flush_decode(), "�");
+    assert_eq!(e.flush_decode(), "");
+    e.decode_token_chunk(0);
+    e.reset();
+    assert_eq!(e.decode_token_chunk(3), "!");
+}
+
+#[test]
+fn chat_history_uses_the_detected_template() {
+    let mut e = engine();
+    e.chat_template = ChatTemplate::ChatML;
+    let prompt = e.apply_chat_messages(r#"[{"role":"system","content":"Brief"},{"role":"user","content":"Hi"},{"role":"assistant","content":"Hello"},{"role":"user","content":"Again"}]"#).expect("valid history");
+    assert_eq!(prompt, "<|im_start|>system\nBrief<|im_end|>\n<|im_start|>user\nHi<|im_end|>\n<|im_start|>assistant\nHello<|im_end|>\n<|im_start|>user\nAgain<|im_end|>\n<|im_start|>assistant\n");
+}

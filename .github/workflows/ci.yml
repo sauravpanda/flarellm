@@ -67,6 +67,11 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: "20"
+      - name: Build and test browser SDK
+        run: |
+          npm ci --prefix flare-web
+          npm run build:sdk --prefix flare-web
+          npm run test:sdk --prefix flare-web
       - name: Verify packaged ESM syntax, import, and WASM initialization
         run: node .github/scripts/check_wasm_package.mjs
 

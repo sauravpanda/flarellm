@@ -97,8 +97,9 @@ pub fn webgpu_available() -> bool {
 /// whether to build a WebNN graph from exported weights.
 #[wasm_bindgen]
 pub fn supports_webnn() -> bool {
-    web_sys::window()
-        .and_then(|w| js_sys::Reflect::get(&w.navigator(), &"ml".into()).ok())
+    js_sys::Reflect::get(&js_sys::global(), &"navigator".into())
+        .ok()
+        .and_then(|n| js_sys::Reflect::get(&n, &"ml".into()).ok())
         .is_some_and(|ml| !ml.is_undefined() && !ml.is_null())
 }
 
@@ -146,8 +147,8 @@ pub fn supports_speech_synthesis() -> bool {
 /// will fall back to `fetch()` when the server does not cooperate.
 #[wasm_bindgen]
 pub fn supports_webtransport() -> bool {
-    web_sys::window()
-        .and_then(|w| js_sys::Reflect::get(&w, &"WebTransport".into()).ok())
+    js_sys::Reflect::get(&js_sys::global(), &"WebTransport".into())
+        .ok()
         .is_some_and(|wt| !wt.is_undefined() && !wt.is_null())
 }
 
@@ -170,9 +171,10 @@ pub fn supports_relaxed_simd() -> bool {
 /// Get basic device info as a JSON string.
 #[wasm_bindgen]
 pub fn device_info() -> String {
-    let ua: String = web_sys::window()
-        .map(|w| w.navigator())
-        .and_then(|n| n.user_agent().ok())
+    let ua = js_sys::Reflect::get(&js_sys::global(), &"navigator".into())
+        .and_then(|n| js_sys::Reflect::get(&n, &"userAgent".into()))
+        .ok()
+        .and_then(|v| v.as_string())
         .unwrap_or_default();
 
     format!(
@@ -1217,6 +1219,17 @@ impl FlareEngine {
         self.chat_template.apply(&messages)
     }
 
+    /// Format a JSON array of role/content messages using the detected template.
+    #[wasm_bindgen]
+    pub fn apply_chat_messages(&self, messages_json: &str) -> Result<String, JsError> {
+        let messages: Vec<ChatMessage> = serde_json::from_str(messages_json)
+            .map_err(|e| JsError::new(&format!("invalid chat messages: {e}")))?;
+        if messages.is_empty() {
+            return Err(JsError::new("chat messages must not be empty"));
+        }
+        Ok(self.chat_template.apply(&messages))
+    }
+
     /// EOS (end of sequence) token ID from the GGUF model metadata, if present.
     /// Generation stops automatically when this token is produced.
     #[wasm_bindgen(getter)]
@@ -1491,6 +1504,14 @@ impl FlareEngine {
         } else {
             prefix + &decoded
         }
+    }
+
+    /// Flush an incomplete UTF-8 suffix at the end of generation.
+    #[wasm_bindgen]
+    pub fn flush_decode(&mut self) -> String {
+        let text = String::from_utf8_lossy(&self.utf8_byte_buf).into_owned();
+        self.utf8_byte_buf.clear();
+        text
     }
 
     /// Truncate `text` so that it fits within `budget` tokens when encoded.
@@ -2778,10 +2799,16 @@ impl FlareProgressiveLoader {
     /// (e.g. when the response is gzip-compressed or chunked).
     #[wasm_bindgen]
     pub async fn load(&self, on_progress: js_sys::Function) -> Result<FlareEngine, JsError> {
-        let window = web_sys::window().ok_or_else(|| JsError::new("no window object"))?;
-
-        // Kick off the fetch
-        let resp_promise = window.fetch_with_str(&self.url);
+        let global = js_sys::global();
+        let fetch: js_sys::Function = js_sys::Reflect::get(&global, &"fetch".into())
+            .map_err(|_| JsError::new("fetch unavailable"))?
+            .dyn_into()
+            .map_err(|_| JsError::new("fetch unavailable"))?;
+        let resp_promise: js_sys::Promise = fetch
+            .call1(&global, &self.url.clone().into())
+            .map_err(|_| JsError::new("fetch failed"))?
+            .dyn_into()
+            .map_err(|_| JsError::new("fetch did not return a Promise"))?;
         let resp_value = wasm_bindgen_futures::JsFuture::from(resp_promise)
             .await
             .map_err(|e| JsError::new(&format!("fetch failed: {e:?}")))?;
@@ -2990,6 +3017,14 @@ impl FlareTokenizer {
             .map_err(|e| JsError::new(&format!("decode error: {e}")))
     }
 
+    /// Raw decoded bytes for use with a streaming TextDecoder in JavaScript.
+    #[wasm_bindgen]
+    pub fn decode_bytes(&self, tokens: &[u32]) -> Result<Vec<u8>, JsError> {
+        self.inner
+            .decode_bytes(tokens)
+            .map_err(|e| JsError::new(&format!("decode error: {e}")))
+    }
+
     /// Decode a single token ID to text (useful for streaming output).
     #[wasm_bindgen]
     pub fn decode_one(&self, token_id: u32) -> Result<String, JsError> {
@@ -3024,10 +3059,14 @@ impl FlareTokenizer {
 /// Directory name under the OPFS root where cached models are stored.
 const OPFS_MODELS_DIR: &str = "flare-models";
 
+fn global_storage() -> Result<web_sys::StorageManager, JsValue> {
+    let navigator = js_sys::Reflect::get(&js_sys::global(), &"navigator".into())?;
+    js_sys::Reflect::get(&navigator, &"storage".into())?.dyn_into()
+}
+
 /// Get the OPFS root directory handle, returning `Err` if unavailable.
 async fn opfs_root() -> Result<web_sys::FileSystemDirectoryHandle, JsValue> {
-    let window = web_sys::window().ok_or_else(|| JsValue::from_str("no window"))?;
-    let storage = window.navigator().storage();
+    let storage = global_storage()?;
     let promise = storage.get_directory();
     let root = wasm_bindgen_futures::JsFuture::from(promise).await?;
     Ok(root.unchecked_into())
@@ -3158,11 +3197,10 @@ pub async fn list_cached_models() -> Result<JsValue, JsValue> {
 /// Returns `"{}"` if the Storage API is unavailable.
 #[wasm_bindgen]
 pub async fn storage_estimate() -> Result<JsValue, JsValue> {
-    let window = match web_sys::window() {
-        Some(w) => w,
-        None => return Ok(JsValue::from_str("{}")),
+    let storage = match global_storage() {
+        Ok(storage) => storage,
+        Err(_) => return Ok(JsValue::from_str("{}")),
     };
-    let storage = window.navigator().storage();
     let estimate: web_sys::StorageEstimate = match storage.estimate() {
         Ok(promise) => wasm_bindgen_futures::JsFuture::from(promise)
             .await?

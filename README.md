@@ -81,6 +81,25 @@ See [`BENCHMARK_HISTORY.md`](BENCHMARK_HISTORY.md) for the full performance log.
 
 ## Quick Start
 
+### Browser SDK
+
+```js
+import { Flare } from '@sauravpanda/flare';
+
+const flare = await Flare.init({ cache: true });
+await flare.loadModel('/models/model.gguf');
+await flare.chat({
+  message: 'Hello!',
+  maxTokens: 64,
+  onToken: text => { document.querySelector('#output').textContent += text; },
+});
+flare.dispose();
+```
+
+Inference runs in a module worker. Use `flare.cancel()` or an `AbortSignal` to
+stop work; the next request reloads the model. See the [browser SDK guide](flare-web/README.md)
+for packaging, sampling, tokenizer options, and current model compatibility limits.
+
 ### Native
 
 ```bash
