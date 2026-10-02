@@ -739,14 +739,14 @@ pub(crate) fn dequantize_tensor(
     match dtype {
         QuantFormat::F32 => {
             let mut data = vec![0.0f32; numel];
-            for (i, chunk) in raw.as_chunks::<4>().0.iter().enumerate() {
+            for (i, chunk) in raw.chunks_exact(4).enumerate() {
                 data[i] = f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
             }
             Ok(data)
         }
         QuantFormat::F16 => {
             let mut data = vec![0.0f32; numel];
-            for (i, chunk) in raw.as_chunks::<2>().0.iter().enumerate() {
+            for (i, chunk) in raw.chunks_exact(2).enumerate() {
                 let bits = u16::from_le_bytes([chunk[0], chunk[1]]);
                 data[i] = quantize::f16_to_f32(bits);
             }
@@ -754,7 +754,7 @@ pub(crate) fn dequantize_tensor(
         }
         QuantFormat::BF16 => {
             let mut data = vec![0.0f32; numel];
-            for (i, chunk) in raw.as_chunks::<2>().0.iter().enumerate() {
+            for (i, chunk) in raw.chunks_exact(2).enumerate() {
                 let bits = u16::from_le_bytes([chunk[0], chunk[1]]);
                 data[i] = quantize::bf16_to_f32(bits);
             }
