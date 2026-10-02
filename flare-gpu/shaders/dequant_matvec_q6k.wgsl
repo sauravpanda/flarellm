@@ -52,11 +52,6 @@ struct Params {
 /// Workgroup-shared partial sums for the tree reduction.
 var<workgroup> partials: array<f32, 64>;
 
-/// Extract one byte at the given absolute byte offset from the u32 storage array.
-fn read_byte(byte_offset: u32) -> u32 {
-    return (raw[byte_offset / 4u] >> ((byte_offset % 4u) * 8u)) & 0xFFu;
-}
-
 /// Reinterpret an 8-bit unsigned value as a signed 8-bit integer (i32).
 fn sign_extend_byte(b: u32) -> i32 {
     return bitcast<i32>(b << 24u) >> 24u;
@@ -90,7 +85,7 @@ fn dequant_matvec_q6k(
         let vec_base = batch * in_cols + b * 256u;
 
         // d at bytes 208-209 of this block (LE f16).
-        let d_packed = read_byte(bb + 208u) | (read_byte(bb + 209u) << 8u);
+        let d_packed = ((raw[(bb + 208u) / 4u] >> (((bb + 208u) % 4u) * 8u)) & 0xFFu) | (((raw[(bb + 209u) / 4u] >> (((bb + 209u) % 4u) * 8u)) & 0xFFu) << 8u);
         let d = unpack2x16float(d_packed).x;
 
         // Process both halves (0 and 1), each covering 128 output elements.
@@ -101,9 +96,9 @@ fn dequant_matvec_q6k(
             let y_off  = half * 128u;
 
             for (var l = 0u; l < 32u; l = l + 1u) {
-                let ql_a = read_byte(bb + ql_off + l);
-                let ql_b = read_byte(bb + ql_off + l + 32u);
-                let qh_b = read_byte(bb + 128u + qh_off + l);
+                let ql_a = ((raw[(bb + ql_off + l) / 4u] >> (((bb + ql_off + l) % 4u) * 8u)) & 0xFFu);
+                let ql_b = ((raw[(bb + ql_off + l + 32u) / 4u] >> (((bb + ql_off + l + 32u) % 4u) * 8u)) & 0xFFu);
+                let qh_b = ((raw[(bb + 128u + qh_off + l) / 4u] >> (((bb + 128u + qh_off + l) % 4u) * 8u)) & 0xFFu);
 
                 // Assemble 6-bit unsigned values, then offset-binary subtract 32.
                 let q1 = i32((ql_a & 0x0Fu) | ((qh_b & 3u) << 4u)) - 32;
@@ -113,10 +108,10 @@ fn dequant_matvec_q6k(
 
                 // Signed i8 scales (two scale values per 32-element group, 4 groups per half).
                 let is = l / 16u;
-                let sc1 = sign_extend_byte(read_byte(bb + 192u + sc_off + is));
-                let sc2 = sign_extend_byte(read_byte(bb + 192u + sc_off + is + 2u));
-                let sc3 = sign_extend_byte(read_byte(bb + 192u + sc_off + is + 4u));
-                let sc4 = sign_extend_byte(read_byte(bb + 192u + sc_off + is + 6u));
+                let sc1 = sign_extend_byte(((raw[(bb + 192u + sc_off + is) / 4u] >> (((bb + 192u + sc_off + is) % 4u) * 8u)) & 0xFFu));
+                let sc2 = sign_extend_byte(((raw[(bb + 192u + sc_off + is + 2u) / 4u] >> (((bb + 192u + sc_off + is + 2u) % 4u) * 8u)) & 0xFFu));
+                let sc3 = sign_extend_byte(((raw[(bb + 192u + sc_off + is + 4u) / 4u] >> (((bb + 192u + sc_off + is + 4u) % 4u) * 8u)) & 0xFFu));
+                let sc4 = sign_extend_byte(((raw[(bb + 192u + sc_off + is + 6u) / 4u] >> (((bb + 192u + sc_off + is + 6u) % 4u) * 8u)) & 0xFFu));
 
                 acc = acc + d * f32(sc1) * f32(q1) * vec[vec_base + y_off + l];
                 acc = acc + d * f32(sc2) * f32(q2) * vec[vec_base + y_off + l + 32u];
