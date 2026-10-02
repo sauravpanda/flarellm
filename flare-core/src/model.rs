@@ -11,6 +11,13 @@ use crate::config::{Architecture, ModelConfig};
 use crate::kv_cache::{KvCache, QuantizedKvCache};
 use crate::tensor::Tensor;
 
+/// A failed GPU step must not be sampled or advance the conversation.
+#[derive(Debug, thiserror::Error)]
+pub enum ComputeError {
+    #[error("GPU decode failed: {0}")]
+    Gpu(String),
+}
+
 /// Ensure rayon's global thread pool is sized for CPU inference, not the
 /// host's total logical CPU count.
 ///
@@ -606,6 +613,45 @@ pub trait ComputeBackend: Send + Sync {
             seq_len,
         );
         Box::pin(async move { sync })
+    }
+
+    /// Checked async decode. Backends with fallible execution override this.
+    #[allow(clippy::too_many_arguments)]
+    fn try_forward_single_token_gpu_async<'a>(
+        &'a self,
+        token_embedding: &'a [f32],
+        pos: usize,
+        dim: usize,
+        num_heads: usize,
+        num_kv_heads: usize,
+        head_dim: usize,
+        intermediate_dim: usize,
+        vocab_size: usize,
+        rms_norm_eps: f32,
+        rope_theta: f32,
+        num_layers: usize,
+        seq_len: usize,
+    ) -> core::pin::Pin<
+        Box<dyn core::future::Future<Output = Result<Option<Vec<f32>>, ComputeError>> + 'a>,
+    > {
+        Box::pin(async move {
+            Ok(self
+                .forward_single_token_gpu_async(
+                    token_embedding,
+                    pos,
+                    dim,
+                    num_heads,
+                    num_kv_heads,
+                    head_dim,
+                    intermediate_dim,
+                    vocab_size,
+                    rms_norm_eps,
+                    rope_theta,
+                    num_layers,
+                    seq_len,
+                )
+                .await)
+        })
     }
 
     /// Short identifier for this backend, used in diagnostics.
@@ -1806,7 +1852,23 @@ impl Model {
     /// `forward_single_token_gpu_async`, the default trait impl forwards to
     /// the sync version — so this is a safe drop-in for `forward` in both
     /// browser and native contexts.
+    ///
+    /// # Panics
+    /// This compatibility wrapper panics on GPU failure. Use
+    /// [`Self::try_forward_async`] to recover from execution errors.
     pub async fn forward_async(&mut self, token_id: u32, pos: usize) -> Tensor {
+        self.try_forward_async(token_id, pos)
+            .await
+            .expect("GPU forward failed")
+    }
+
+    /// Fallible async forward. On GPU failure, returns an error, clears the
+    /// conversation KV and switches to CPU. Start a new prefill before retrying.
+    pub async fn try_forward_async(
+        &mut self,
+        token_id: u32,
+        pos: usize,
+    ) -> Result<Tensor, ComputeError> {
         let dim = self.config.hidden_dim;
         let head_dim = self.config.head_dim;
         let num_heads = self.config.num_heads;
@@ -1821,7 +1883,7 @@ impl Model {
 
             let maybe_logits = self
                 .backend
-                .forward_single_token_gpu_async(
+                .try_forward_single_token_gpu_async(
                     token_embed,
                     pos,
                     dim,
@@ -1837,6 +1899,16 @@ impl Model {
                 )
                 .await;
 
+            let maybe_logits = match maybe_logits {
+                Ok(logits) => logits,
+                Err(error) => {
+                    // A failed submission may have partially changed GPU KV.
+                    // CPU KV is stale after resident decoding: discard both.
+                    self.set_backend(Box::new(CpuBackend));
+                    self.reset();
+                    return Err(error);
+                }
+            };
             if let Some(mut logits) = maybe_logits {
                 self.kv_cache.advance();
                 if self.config.final_logit_softcap > 0.0 {
@@ -1845,14 +1917,14 @@ impl Model {
                         *l = (*l / cap).tanh() * cap;
                     }
                 }
-                return Tensor::from_vec(logits, &[vocab_size]).unwrap();
+                return Ok(Tensor::from_vec(logits, &[vocab_size]).unwrap());
             }
         }
 
         // Fall back to the sync path.  On CPU backends that's the normal
         // hot path; on GPU backends it's only reached when the async GPU
         // call returned `None` (GPU state missing).
-        self.forward(token_id, pos)
+        Ok(self.forward(token_id, pos))
     }
 
     /// Greedy forward pass: runs the full transformer but returns only the

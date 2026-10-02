@@ -97,7 +97,7 @@ fn streaming_batch_and_async_agree() {
                             let mut actual = Vec::new();
                             loop {
                                 let next = if asynchronous {
-                                    pollster::block_on(stream.next_token_async())
+                                    pollster::block_on(stream.next_token_async()).unwrap()
                                 } else {
                                     stream.next_token()
                                 };

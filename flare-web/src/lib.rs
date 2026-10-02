@@ -2159,14 +2159,18 @@ impl FlareEngine {
     /// `undefined` on stream end).  Identical sampling + stop-sequence +
     /// EOS handling as `next_token`.  Safe to use on CPU backends too —
     /// the async path falls through to the sync fast path there.
+    ///
+    /// Rejects on GPU execution/readback failure without sampling invalid logits.
+    /// The failed stream and KV context are cleared and the backend becomes CPU;
+    /// start a new generation (which prefills the prompt) before continuing.
     #[wasm_bindgen]
-    pub async fn next_token_async(&mut self) -> Option<u32> {
+    pub async fn next_token_async(&mut self) -> Result<Option<u32>, JsValue> {
         if self.stream_done || self.stream_remaining == 0 {
             if !self.stream_done {
                 self.stream_done = true;
                 self.stream_stop_reason = "length".to_string();
             }
-            return None;
+            return Ok(None);
         }
 
         if self.stream_decode_start_ms == 0.0 {
@@ -2178,8 +2182,19 @@ impl FlareEngine {
         } else {
             let output = self
                 .model
-                .forward_async(self.stream_last_token, self.stream_pos)
+                .try_forward_async(self.stream_last_token, self.stream_pos)
                 .await;
+            let output = match output {
+                Ok(output) => output,
+                Err(error) => {
+                    self.reset();
+                    self.stream_stop_reason = "error".into();
+                    return Err(js_sys::Error::new(&format!(
+                        "{error}; context cleared and backend switched to CPU"
+                    ))
+                    .into());
+                }
+            };
             self.stream_pos += 1;
             output.data().to_vec()
         };
@@ -2231,7 +2246,7 @@ impl FlareEngine {
             self.last_decode_ms = now_ms() - self.stream_decode_start_ms;
             self.stream_done = true;
             self.stream_stop_reason = "eos".to_string();
-            return None;
+            return Ok(None);
         }
 
         if !self.stop_sequences.is_empty() {
@@ -2243,7 +2258,7 @@ impl FlareEngine {
                         self.last_decode_ms = now_ms() - self.stream_decode_start_ms;
                         self.stream_done = true;
                         self.stream_stop_reason = "stop_sequence".to_string();
-                        return None;
+                        return Ok(None);
                     }
                 }
             }
@@ -2256,7 +2271,7 @@ impl FlareEngine {
 
         self.last_tokens_generated += 1;
         self.last_decode_ms = now_ms() - self.stream_decode_start_ms;
-        Some(token_id)
+        Ok(Some(token_id))
     }
 
     /// Signal the current stream to stop after the next `next_token()` call.
