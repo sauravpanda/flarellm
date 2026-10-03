@@ -1,6 +1,6 @@
 //! Emit CPU logits with explicit input IDs for comparison with an external engine.
 use flare_core::model::Model;
-use flare_loader::{gguf::GgufFile, weights::load_model_weights_with_raw};
+use flare_loader::{gguf::GgufFile, weights::load_model_weights_with_raw_opt};
 use std::{fs::File, io::BufReader};
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().collect();
@@ -11,7 +11,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let gguf = GgufFile::parse_header(&mut reader)?;
     let mut config = gguf.to_model_config()?;
     config.max_seq_len = 256;
-    let (weights, raw) = load_model_weights_with_raw(&gguf, &mut reader)?;
+    let use_raw = args.get(4).is_some_and(|x| x == "raw");
+    let (weights, raw) = load_model_weights_with_raw_opt(
+        &gguf,
+        &mut reader,
+        use_raw && config.architecture == flare_core::config::Architecture::Qwen3,
+    )?;
     let mut model = Model::new(config, weights);
     if args.get(4).is_some_and(|x| x == "raw") {
         model.set_raw_weights(raw.ok_or("missing raw weights")?);
@@ -28,7 +33,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .ok_or("no logits")?
             .0 as u32;
         steps.push(serde_json::json!({"token": token, "logits": logits.data()}));
-        if token == 2 {
+        if model.config().is_eos_token(
+            token,
+            gguf.metadata
+                .get("tokenizer.ggml.eos_token_id")
+                .and_then(|v| v.as_u32()),
+        ) {
             break;
         }
         logits = model.forward(token, ids.len() + step);

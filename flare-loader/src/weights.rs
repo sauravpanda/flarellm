@@ -284,6 +284,31 @@ fn load_layer_weights(
         ],
     )?;
 
+    let (attn_q_norm, attn_k_norm) = if config.architecture == Architecture::Qwen3 {
+        let q = find_tensor(
+            tensors,
+            &[
+                &format!("blk.{i}.attn_q_norm.weight"),
+                &format!("model.layers.{i}.self_attn.q_norm.weight"),
+            ],
+        )?;
+        let k = find_tensor(
+            tensors,
+            &[
+                &format!("blk.{i}.attn_k_norm.weight"),
+                &format!("model.layers.{i}.self_attn.k_norm.weight"),
+            ],
+        )?;
+        if q.shape() != [config.head_dim] || k.shape() != [config.head_dim] {
+            return Err(GgufError::InvalidFormat(
+                "Qwen3 Q/K normalization must have head_dim weights".into(),
+            ));
+        }
+        (Some(q), Some(k))
+    } else {
+        (None, None)
+    };
+
     // Optional attention biases (Qwen2 has these, Llama does not)
     let attn_q_bias = find_tensor(
         tensors,
@@ -392,6 +417,8 @@ fn load_layer_weights(
         w_gate,
         w_up,
         w_down,
+        attn_q_norm,
+        attn_k_norm,
         attn_q_bias,
         attn_k_bias,
         attn_v_bias,
@@ -443,6 +470,16 @@ pub fn infer_model_config_from_safetensors(
     if num_layers == 0 {
         return Err(SafeTensorsError::TensorNotFound(
             "model.layers.0.input_layernorm.weight".into(),
+        ));
+    }
+
+    if tensors
+        .keys()
+        .any(|name| name.ends_with("self_attn.q_norm.weight"))
+    {
+        return Err(SafeTensorsError::UnsupportedConfig(
+            "Qwen3 SafeTensors config inference is unsupported; use the documented Q8_0 GGUF"
+                .into(),
         ));
     }
 
@@ -598,6 +635,8 @@ fn load_st_layer_weights(
         w_gate,
         w_up,
         w_down,
+        attn_q_norm: None,
+        attn_k_norm: None,
         attn_q_bias,
         attn_k_bias,
         attn_v_bias,

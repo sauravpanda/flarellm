@@ -33,6 +33,8 @@ struct TokenizerJson {
     added_tokens: Vec<AddedToken>,
     #[serde(default)]
     pre_tokenizer: Option<serde_json::Value>,
+    #[serde(default)]
+    normalizer: Option<serde_json::Value>,
 }
 
 #[derive(Deserialize)]
@@ -40,7 +42,14 @@ struct ModelSection {
     #[serde(default)]
     vocab: HashMap<String, u32>,
     #[serde(default)]
-    merges: Vec<String>,
+    merges: Vec<MergeRule>,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum MergeRule {
+    Text(String),
+    Pair([String; 2]),
 }
 
 #[derive(Deserialize)]
@@ -56,9 +65,12 @@ struct AddedToken {
 // ---------------------------------------------------------------------------
 
 /// Explicit tokenizer.json pipelines are deliberately limited to the independently
-/// tested SmolLM2 sequence. Missing/null retains the historical whole-chunk BPE.
+/// tested SmolLM2 and Qwen3 sequences. Missing/null retains the historical whole-chunk BPE.
 enum PreTokenizer {
     Legacy,
+    Qwen3 {
+        split: regex::Regex,
+    },
     DigitsByteLevel {
         numbers: regex::Regex,
         byte_level: regex::Regex,
@@ -70,6 +82,26 @@ impl PreTokenizer {
         let Some(value) = value else {
             return Ok(Self::Legacy);
         };
+        const QWEN_SPLIT: &str = r"(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}| ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+";
+        if value["type"] == "Sequence"
+            && value["pretokenizers"].as_array().is_some_and(|p| {
+                p.len() == 2
+                    && p[0]["type"] == "Split"
+                    && p[0]["pattern"]["Regex"] == QWEN_SPLIT
+                    && p[0]["behavior"] == "Isolated"
+                    && p[0]["invert"] == false
+                    && p[1]["type"] == "ByteLevel"
+                    && p[1]["add_prefix_space"] == false
+                    && p[1]["use_regex"] == false
+            })
+        {
+            // Rust regex has no lookahead. Only the final whitespace alternative
+            // needs backtracking; the earlier newline alternative stays intact.
+            let pattern = QWEN_SPLIT.replace(r"\s+(?!\S)|\s+", r"(?P<space>\s+)");
+            let split = regex::Regex::new(&pattern)
+                .map_err(|e| TokenizerError::LoadError(e.to_string()))?;
+            return Ok(Self::Qwen3 { split });
+        }
         let supported = value["type"] == "Sequence"
             && value["pretokenizers"].as_array().is_some_and(|parts| {
                 parts.len() == 2
@@ -99,6 +131,24 @@ impl PreTokenizer {
     }
 
     fn pieces<'a>(&self, text: &'a str) -> Vec<&'a str> {
+        if let Self::Qwen3 { split } = self {
+            let mut pieces = Vec::new();
+            let mut offset = 0;
+            while let Some(captures) = split.captures_at(text, offset) {
+                let m = captures.get(0).expect("regex match");
+                let mut end = m.end();
+                if end < text.len() && captures.name("space").is_some() {
+                    if let Some((last, _)) = m.as_str().char_indices().next_back() {
+                        if last > 0 {
+                            end = m.start() + last;
+                        }
+                    }
+                }
+                pieces.push(&text[m.start()..end]);
+                offset = end;
+            }
+            return pieces;
+        }
         let Self::DigitsByteLevel {
             numbers,
             byte_level,
@@ -148,6 +198,7 @@ impl PreTokenizer {
 /// `tokenizer.json` files.
 ///
 /// Supports SmolLM2's Digits(individual_digits=true) -> ByteLevel(false, regex)
+/// and Qwen3's exact Split -> ByteLevel(false, no regex) with NFC normalization.
 /// pre-tokenizer. Other explicit pipelines return a load error; missing/null
 /// retains legacy whole-chunk byte BPE. Encoding does not insert BOS/EOS or run
 /// post-processors. See tests/fixtures/tokenizer/README.md for the tested scope.
@@ -169,7 +220,8 @@ pub struct BpeTokenizer {
     /// BOS / EOS
     bos_id: Option<u32>,
     eos_id: Option<u32>,
-    pre_tokenizer: PreTokenizer,
+    pre_tokenizer: Box<PreTokenizer>,
+    normalize_nfc: bool,
 }
 
 impl BpeTokenizer {
@@ -213,6 +265,15 @@ impl BpeTokenizer {
             serde_json::from_str(json).map_err(|e| TokenizerError::LoadError(e.to_string()))?;
 
         let pre_tokenizer = PreTokenizer::from_json(tj.pre_tokenizer.as_ref())?;
+        let normalize_nfc = match tj.normalizer.as_ref() {
+            None => false,
+            Some(value) if value["type"] == "NFC" => true,
+            Some(_) => {
+                return Err(TokenizerError::LoadError(
+                    "unsupported tokenizer normalizer".into(),
+                ))
+            }
+        };
         let vocab = tj.model.vocab;
 
         // Build reverse map
@@ -226,14 +287,14 @@ impl BpeTokenizer {
         let mut merge_ranks: HashMap<(String, String), usize> =
             HashMap::with_capacity(tj.model.merges.len());
 
-        for (rank, merge_str) in tj.model.merges.iter().enumerate() {
-            // Each merge is "tokenA tokenB"
-            // We split on the first space only (tokens themselves don't contain spaces
-            // in byte-level BPE, but be cautious).
-            if let Some(space_pos) = merge_str.find(' ') {
-                let left = &merge_str[..space_pos];
-                let right = &merge_str[space_pos + 1..];
-                let pair = (left.to_string(), right.to_string());
+        for (rank, rule) in tj.model.merges.iter().enumerate() {
+            let pair = match rule {
+                MergeRule::Text(text) => text
+                    .split_once(' ')
+                    .map(|(a, b)| (a.to_owned(), b.to_owned())),
+                MergeRule::Pair([a, b]) => Some((a.clone(), b.clone())),
+            };
+            if let Some(pair) = pair {
                 merge_ranks.insert(pair.clone(), rank);
                 merges.push(pair);
             }
@@ -249,7 +310,7 @@ impl BpeTokenizer {
             // Add to id_to_token so decoding works
             id_to_token.insert(at.id, at.content.clone());
 
-            if at.special {
+            if at.special || matches!(pre_tokenizer, PreTokenizer::Qwen3 { .. }) {
                 special_tokens.insert(at.content.clone(), at.id);
                 special_token_strings.insert(at.content.clone(), at.id);
             }
@@ -263,6 +324,9 @@ impl BpeTokenizer {
             }
         }
 
+        if matches!(pre_tokenizer, PreTokenizer::Qwen3 { .. }) {
+            eos_id = special_tokens.get("<|im_end|>").copied();
+        }
         Ok(Self {
             vocab,
             id_to_token,
@@ -272,7 +336,8 @@ impl BpeTokenizer {
             special_token_strings,
             bos_id,
             eos_id,
-            pre_tokenizer,
+            pre_tokenizer: Box::new(pre_tokenizer),
+            normalize_nfc,
         })
     }
 
@@ -296,7 +361,8 @@ impl BpeTokenizer {
             special_token_strings: HashMap::new(),
             bos_id,
             eos_id,
-            pre_tokenizer: PreTokenizer::Legacy,
+            pre_tokenizer: Box::new(PreTokenizer::Legacy),
+            normalize_nfc: false,
         }
     }
 
@@ -420,6 +486,14 @@ impl Tokenizer for BpeTokenizer {
                 continue;
             }
 
+            use unicode_normalization::UnicodeNormalization;
+            let normalized;
+            let chunk = if self.normalize_nfc {
+                normalized = chunk.nfc().collect::<String>();
+                &normalized
+            } else {
+                chunk
+            };
             for piece in self.pre_tokenizer.pieces(chunk) {
                 // BPE must never cross a pre-tokenizer boundary.
                 let initial = self.text_to_initial_tokens(piece);

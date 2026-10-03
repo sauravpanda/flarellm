@@ -1123,3 +1123,20 @@ bandwidth-bound and has clear headroom for SIMD tuning.
 | Decode (256 tok) | 48.9 |
 | Sustained (512 tok) | **45.7** |
 
+### 2026-10-02 15:52 — Qwen3 working tree based on `4cbbeab`
+
+**Hardware:** ARM64 (NEON SIMD)
+**Model:** Llama, ~162M params, 30 layers, dim=576
+**Load time:** 0.15s
+
+| Metric | tok/s |
+|---|---|
+| Decode (16 tok) | 66.7 |
+| Decode (64 tok) | 57.4 |
+| Decode (256 tok) | 55.5 |
+| Sustained (512 tok) | **54.1** |
+
+
+This run measures the existing SmolLM2 benchmark with the Qwen3 changes applied.
+It is an informational local throughput observation, not a stable regression
+gate or native answer-quality claim. Qwen3 measurements are in `QWEN3.md`.

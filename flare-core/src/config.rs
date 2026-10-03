@@ -61,6 +61,8 @@ fn default_kv_cache_bits() -> u8 {
 pub enum Architecture {
     Llama,
     Qwen2,
+    /// Dense Qwen3 with per-head Q/K RMSNorm and independent head dimensions.
+    Qwen3,
     Mistral,
     /// Phi-3 / Phi-3.5 mini — forward pass identical to Llama, different chat template.
     Phi3,
@@ -69,6 +71,13 @@ pub enum Architecture {
 }
 
 impl ModelConfig {
+    /// Recognize the configured EOS plus Qwen3's secondary end-of-text token.
+    /// The official Qwen3 generation config uses both 151645 and 151643.
+    pub fn is_eos_token(&self, token: u32, configured_eos: Option<u32>) -> bool {
+        configured_eos == Some(token)
+            || (self.architecture == Architecture::Qwen3 && token == 151643)
+    }
+
     /// Estimate total memory needed for model weights at a given quantization.
     pub fn estimate_weight_memory(&self, bits_per_weight: f32) -> usize {
         let total_params = self.estimate_param_count();
@@ -156,6 +165,18 @@ mod tests {
             num_experts: 0,
             num_experts_per_token: 0,
         }
+    }
+
+    #[test]
+    fn qwen3_stops_on_both_official_eos_tokens() {
+        let config = ModelConfig {
+            architecture: Architecture::Qwen3,
+            ..ModelConfig::default()
+        };
+        assert!(config.is_eos_token(151645, Some(151645)));
+        assert!(config.is_eos_token(151643, Some(151645)));
+        assert!(!config.is_eos_token(151644, Some(151645)));
+        assert!(!ModelConfig::default().is_eos_token(151643, Some(2)));
     }
 
     #[test]

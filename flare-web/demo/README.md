@@ -14,3 +14,7 @@ The next request reloads the configured model. Dispose releases the instance.
 
 See [the SDK guide](../README.md) for model compatibility limits and supported
 options. `advanced.html` preserves the previous experimental low-level demo.
+
+The **Use Qwen3-0.6B Q8_0** button fills pinned official model/tokenizer URLs
+and selects CPU. See [Qwen3 support](../../QWEN3.md) for the 639 MB download,
+512-token browser limit, Apache-2.0 attribution and measured results.

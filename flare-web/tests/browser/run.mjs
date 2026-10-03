@@ -16,6 +16,7 @@ const gpu = systemGpu || process.argv.includes('--gpu');
 const originalTokenizer = process.env.ORIGINAL_TOKENIZER_JSON;
 const realModel = process.env.REFERENCE_MODEL_GGUF;
 const realReference = process.env.REFERENCE_LOGITS_JSON;
+const qwen = process.env.REFERENCE_ARCHITECTURE === 'qwen3';
 const port = Number(process.env.BROWSER_PORT || 8520);
 await mkdir(output, { recursive: true });
 let browser, server, context, page;
@@ -31,7 +32,7 @@ try {
   const reference = JSON.parse(await readFile(resolve(consumer, 'tokenizer-parity/reference.json'), 'utf8'));
   assert.equal(createHash('sha256').update(await readFile(resolve(consumer, 'tokenizer-parity/smollm2-reduced.json'))).digest('hex'), reference.fixtureSha256, 'Tokenizer parity fixture checksum');
   if (originalTokenizer) {
-    assert.equal(createHash('sha256').update(await readFile(originalTokenizer)).digest('hex'), reference.originalSha256, 'Original tokenizer checksum');
+    assert.equal(createHash('sha256').update(await readFile(originalTokenizer)).digest('hex'), qwen ? 'aeb13307a71acd8fe81861d94ad54ab689df773318809eed3cbe794b4492dae4' : reference.originalSha256, 'Original tokenizer checksum');
     await copyFile(originalTokenizer, resolve(consumer, 'original-tokenizer.json'));
   }
   if (realModel) {
@@ -65,18 +66,18 @@ try {
   await page.goto(url);
   await page.waitForFunction(() => typeof window.runCI === 'function');
   // The timeout also bounds a stuck worker or WASM request.
-  await page.evaluate(options => { window.runCI(options); }, { gpu, originalTokenizer: Boolean(originalTokenizer) });
+  await page.evaluate(options => { window.runCI(options); }, { gpu, originalTokenizer: Boolean(originalTokenizer) && !qwen });
   await page.waitForFunction(() => window.ciValidation, null, { timeout: 180000 });
   report.result = await page.evaluate(() => window.ciValidation);
   assert(report.result.passed, JSON.stringify(report.result.error));
   if (realModel) {
-    report.realReference = await page.evaluate(gpu => new Promise((resolve, reject) => {
+    report.realReference = await page.evaluate(({ gpu, qwen }) => new Promise((resolve, reject) => {
       const worker = new Worker('./rope-reference.mjs', { type: 'module' });
       const timer = setTimeout(() => { worker.terminate(); reject(new Error('Real-model reference timed out')); }, 240000);
       worker.onmessage = ({ data }) => { clearTimeout(timer); worker.terminate(); resolve(data); };
       worker.onerror = event => { clearTimeout(timer); worker.terminate(); reject(new Error(event.message)); };
-      worker.postMessage({ gpu, real: true });
-    }), gpu);
+      worker.postMessage({ gpu, real: true, qwen });
+    }), { gpu, qwen });
     assert(report.realReference.passed, JSON.stringify(report.realReference));
   }
   if (!gpu) {

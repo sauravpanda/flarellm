@@ -51,7 +51,12 @@ self.onmessage = async ({ data: { id, type, args } }: MessageEvent<WorkerRequest
           throw new Error('This GGUF uses byte-level BPE; provide its original tokenizerUrl');
         }
         if (args.backend !== undefined && args.backend !== 'cpu' && args.backend !== 'webgpu') throw new Error('Unknown backend');
-        if (args.backend === 'webgpu' && !await engine.init_gpu()) throw new Error('WebGPU initialization failed');
+        if (args.backend === 'webgpu' && !await engine.init_gpu()) {
+          const architecture = JSON.parse(engine.metadata_json)['general.architecture'];
+          throw new Error(architecture === 'qwen3'
+            ? 'Qwen3 WebGPU execution is unsupported; select backend: cpu for Q/K normalization'
+            : 'WebGPU initialization failed');
+        }
         // Cache only successfully parsed models. Cache failures surface to callers.
         if (cache) await cache.put(args.modelUrl, new Response(bytes));
       } else if (type === 'reset') { engine?.reset(); }

@@ -43,6 +43,8 @@ pub fn make_model() -> Model {
         w_gate: Tensor::from_vec(w(inter * dim), &[inter * dim]).unwrap(),
         w_up: Tensor::from_vec(w(inter * dim), &[inter * dim]).unwrap(),
         w_down: Tensor::from_vec(w(dim * inter), &[dim * inter]).unwrap(),
+        attn_q_norm: None,
+        attn_k_norm: None,
         attn_q_bias: None,
         attn_k_bias: None,
         attn_v_bias: None,

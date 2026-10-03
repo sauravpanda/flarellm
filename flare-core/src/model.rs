@@ -666,6 +666,41 @@ pub trait ComputeBackend: Send + Sync {
 /// Default CPU compute backend. Uses optimized scalar loops.
 pub struct CpuBackend;
 
+// Keep Qwen3 activations in f32 when multiplying packed Q8_0 weights.
+// This avoids adding platform-dependent input quantization to the model.
+struct Qwen3CpuBackend;
+impl ComputeBackend for Qwen3CpuBackend {
+    fn matmul(&self, a: &Tensor, b: &Tensor, out: &mut Tensor) {
+        CpuBackend.matmul(a, b, out);
+    }
+    fn rmsnorm(&self, x: &Tensor, w: &Tensor, eps: f32, out: &mut Tensor) {
+        CpuBackend.rmsnorm(x, w, eps, out);
+    }
+    fn rope(&self, q: &mut Tensor, k: &mut Tensor, pos: usize, dim: usize, theta: f32) {
+        CpuBackend.rope(q, k, pos, dim, theta);
+    }
+    fn softmax(&self, x: &mut Tensor) {
+        CpuBackend.softmax(x);
+    }
+    fn silu_mul(&self, gate: &Tensor, up: &Tensor, out: &mut Tensor) {
+        CpuBackend.silu_mul(gate, up, out);
+    }
+    fn supports_dequant_matmul(&self) -> bool {
+        true
+    }
+    fn batched_dequant_matmul(&self, weight: &RawWeight, input: &[f32], batch: usize) -> Vec<f32> {
+        if weight.format != WeightFormat::Q8_0 {
+            return CpuBackend.batched_dequant_matmul(weight, input, batch);
+        }
+        let cols = weight.blocks_per_row * 32;
+        assert_eq!(input.len(), batch * cols);
+        input
+            .chunks_exact(cols)
+            .flat_map(|row| matvec_q8_0_scalar(&weight.data, row, weight.num_rows, cols))
+            .collect()
+    }
+}
+
 /// Dispatch a 2-token Q8_0 matmul into the platform's best paired kernel.
 ///
 /// Centralised here so the rayon-parallel and serial loops in
@@ -1106,6 +1141,33 @@ pub struct MoeLayerWeights {
     pub experts: Vec<ExpertWeights>,
 }
 
+// Applies the same learned head_dim weights independently to every head/token,
+// before RoPE. Qwen3 norms have no bias and do not use Gemma's weight offset.
+fn normalize_attention_heads(data: &mut [f32], weight: Option<&Tensor>, head_dim: usize, eps: f32) {
+    if let Some(weight) = weight {
+        assert_eq!(weight.numel(), head_dim);
+        for head in data.chunks_exact_mut(head_dim) {
+            let inv = (head.iter().map(|x| x * x).sum::<f32>() / head_dim as f32 + eps)
+                .sqrt()
+                .recip();
+            for (x, w) in head.iter_mut().zip(weight.data()) {
+                *x = *x * inv * w;
+            }
+        }
+    }
+}
+
+fn dense_silu_mul_into(architecture: Architecture, gate: &[f32], up: &[f32], output: &mut [f32]) {
+    if architecture == Architecture::Qwen3 {
+        // The existing native NEON approximation is too coarse for this model.
+        for ((out, &g), &u) in output.iter_mut().zip(gate).zip(up) {
+            *out = (g / (1.0 + (-g).exp())) * u;
+        }
+    } else {
+        silu_mul_into(gate, up, output);
+    }
+}
+
 /// Weights for a single transformer layer.
 pub struct LayerWeights {
     pub attn_norm: Tensor,
@@ -1117,6 +1179,9 @@ pub struct LayerWeights {
     pub w_gate: Tensor,
     pub w_up: Tensor,
     pub w_down: Tensor,
+    /// Qwen3 per-head RMSNorm weights, shared across heads.
+    pub attn_q_norm: Option<Tensor>,
+    pub attn_k_norm: Option<Tensor>,
     // Optional attention biases (Qwen2 uses these, Llama does not)
     pub attn_q_bias: Option<Tensor>,
     pub attn_k_bias: Option<Tensor>,
@@ -1396,6 +1461,11 @@ impl Model {
         };
         let forward_buffers = ForwardBuffers::new(&config);
         let rope_table = RopeTable::new(config.head_dim, config.max_seq_len, config.rope_theta);
+        let backend: Box<dyn ComputeBackend> = if config.architecture == Architecture::Qwen3 {
+            Box::new(Qwen3CpuBackend)
+        } else {
+            Box::new(CpuBackend)
+        };
         Self {
             config,
             weights,
@@ -1403,7 +1473,7 @@ impl Model {
             raw_output_weight: None,
             kv_cache,
             quantized_kv_cache,
-            backend: Box::new(CpuBackend),
+            backend,
             forward_buffers,
             layers_loaded: None,
             fused_weights: None,
@@ -1503,6 +1573,11 @@ impl Model {
     /// `matvec_q8_0_preq_into` instead of f32, reducing memory bandwidth by ~4x
     /// for the output projection (often the largest single matvec).
     pub fn set_raw_output_weight(&mut self, rw: RawWeight) {
+        if self.config.architecture == Architecture::Qwen3 {
+            // Keep the shared f32 embedding/output allocation and f32 activations.
+            log::debug!("Qwen3 retains its f32 output projection");
+            return;
+        }
         self.raw_output_weight = Some(rw);
     }
 
@@ -1601,6 +1676,14 @@ impl Model {
     ///
     /// Returns the previous backend.
     pub fn set_backend(&mut self, backend: Box<dyn ComputeBackend>) -> Box<dyn ComputeBackend> {
+        let backend = if self.config.architecture == Architecture::Qwen3 {
+            if backend.supports_gpu_forward() {
+                log::warn!("Qwen3 uses CPU: resident GPU Q/K normalization is not implemented");
+            }
+            Box::new(Qwen3CpuBackend) as Box<dyn ComputeBackend>
+        } else {
+            backend
+        };
         let old = std::mem::replace(&mut self.backend, backend);
         // Cap GPU KV cache to fit within wgpu max_storage_buffer_binding_size
         // (128 MB). Each KV buffer is max_seq_len × num_kv_heads × head_dim × 4 bytes.
@@ -2041,10 +2124,10 @@ impl Model {
         // `CpuBackend` now supports `batched_dequant_matmul`, it's strictly a
         // multi-batch optimisation for prefill / speculative verify; for
         // batch = 1 the fused single-token kernels below (fused QKV Q8_0,
-        // direct Q4_K) are faster.  Keep `use_raw` as a strict "GPU-resident
-        // single-token" flag here.
+        // direct Q4_K) are faster. Qwen3 instead uses raw weights with f32
+        // activations on CPU to avoid additional input quantization.
         let use_raw = self.backend.supports_dequant_matmul()
-            && self.backend.has_gpu_weights()
+            && (self.backend.has_gpu_weights() || config.architecture == Architecture::Qwen3)
             && self.raw_weights.is_some();
 
         // Base Q8_0 eligibility: raw weights present and in Q8_0 format.
@@ -2238,6 +2321,18 @@ impl Model {
                     *v += b;
                 }
             }
+            normalize_attention_heads(
+                &mut self.forward_buffers.q_data,
+                layer.attn_q_norm.as_ref(),
+                head_dim,
+                config.rms_norm_eps,
+            );
+            normalize_attention_heads(
+                &mut self.forward_buffers.k_data,
+                layer.attn_k_norm.as_ref(),
+                head_dim,
+                config.rms_norm_eps,
+            );
             apply_rope_with_table(
                 &mut self.forward_buffers.q_data,
                 num_heads,
@@ -2525,7 +2620,8 @@ impl Model {
                         &mut self.forward_buffers.ffn_hidden,
                     );
                 } else {
-                    silu_mul_into(
+                    dense_silu_mul_into(
+                        config.architecture,
                         &self.forward_buffers.gate,
                         &self.forward_buffers.up,
                         &mut self.forward_buffers.ffn_hidden,
@@ -2825,6 +2921,18 @@ impl Model {
 
                 // RoPE: single GPU dispatch instead of 2 × seq_len CPU calls.
                 let t_rope = self.tick();
+                normalize_attention_heads(
+                    &mut q_proj,
+                    self.weights.layers[layer_idx].attn_q_norm.as_ref(),
+                    head_dim,
+                    config.rms_norm_eps,
+                );
+                normalize_attention_heads(
+                    &mut k_proj,
+                    self.weights.layers[layer_idx].attn_k_norm.as_ref(),
+                    head_dim,
+                    config.rms_norm_eps,
+                );
                 let q_roped = self.backend.batched_rope(
                     &q_proj,
                     num_heads,
@@ -2986,7 +3094,7 @@ impl Model {
                         if config.architecture == Architecture::Gemma2 {
                             gelu_mul_into(gate_t, up_t, dst);
                         } else {
-                            silu_mul_into(gate_t, up_t, dst);
+                            dense_silu_mul_into(config.architecture, gate_t, up_t, dst);
                         }
                     }
                     record_phase!(self, t_silu, silu_mul_ms);
@@ -3273,6 +3381,18 @@ impl Model {
                 }
 
                 let t_rope = self.tick();
+                normalize_attention_heads(
+                    &mut q_proj,
+                    self.weights.layers[layer_idx].attn_q_norm.as_ref(),
+                    head_dim,
+                    config.rms_norm_eps,
+                );
+                normalize_attention_heads(
+                    &mut k_proj,
+                    self.weights.layers[layer_idx].attn_k_norm.as_ref(),
+                    head_dim,
+                    config.rms_norm_eps,
+                );
                 let q_roped = self.backend.batched_rope(
                     &q_proj,
                     num_heads,
@@ -3443,7 +3563,7 @@ impl Model {
                         if config.architecture == Architecture::Gemma2 {
                             gelu_mul_into(gate_t, up_t, dst);
                         } else {
-                            silu_mul_into(gate_t, up_t, dst);
+                            dense_silu_mul_into(config.architecture, gate_t, up_t, dst);
                         }
                     }
                     record_phase!(self, t_silu, silu_mul_ms);
@@ -3680,7 +3800,7 @@ impl Model {
         // optimisation; for batch = 1 the fused Q8_0 / direct Q4_K kernels
         // below are faster.
         let use_raw = self.backend.supports_dequant_matmul()
-            && self.backend.has_gpu_weights()
+            && (self.backend.has_gpu_weights() || config.architecture == Architecture::Qwen3)
             && self.raw_weights.is_some();
 
         // Base Q8_0 eligibility: raw weights present and in Q8_0 format.
@@ -3868,6 +3988,18 @@ impl Model {
                     *v += b;
                 }
             }
+            normalize_attention_heads(
+                &mut self.forward_buffers.q_data,
+                layer.attn_q_norm.as_ref(),
+                head_dim,
+                config.rms_norm_eps,
+            );
+            normalize_attention_heads(
+                &mut self.forward_buffers.k_data,
+                layer.attn_k_norm.as_ref(),
+                head_dim,
+                config.rms_norm_eps,
+            );
             apply_rope_with_table(
                 &mut self.forward_buffers.q_data,
                 num_heads,
@@ -4123,7 +4255,8 @@ impl Model {
                     &mut self.forward_buffers.ffn_hidden,
                 );
             } else {
-                silu_mul_into(
+                dense_silu_mul_into(
+                    config.architecture,
                     &self.forward_buffers.gate,
                     &self.forward_buffers.up,
                     &mut self.forward_buffers.ffn_hidden,
@@ -4323,7 +4456,7 @@ impl Model {
         // optimisation; for batch = 1 the fused Q8_0 / direct Q4_K kernels
         // below are faster.
         let use_raw = self.backend.supports_dequant_matmul()
-            && self.backend.has_gpu_weights()
+            && (self.backend.has_gpu_weights() || config.architecture == Architecture::Qwen3)
             && self.raw_weights.is_some();
 
         // Base Q8_0 eligibility: raw weights present and in Q8_0 format.
@@ -4509,6 +4642,18 @@ impl Model {
                     *v += b;
                 }
             }
+            normalize_attention_heads(
+                &mut self.forward_buffers.q_data,
+                layer.attn_q_norm.as_ref(),
+                head_dim,
+                config.rms_norm_eps,
+            );
+            normalize_attention_heads(
+                &mut self.forward_buffers.k_data,
+                layer.attn_k_norm.as_ref(),
+                head_dim,
+                config.rms_norm_eps,
+            );
             apply_rope_with_table(
                 &mut self.forward_buffers.q_data,
                 num_heads,
@@ -4763,7 +4908,8 @@ impl Model {
                     &mut self.forward_buffers.ffn_hidden,
                 );
             } else {
-                silu_mul_into(
+                dense_silu_mul_into(
+                    config.architecture,
                     &self.forward_buffers.gate,
                     &self.forward_buffers.up,
                     &mut self.forward_buffers.ffn_hidden,
@@ -10288,6 +10434,22 @@ mod tests {
     use super::*;
 
     #[test]
+    fn qwen3_normalizes_each_head_before_rotary() {
+        let weight = Tensor::from_vec(vec![2.0, 3.0], &[2]).unwrap();
+        let mut values = [3.0, 4.0, 0.0, 10.0];
+        normalize_attention_heads(&mut values, Some(&weight), 2, 1e-6);
+        let expected = [
+            6.0 / (12.5_f32 + 1e-6).sqrt(),
+            12.0 / (12.5_f32 + 1e-6).sqrt(),
+            0.0,
+            30.0 / (50.0_f32 + 1e-6).sqrt(),
+        ];
+        for (a, b) in values.iter().zip(expected) {
+            assert!((a - b).abs() < 1e-6);
+        }
+    }
+
+    #[test]
     fn test_rmsnorm() {
         let x = vec![1.0, 2.0, 3.0, 4.0];
         let w = vec![1.0, 1.0, 1.0, 1.0];
@@ -10584,6 +10746,8 @@ mod tests {
             w_gate: Tensor::from_vec(make_weights(inter * dim), &[inter * dim]).unwrap(),
             w_up: Tensor::from_vec(make_weights(inter * dim), &[inter * dim]).unwrap(),
             w_down: Tensor::from_vec(make_weights(dim * inter), &[dim * inter]).unwrap(),
+            attn_q_norm: None,
+            attn_k_norm: None,
             attn_q_bias: None,
             attn_k_bias: None,
             attn_v_bias: None,
@@ -10688,6 +10852,8 @@ mod tests {
             w_gate: Tensor::from_vec(make_weights(inter * dim), &[inter * dim]).unwrap(),
             w_up: Tensor::from_vec(make_weights(inter * dim), &[inter * dim]).unwrap(),
             w_down: Tensor::from_vec(make_weights(dim * inter), &[dim * inter]).unwrap(),
+            attn_q_norm: None,
+            attn_k_norm: None,
             attn_q_bias: None,
             attn_k_bias: None,
             attn_v_bias: None,
@@ -10722,6 +10888,8 @@ mod tests {
                 w_gate: Tensor::from_vec(make_weights2(inter * dim), &[inter * dim]).unwrap(),
                 w_up: Tensor::from_vec(make_weights2(inter * dim), &[inter * dim]).unwrap(),
                 w_down: Tensor::from_vec(make_weights2(dim * inter), &[dim * inter]).unwrap(),
+                attn_q_norm: None,
+                attn_k_norm: None,
                 attn_q_bias: None,
                 attn_k_bias: None,
                 attn_v_bias: None,
@@ -10787,6 +10955,8 @@ mod tests {
             w_gate: Tensor::from_vec(zero_4x4.clone(), &[16]).unwrap(),
             w_up: Tensor::from_vec(zero_4x4.clone(), &[16]).unwrap(),
             w_down: Tensor::from_vec(zero_4x4, &[16]).unwrap(),
+            attn_q_norm: None,
+            attn_k_norm: None,
             attn_q_bias: None,
             attn_k_bias: None,
             attn_v_bias: None,
@@ -10876,6 +11046,8 @@ mod tests {
             w_gate: Tensor::from_vec(make_w(inter * dim), &[inter * dim]).unwrap(),
             w_up: Tensor::from_vec(make_w(inter * dim), &[inter * dim]).unwrap(),
             w_down: Tensor::from_vec(make_w(dim * inter), &[dim * inter]).unwrap(),
+            attn_q_norm: None,
+            attn_k_norm: None,
             attn_q_bias: None,
             attn_k_bias: None,
             attn_v_bias: None,
@@ -10932,6 +11104,8 @@ mod tests {
             w_gate: Tensor::from_vec(make_weights(inter * dim), &[inter * dim]).unwrap(),
             w_up: Tensor::from_vec(make_weights(inter * dim), &[inter * dim]).unwrap(),
             w_down: Tensor::from_vec(make_weights(dim * inter), &[dim * inter]).unwrap(),
+            attn_q_norm: None,
+            attn_k_norm: None,
             attn_q_bias: None,
             attn_k_bias: None,
             attn_v_bias: None,
@@ -11385,6 +11559,8 @@ mod tests {
                     .unwrap(),
                 w_down: Tensor::from_vec(make_weights(dim * intermediate), &[dim * intermediate])
                     .unwrap(),
+                attn_q_norm: None,
+                attn_k_norm: None,
                 attn_q_bias: None,
                 attn_k_bias: None,
                 attn_v_bias: None,
@@ -11539,6 +11715,8 @@ mod tests {
             w_gate: Tensor::from_vec(vec![0.0; intermediate * dim], &[intermediate * dim]).unwrap(),
             w_up: Tensor::from_vec(vec![0.0; intermediate * dim], &[intermediate * dim]).unwrap(),
             w_down: Tensor::from_vec(vec![0.0; dim * intermediate], &[dim * intermediate]).unwrap(),
+            attn_q_norm: None,
+            attn_k_norm: None,
             attn_q_bias: None,
             attn_k_bias: None,
             attn_v_bias: None,
