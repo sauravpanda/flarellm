@@ -67,7 +67,8 @@ logits. The original smaller Qwen3/GQA and Llama fixtures remain unchanged.
 ## Reproduce
 
 Use Python `tokenizers==0.22.2` and `Jinja2==3.1.6` for regeneration only. Build the
-reference client against the pinned CPU llama.cpp library, as in the existing
+reference client against the pinned CPU llama.cpp library. Keep the pinned
+`tokenizer_config.json` beside `tokenizer.json`. Follow the existing
 [reference build instructions](../../flare-loader/tests/fixtures/rope/README.md):
 
 ```sh
@@ -129,4 +130,90 @@ First decision and subsequent warm decisions are separate. SDK worker decision
 time includes tokenization/validation plus one prefill; end-to-end time includes
 worker transit. There are no decode tokens. Native RSS and observed WASM linear
 memory capacity are different measures and cannot be compared as peak process
-memory. Results and hardware notes are recorded below once runs finish.
+memory. Recorded results and hardware notes follow below.
+
+## Recorded native result (2026-10-04)
+
+[native-results.json](native-results.json) retains every attempt and candidate
+logit/score. Host: Apple M1 Max, 64 GiB RAM, macOS 15.7.3 (24G419), native aarch64
+Rust 1.92.0 release build. Reference implementation/asset hashes are above.
+
+| Metric | Original choices | Reversed choices |
+|---|---:|---:|
+| Accuracy | 6/16 (37.5%) | 4/16 (25.0%) |
+| Multiclass Brier | 1.1145 | 1.4532 |
+| ECE, 5 fixed bins | 0.5139 | 0.7344 |
+| Request failures / overflows | 0 / 0 | 0 / 0 |
+
+The original ordering gets only **2/12 clear cases** right; it selects `other` on
+most tickets. All four ambiguous/none-of-the-above cases target `other`, so success
+on those cases must not be read as reliable ambiguity detection. Reversing options
+changes 2/16 selected queues (12.5%). The prompt and data were not changed to
+improve these disappointing results.
+
+All 32 winning labels match the independent oracle. Maximum candidate-logit
+absolute error is 0.17928; maximum normalized-score absolute error is 0.01925.
+These are numerical parity observations, not quality guarantees.
+
+Fresh engine load from local disk: **0.429 s**. First decision: **28.950 s**.
+Remaining 31 decisions: median **28.301 s**, range **27.194–39.163 s**. Timing
+includes validation/tokenization and one prefill, no generation. This shared
+host was also running local builds/tests during part of the native run; timings
+are observations, not an isolated benchmark or stable speed target. The Qwen3
+correctness-first scalar Q8 prefill path is unchanged by this PR.
+
+Observed native RSS at 12m35s was **1,589,056 KiB (1.52 GiB)**. This is a process
+snapshot, not peak RSS. The platform's `/usr/bin/time -l` peak-memory collection
+was unavailable in the sandbox; its elapsed time was 930.80 s for all 32 requests
+plus load. Browser memory capacity and results are recorded separately.
+
+
+## Recorded browser result (2026-10-04)
+
+[browser-results.json](browser-results.json) retains all 32 evaluation attempts.
+Same M1 Max host; installed npm tarball, Playwright 1.58.2 Chromium
+**145.0.7632.6 arm64 headless shell**, WASM CPU with GPU disabled. The browser was
+an isolated automated instance, not the user's personal Chrome. The local WASM
+build used release Cargo with configured SIMD128 and wasm-bindgen 0.2.117, without
+wasm-opt. Full environment and measurement caveats are in
+[environment.json](environment.json).
+
+Browser accuracy, failures and order changes match native: **6/16 (37.5%)**, then
+**4/16 (25.0%)** reversed, zero failures/overflows, and 2/16 changed predictions.
+Brier is **1.1145 / 1.4532**; five-bin ECE is **0.5139 / 0.7344**. All 32 winning
+labels match the independent reference. Maximum candidate-logit error is
+**0.17928**, maximum normalized-score error **0.01926**.
+
+Fresh worker/model load from localhost: **1.303 s**. First decision: **32.118 s**.
+Warm decision median: **32.545 s**, range **31.630–34.993 s**. These timings include
+full original-tokenizer validation and a 134–146-token prefill, no autoregressive
+decode. The 32 held-out attempts are distinct from additional lifecycle requests.
+Some timing overlapped a separate small SwiftShader regression run on this shared
+host; do not treat small latency differences as controlled speed comparisons.
+
+Observed worker WASM linear-memory capacity after the first decision:
+**2,194,145,280 bytes (2.04 GiB)**, excluding JS/browser allocations. A separate
+renderer RSS snapshot was **3,085,712 KiB (2.94 GiB)**. Neither is peak total
+browser-process memory; download buffers, tokenizer and other browser processes
+need additional memory.
+
+The actual package passed cancellation during a live request and automatic
+reload, pre-aborted signals, reset/repeat, BUSY rejection, dispose, invalid-input
+and overflow recovery, and decision → chat → decision state isolation. The
+existing full-vocabulary real-Qwen chat checks also passed. Portable generated
+fixture maximum errors were 0.01041 logits and 0.00208 scores. Local SwiftShader
+regressions passed; they exercise existing Llama/GPU behavior and Qwen3 CPU
+fallback, **not Qwen3 GPU inference**. Hosted CI covered Rust checks/tests/Clippy,
+docs, Docker, WASM/package/types, Chromium CPU and missing-adapter rejection.
+
+The [captured routing demo](routing-demo.png) loaded and displayed all four
+scores in the real browser. It **incorrectly selected `other` (65.96%)** for
+“I was charged twice for my subscription.” (`billing`: 33.82%). That demo example
+is separate from the 16-case evaluation and is not added to its denominator.
+We retain this failure rather than changing the default text or prompt to make
+the screenshot look successful. Numerical correctness and lifecycle safety do
+not establish classification quality.
+
+The baseline and reusable evaluation are ready for a later NanoJev comparison.
+This checkpoint/prompt combination is **not ready for unattended routing**, and
+these conditional scores provide no Jev-equivalent calibration claim.

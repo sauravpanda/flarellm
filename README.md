@@ -67,6 +67,7 @@ See [`BENCHMARK_HISTORY.md`](BENCHMARK_HISTORY.md) for the full performance log.
 - GGUF and SafeTensors formats
 - Llama, Qwen2, Mistral, Phi-3, Gemma 2 architectures
 - [Qwen3-0.6B Q8_0](QWEN3.md): native/browser CPU, non-thinking text chat
+- [Experimental bounded decisions](DECISIONS.md): score 2–8 choices with one Qwen3 CPU prefill
 - Grouped-query attention (GQA)
 - Ring-buffer KV cache with Q8 and Q2 quantization options
 - Byte-level BPE tokenizer ([supported Hugging Face tokenizer.json configurations](flare-core/tests/fixtures/tokenizer/README.md))

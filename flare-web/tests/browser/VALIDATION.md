@@ -1,3 +1,26 @@
+# Typed-decision baseline validation — October 4, 2026
+
+The installed npm tarball passed real Qwen3-0.6B Q8_0 decisions in isolated
+Playwright Chromium 145.0.7632.6 arm64 (WASM CPU), plus cancellation/reload,
+reset/repeat, BUSY, disposal, input/overflow recovery, and decision/chat isolation.
+The routing demo was exercised through visible controls and its screenshot was
+inspected. It displays the model's incorrect `other` prediction for the default
+duplicate-charge text; no routing action is executed.
+
+The pinned independent llama.cpp candidate logits and normalized scores match
+within the prespecified bounds on all 32 held-out attempts. Accuracy is 6/16 in
+original order and 4/16 reversed, with zero request failures/overflows. Warm median
+latency is 32.545 s in browser and 28.301 s native; these are shared-host CPU
+observations, not speed guarantees. No Qwen3 GPU inference is claimed.
+
+See the [full recorded evaluation](../../../evaluations/decision/README.md),
+[machine-readable results](../../../evaluations/decision/browser-results.json),
+and [screenshot](../../../evaluations/decision/routing-demo.png) for scores,
+calibration caveats, memory, environment, exact prompts and reproduction commands.
+Local positive SwiftShader regressions and all hosted PR CI checks passed.
+
+---
+
 # Qwen3-0.6B validation — October 2, 2026
 
 The official Qwen3-0.6B Q8_0 file and original tokenizer are pinned in

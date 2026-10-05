@@ -94,7 +94,7 @@ try {
       // init returns the already-initialized module in this worker.
       return (await module.default()).memory.buffer.byteLength;
     });
-    await page.waitForFunction(() => window.decisionResult || window.decisionFailure, null, { timeout: 1200000 });
+    await page.waitForFunction(() => window.decisionResult || window.decisionFailure, null, { timeout: 1800000 });
     const failure = await page.evaluate(() => window.decisionFailure);
     assert(!failure, failure);
     report.decisions = await page.evaluate(() => window.decisionResult);

@@ -1,0 +1,1403 @@
+{
+  "schema": 1,
+  "referenceSha256": "edce37a801b806889136a52ffce2126a0ec0e5615bf0a44f716b497aea7527f7",
+  "backend": "browser WASM CPU",
+  "browser": "145.0.7632.6",
+  "wasmCapacityBytes": 2194145280,
+  "loadMs": 1303.3999999761581,
+  "baseline": {
+    "n": 16,
+    "correct": 6,
+    "accuracy": 0.375,
+    "failures": 0,
+    "failureRate": 0.0,
+    "overflowRate": 0.0,
+    "brier": 1.1144852146622173,
+    "ece5Completed": 0.5139082093672993,
+    "completed": 16
+  },
+  "reversed": {
+    "n": 16,
+    "correct": 4,
+    "accuracy": 0.25,
+    "failures": 0,
+    "failureRate": 0.0,
+    "overflowRate": 0.0,
+    "brier": 1.453249233488707,
+    "ece5Completed": 0.7344478272380192,
+    "completed": 16
+  },
+  "byKind": {
+    "clear": {
+      "n": 12,
+      "correct": 2,
+      "accuracy": 0.16666666666666666,
+      "failures": 0,
+      "failureRate": 0.0,
+      "overflowRate": 0.0,
+      "brier": 1.4715920278088774,
+      "ece5Completed": 0.7303367200817835,
+      "completed": 12
+    },
+    "ambiguous": {
+      "n": 2,
+      "correct": 2,
+      "accuracy": 1.0,
+      "failures": 0,
+      "failureRate": 0.0,
+      "overflowRate": 0.0,
+      "brier": 0.07416088989538006,
+      "ece5Completed": 0.19838420458160672,
+      "completed": 2
+    },
+    "none-of-the-above": {
+      "n": 2,
+      "correct": 2,
+      "accuracy": 1.0,
+      "failures": 0,
+      "failureRate": 0.0,
+      "overflowRate": 0.0,
+      "brier": 0.012168660549092826,
+      "ece5Completed": 0.07237044097070022,
+      "completed": 2
+    }
+  },
+  "optionOrder": {
+    "changed": 2,
+    "n": 16,
+    "fraction": 0.125,
+    "note": "Reversal changes both option order and label assignment; their effects are not separately identified."
+  },
+  "referenceParity": {
+    "maxLogitError": 0.1792755000000028,
+    "maxScoreError": 0.01925229880190249,
+    "winnerMatches": 32,
+    "attempts": 32
+  },
+  "latencyMs": {
+    "first": 32118.100000023842,
+    "warmMedian": 32545.299999952316,
+    "warmMin": 31629.600000023842,
+    "warmMax": 34993.39999997616
+  },
+  "caveats": [
+    "Synthetic n=16, repeated in two orders; not 32 independent examples or real-world accuracy.",
+    "Multiclass Brier is sum over classes (0..2); failures receive worst-case 2 and count incorrect.",
+    "ECE uses five equal-width bins on completed predictions only; report coverage alongside it. No calibration fitted.",
+    "No quality tuning on held-out cases. Other is an ordinary candidate, not a confidence threshold."
+  ],
+  "records": [
+    {
+      "id": "b1",
+      "order": 0,
+      "elapsedMs": 32118.100000023842,
+      "result": {
+        "choice": "billing",
+        "index": 0,
+        "scores": [
+          {
+            "choice": "billing",
+            "label": "A",
+            "tokenId": 32,
+            "logit": 32.95029,
+            "score": 0.5107570595894597
+          },
+          {
+            "choice": "technical",
+            "label": "B",
+            "tokenId": 33,
+            "logit": 27.393995,
+            "score": 0.0019730856964920796
+          },
+          {
+            "choice": "account",
+            "label": "C",
+            "tokenId": 34,
+            "logit": 23.155502,
+            "score": 2.847028677134114e-05
+          },
+          {
+            "choice": "other",
+            "label": "D",
+            "tokenId": 35,
+            "logit": 32.903156,
+            "score": 0.4872413844272767
+          }
+        ],
+        "promptVersion": "qwen3-choice-v1",
+        "decisionMs": 32118
+      }
+    },
+    {
+      "id": "b2",
+      "order": 0,
+      "elapsedMs": 32153.200000047684,
+      "result": {
+        "choice": "other",
+        "index": 3,
+        "scores": [
+          {
+            "choice": "billing",
+            "label": "A",
+            "tokenId": 32,
+            "logit": 33.850418,
+            "score": 0.4712047979100733
+          },
+          {
+            "choice": "technical",
+            "label": "B",
+            "tokenId": 33,
+            "logit": 27.321072,
+            "score": 0.0006879400018554037
+          },
+          {
+            "choice": "account",
+            "label": "C",
+            "tokenId": 34,
+            "logit": 24.269367,
+            "score": 3.2524616089793875e-05
+          },
+          {
+            "choice": "other",
+            "label": "D",
+            "tokenId": 35,
+            "logit": 33.964363,
+            "score": 0.5280747374719815
+          }
+        ],
+        "promptVersion": "qwen3-choice-v1",
+        "decisionMs": 32152.5
+      }
+    },
+    {
+      "id": "b3",
+      "order": 0,
+      "elapsedMs": 32065.199999928474,
+      "result": {
+        "choice": "other",
+        "index": 3,
+        "scores": [
+          {
+            "choice": "billing",
+            "label": "A",
+            "tokenId": 32,
+            "logit": 32.401794,
+            "score": 0.2880019993774246
+          },
+          {
+            "choice": "technical",
+            "label": "B",
+            "tokenId": 33,
+            "logit": 27.549555,
+            "score": 0.0022495446402651387
+          },
+          {
+            "choice": "account",
+            "label": "C",
+            "tokenId": 34,
+            "logit": 24.954065,
+            "score": 0.0001678370537643369
+          },
+          {
+            "choice": "other",
+            "label": "D",
+            "tokenId": 35,
+            "logit": 33.3035,
+            "score": 0.7095806189285458
+          }
+        ],
+        "promptVersion": "qwen3-choice-v1",
+        "decisionMs": 32056
+      }
+    },
+    {
+      "id": "b4",
+      "order": 0,
+      "elapsedMs": 32052.900000095367,
+      "result": {
+        "choice": "billing",
+        "index": 0,
+        "scores": [
+          {
+            "choice": "billing",
+            "label": "A",
+            "tokenId": 32,
+            "logit": 33.30587,
+            "score": 0.5705138913300412
+          },
+          {
+            "choice": "technical",
+            "label": "B",
+            "tokenId": 33,
+            "logit": 27.962162,
+            "score": 0.002725984044214253
+          },
+          {
+            "choice": "account",
+            "label": "C",
+            "tokenId": 34,
+            "logit": 24.241398,
+            "score": 6.60109474612779e-05
+          },
+          {
+            "choice": "other",
+            "label": "D",
+            "tokenId": 35,
+            "logit": 33.0154,
+            "score": 0.4266941136782833
+          }
+        ],
+        "promptVersion": "qwen3-choice-v1",
+        "decisionMs": 32051.900000095367
+      }
+    },
+    {
+      "id": "t1",
+      "order": 0,
+      "elapsedMs": 32503.900000095367,
+      "result": {
+        "choice": "other",
+        "index": 3,
+        "scores": [
+          {
+            "choice": "billing",
+            "label": "A",
+            "tokenId": 32,
+            "logit": 28.187595,
+            "score": 0.007290646363718945
+          },
+          {
+            "choice": "technical",
+            "label": "B",
+            "tokenId": 33,
+            "logit": 29.23999,
+            "score": 0.020884078480517158
+          },
+          {
+            "choice": "account",
+            "label": "C",
+            "tokenId": 34,
+            "logit": 25.534092,
+            "score": 0.0005132915809073356
+          },
+          {
+            "choice": "other",
+            "label": "D",
+            "tokenId": 35,
+            "logit": 33.07965,
+            "score": 0.9713119835748566
+          }
+        ],
+        "promptVersion": "qwen3-choice-v1",
+        "decisionMs": 32503.700000047684
+      }
+    },
+    {
+      "id": "t2",
+      "order": 0,
+      "elapsedMs": 33056.40000009537,
+      "result": {
+        "choice": "other",
+        "index": 3,
+        "scores": [
+          {
+            "choice": "billing",
+            "label": "A",
+            "tokenId": 32,
+            "logit": 27.729145,
+            "score": 0.0035994177107326808
+          },
+          {
+            "choice": "technical",
+            "label": "B",
+            "tokenId": 33,
+            "logit": 28.54697,
+            "score": 0.008154724093867322
+          },
+          {
+            "choice": "account",
+            "label": "C",
+            "tokenId": 34,
+            "logit": 25.886978,
+            "score": 0.0005704128881101119
+          },
+          {
+            "choice": "other",
+            "label": "D",
+            "tokenId": 35,
+            "logit": 33.343727,
+            "score": 0.9876754453072899
+          }
+        ],
+        "promptVersion": "qwen3-choice-v1",
+        "decisionMs": 33056.300000071526
+      }
+    },
+    {
+      "id": "t3",
+      "order": 0,
+      "elapsedMs": 32841,
+      "result": {
+        "choice": "other",
+        "index": 3,
+        "scores": [
+          {
+            "choice": "billing",
+            "label": "A",
+            "tokenId": 32,
+            "logit": 27.86399,
+            "score": 0.004715572243405478
+          },
+          {
+            "choice": "technical",
+            "label": "B",
+            "tokenId": 33,
+            "logit": 28.675262,
+            "score": 0.010613660976972602
+          },
+          {
+            "choice": "account",
+            "label": "C",
+            "tokenId": 34,
+            "logit": 25.776268,
+            "score": 0.0005845853403342883
+          },
+          {
+            "choice": "other",
+            "label": "D",
+            "tokenId": 35,
+            "logit": 33.204834,
+            "score": 0.9840861814392875
+          }
+        ],
+        "promptVersion": "qwen3-choice-v1",
+        "decisionMs": 32840.800000071526
+      }
+    },
+    {
+      "id": "t4",
+      "order": 0,
+      "elapsedMs": 32361.800000071526,
+      "result": {
+        "choice": "other",
+        "index": 3,
+        "scores": [
+          {
+            "choice": "billing",
+            "label": "A",
+            "tokenId": 32,
+            "logit": 29.992798,
+            "score": 0.04962335112239882
+          },
+          {
+            "choice": "technical",
+            "label": "B",
+            "tokenId": 33,
+            "logit": 28.904308,
+            "score": 0.01670940908844644
+          },
+          {
+            "choice": "account",
+            "label": "C",
+            "tokenId": 34,
+            "logit": 26.246666,
+            "score": 0.0011715522919649097
+          },
+          {
+            "choice": "other",
+            "label": "D",
+            "tokenId": 35,
+            "logit": 32.9262,
+            "score": 0.9324956874971899
+          }
+        ],
+        "promptVersion": "qwen3-choice-v1",
+        "decisionMs": 32361.800000071526
+      }
+    },
+    {
+      "id": "a1",
+      "order": 0,
+      "elapsedMs": 32478,
+      "result": {
+        "choice": "other",
+        "index": 3,
+        "scores": [
+          {
+            "choice": "billing",
+            "label": "A",
+            "tokenId": 32,
+            "logit": 29.699955,
+            "score": 0.01277249163835897
+          },
+          {
+            "choice": "technical",
+            "label": "B",
+            "tokenId": 33,
+            "logit": 28.585705,
+            "score": 0.004191436789981009
+          },
+          {
+            "choice": "account",
+            "label": "C",
+            "tokenId": 34,
+            "logit": 26.454338,
+            "score": 0.0004974187037525503
+          },
+          {
+            "choice": "other",
+            "label": "D",
+            "tokenId": 35,
+            "logit": 34.0428,
+            "score": 0.9825386528679074
+          }
+        ],
+        "promptVersion": "qwen3-choice-v1",
+        "decisionMs": 32477.800000071526
+      }
+    },
+    {
+      "id": "a2",
+      "order": 0,
+      "elapsedMs": 33565.300000071526,
+      "result": {
+        "choice": "other",
+        "index": 3,
+        "scores": [
+          {
+            "choice": "billing",
+            "label": "A",
+            "tokenId": 32,
+            "logit": 30.207571,
+            "score": 0.062286468242333304
+          },
+          {
+            "choice": "technical",
+            "label": "B",
+            "tokenId": 33,
+            "logit": 27.520567,
+            "score": 0.00424074986972161
+          },
+          {
+            "choice": "account",
+            "label": "C",
+            "tokenId": 34,
+            "logit": 24.485321,
+            "score": 0.0002038224951530001
+          },
+          {
+            "choice": "other",
+            "label": "D",
+            "tokenId": 35,
+            "logit": 32.91452,
+            "score": 0.9332689593927921
+          }
+        ],
+        "promptVersion": "qwen3-choice-v1",
+        "decisionMs": 33565.200000047684
+      }
+    },
+    {
+      "id": "a3",
+      "order": 0,
+      "elapsedMs": 31814.199999928474,
+      "result": {
+        "choice": "other",
+        "index": 3,
+        "scores": [
+          {
+            "choice": "billing",
+            "label": "A",
+            "tokenId": 32,
+            "logit": 31.14299,
+            "score": 0.08807904503524168
+          },
+          {
+            "choice": "technical",
+            "label": "B",
+            "tokenId": 33,
+            "logit": 28.933022,
+            "score": 0.009662632082752826
+          },
+          {
+            "choice": "account",
+            "label": "C",
+            "tokenId": 34,
+            "logit": 26.704805,
+            "score": 0.001040862724624183
+          },
+          {
+            "choice": "other",
+            "label": "D",
+            "tokenId": 35,
+            "logit": 33.468502,
+            "score": 0.9012174601573814
+          }
+        ],
+        "promptVersion": "qwen3-choice-v1",
+        "decisionMs": 31814
+      }
+    },
+    {
+      "id": "a4",
+      "order": 0,
+      "elapsedMs": 31813.900000095367,
+      "result": {
+        "choice": "other",
+        "index": 3,
+        "scores": [
+          {
+            "choice": "billing",
+            "label": "A",
+            "tokenId": 32,
+            "logit": 29.63879,
+            "score": 0.018318186743959512
+          },
+          {
+            "choice": "technical",
+            "label": "B",
+            "tokenId": 33,
+            "logit": 29.006302,
+            "score": 0.009731870583125034
+          },
+          {
+            "choice": "account",
+            "label": "C",
+            "tokenId": 34,
+            "logit": 26.4279,
+            "score": 0.0007386024652801803
+          },
+          {
+            "choice": "other",
+            "label": "D",
+            "tokenId": 35,
+            "logit": 33.60944,
+            "score": 0.9712113402076353
+          }
+        ],
+        "promptVersion": "qwen3-choice-v1",
+        "decisionMs": 31813.800000071526
+      }
+    },
+    {
+      "id": "o1",
+      "order": 0,
+      "elapsedMs": 32039.299999952316,
+      "result": {
+        "choice": "other",
+        "index": 3,
+        "scores": [
+          {
+            "choice": "billing",
+            "label": "A",
+            "tokenId": 32,
+            "logit": 31.878584,
+            "score": 0.101860851450069
+          },
+          {
+            "choice": "technical",
+            "label": "B",
+            "tokenId": 33,
+            "logit": 27.402943,
+            "score": 0.0011594739719759575
+          },
+          {
+            "choice": "account",
+            "label": "C",
+            "tokenId": 34,
+            "logit": 25.494236,
+            "score": 0.00017191755728220937
+          },
+          {
+            "choice": "other",
+            "label": "D",
+            "tokenId": 35,
+            "logit": 34.053818,
+            "score": 0.896807757020673
+          }
+        ],
+        "promptVersion": "qwen3-choice-v1",
+        "decisionMs": 32039.100000023842
+      }
+    },
+    {
+      "id": "o2",
+      "order": 0,
+      "elapsedMs": 31629.600000023842,
+      "result": {
+        "choice": "other",
+        "index": 3,
+        "scores": [
+          {
+            "choice": "billing",
+            "label": "A",
+            "tokenId": 32,
+            "logit": 30.868366,
+            "score": 0.03978565936693659
+          },
+          {
+            "choice": "technical",
+            "label": "B",
+            "tokenId": 33,
+            "logit": 27.632414,
+            "score": 0.0015644810203844497
+          },
+          {
+            "choice": "account",
+            "label": "C",
+            "tokenId": 34,
+            "logit": 25.567886,
+            "score": 0.00019849857475242783
+          },
+          {
+            "choice": "other",
+            "label": "D",
+            "tokenId": 35,
+            "logit": 34.05018,
+            "score": 0.9584513610379265
+          }
+        ],
+        "promptVersion": "qwen3-choice-v1",
+        "decisionMs": 31629.399999976158
+      }
+    },
+    {
+      "id": "o3",
+      "order": 0,
+      "elapsedMs": 34591.5,
+      "result": {
+        "choice": "other",
+        "index": 3,
+        "scores": [
+          {
+            "choice": "billing",
+            "label": "A",
+            "tokenId": 32,
+            "logit": 31.83295,
+            "score": 0.1628313840904162
+          },
+          {
+            "choice": "technical",
+            "label": "B",
+            "tokenId": 33,
+            "logit": 28.944427,
+            "score": 0.00906292676290183
+          },
+          {
+            "choice": "account",
+            "label": "C",
+            "tokenId": 34,
+            "logit": 25.661934,
+            "score": 0.00034017282518227843
+          },
+          {
+            "choice": "other",
+            "label": "D",
+            "tokenId": 35,
+            "logit": 33.458965,
+            "score": 0.8277655163214996
+          }
+        ],
+        "promptVersion": "qwen3-choice-v1",
+        "decisionMs": 34591.5
+      }
+    },
+    {
+      "id": "o4",
+      "order": 0,
+      "elapsedMs": 34986.59999990463,
+      "result": {
+        "choice": "other",
+        "index": 3,
+        "scores": [
+          {
+            "choice": "billing",
+            "label": "A",
+            "tokenId": 32,
+            "logit": 32.25197,
+            "score": 0.2029447632008838
+          },
+          {
+            "choice": "technical",
+            "label": "B",
+            "tokenId": 33,
+            "logit": 30.00319,
+            "score": 0.02141634772292402
+          },
+          {
+            "choice": "account",
+            "label": "C",
+            "tokenId": 34,
+            "logit": 25.183498,
+            "score": 0.00017281456090525928
+          },
+          {
+            "choice": "other",
+            "label": "D",
+            "tokenId": 35,
+            "logit": 33.5925,
+            "score": 0.7754660745152869
+          }
+        ],
+        "promptVersion": "qwen3-choice-v1",
+        "decisionMs": 34986.5
+      }
+    },
+    {
+      "id": "b1",
+      "order": 1,
+      "elapsedMs": 32326.400000095367,
+      "result": {
+        "choice": "other",
+        "index": 0,
+        "scores": [
+          {
+            "choice": "other",
+            "label": "A",
+            "tokenId": 32,
+            "logit": 34.811287,
+            "score": 0.9209536922568425
+          },
+          {
+            "choice": "account",
+            "label": "B",
+            "tokenId": 33,
+            "logit": 30.248142,
+            "score": 0.009604820148840726
+          },
+          {
+            "choice": "technical",
+            "label": "C",
+            "tokenId": 34,
+            "logit": 25.09333,
+            "score": 5.543485187393566e-05
+          },
+          {
+            "choice": "billing",
+            "label": "D",
+            "tokenId": 35,
+            "logit": 32.225563,
+            "score": 0.0693860527424426
+          }
+        ],
+        "promptVersion": "qwen3-choice-v1",
+        "decisionMs": 32326.300000071526
+      }
+    },
+    {
+      "id": "b2",
+      "order": 1,
+      "elapsedMs": 32678,
+      "result": {
+        "choice": "other",
+        "index": 0,
+        "scores": [
+          {
+            "choice": "other",
+            "label": "A",
+            "tokenId": 32,
+            "logit": 35.26258,
+            "score": 0.9930787713629511
+          },
+          {
+            "choice": "account",
+            "label": "B",
+            "tokenId": 33,
+            "logit": 29.397093,
+            "score": 0.002816012663255275
+          },
+          {
+            "choice": "technical",
+            "label": "C",
+            "tokenId": 34,
+            "logit": 23.912182,
+            "score": 1.1683367499938007e-05
+          },
+          {
+            "choice": "billing",
+            "label": "D",
+            "tokenId": 35,
+            "logit": 29.77118,
+            "score": 0.004093532606293486
+          }
+        ],
+        "promptVersion": "qwen3-choice-v1",
+        "decisionMs": 32677.900000095367
+      }
+    },
+    {
+      "id": "b3",
+      "order": 1,
+      "elapsedMs": 32613.799999952316,
+      "result": {
+        "choice": "other",
+        "index": 0,
+        "scores": [
+          {
+            "choice": "other",
+            "label": "A",
+            "tokenId": 32,
+            "logit": 34.56072,
+            "score": 0.9508603975633771
+          },
+          {
+            "choice": "account",
+            "label": "B",
+            "tokenId": 33,
+            "logit": 31.116138,
+            "score": 0.03034971655440567
+          },
+          {
+            "choice": "technical",
+            "label": "C",
+            "tokenId": 34,
+            "logit": 25.177387,
+            "score": 7.998117036337538e-05
+          },
+          {
+            "choice": "billing",
+            "label": "D",
+            "tokenId": 35,
+            "logit": 30.632404,
+            "score": 0.01870990471185379
+          }
+        ],
+        "promptVersion": "qwen3-choice-v1",
+        "decisionMs": 32613.599999904633
+      }
+    },
+    {
+      "id": "b4",
+      "order": 1,
+      "elapsedMs": 32706.399999976158,
+      "result": {
+        "choice": "other",
+        "index": 0,
+        "scores": [
+          {
+            "choice": "other",
+            "label": "A",
+            "tokenId": 32,
+            "logit": 35.06122,
+            "score": 0.9770617939105442
+          },
+          {
+            "choice": "account",
+            "label": "B",
+            "tokenId": 33,
+            "logit": 29.931612,
+            "score": 0.005783121863825372
+          },
+          {
+            "choice": "technical",
+            "label": "C",
+            "tokenId": 34,
+            "logit": 24.944775,
+            "score": 3.9482658240592125e-05
+          },
+          {
+            "choice": "billing",
+            "label": "D",
+            "tokenId": 35,
+            "logit": 31.016659,
+            "score": 0.017115601567389872
+          }
+        ],
+        "promptVersion": "qwen3-choice-v1",
+        "decisionMs": 32706.299999952316
+      }
+    },
+    {
+      "id": "t1",
+      "order": 1,
+      "elapsedMs": 32766.399999976158,
+      "result": {
+        "choice": "other",
+        "index": 0,
+        "scores": [
+          {
+            "choice": "other",
+            "label": "A",
+            "tokenId": 32,
+            "logit": 34.44681,
+            "score": 0.996984034085396
+          },
+          {
+            "choice": "account",
+            "label": "B",
+            "tokenId": 33,
+            "logit": 28.398531,
+            "score": 0.0023547958597066533
+          },
+          {
+            "choice": "technical",
+            "label": "C",
+            "tokenId": 34,
+            "logit": 25.913492,
+            "score": 0.0001962070661645705
+          },
+          {
+            "choice": "billing",
+            "label": "D",
+            "tokenId": 35,
+            "logit": 26.77628,
+            "score": 0.0004649629887328986
+          }
+        ],
+        "promptVersion": "qwen3-choice-v1",
+        "decisionMs": 32766.200000047684
+      }
+    },
+    {
+      "id": "t2",
+      "order": 1,
+      "elapsedMs": 33289.10000002384,
+      "result": {
+        "choice": "other",
+        "index": 0,
+        "scores": [
+          {
+            "choice": "other",
+            "label": "A",
+            "tokenId": 32,
+            "logit": 34.12294,
+            "score": 0.9967944288637695
+          },
+          {
+            "choice": "account",
+            "label": "B",
+            "tokenId": 33,
+            "logit": 27.938782,
+            "score": 0.0020552268554484216
+          },
+          {
+            "choice": "technical",
+            "label": "C",
+            "tokenId": 34,
+            "logit": 25.24699,
+            "score": 0.0001392610150482634
+          },
+          {
+            "choice": "billing",
+            "label": "D",
+            "tokenId": 35,
+            "logit": 27.229418,
+            "score": 0.0010110832657338146
+          }
+        ],
+        "promptVersion": "qwen3-choice-v1",
+        "decisionMs": 33288.89999997616
+      }
+    },
+    {
+      "id": "t3",
+      "order": 1,
+      "elapsedMs": 33992.10000002384,
+      "result": {
+        "choice": "other",
+        "index": 0,
+        "scores": [
+          {
+            "choice": "other",
+            "label": "A",
+            "tokenId": 32,
+            "logit": 34.127953,
+            "score": 0.9844745627658374
+          },
+          {
+            "choice": "account",
+            "label": "B",
+            "tokenId": 33,
+            "logit": 29.671398,
+            "score": 0.011422140799200575
+          },
+          {
+            "choice": "technical",
+            "label": "C",
+            "tokenId": 34,
+            "logit": 26.195137,
+            "score": 0.00035320470413297716
+          },
+          {
+            "choice": "billing",
+            "label": "D",
+            "tokenId": 35,
+            "logit": 28.557625,
+            "score": 0.0037500917308289014
+          }
+        ],
+        "promptVersion": "qwen3-choice-v1",
+        "decisionMs": 33992
+      }
+    },
+    {
+      "id": "t4",
+      "order": 1,
+      "elapsedMs": 32545.299999952316,
+      "result": {
+        "choice": "other",
+        "index": 0,
+        "scores": [
+          {
+            "choice": "other",
+            "label": "A",
+            "tokenId": 32,
+            "logit": 34.596928,
+            "score": 0.9934564245507206
+          },
+          {
+            "choice": "account",
+            "label": "B",
+            "tokenId": 33,
+            "logit": 29.116207,
+            "score": 0.004139064021309717
+          },
+          {
+            "choice": "technical",
+            "label": "C",
+            "tokenId": 34,
+            "logit": 25.695072,
+            "score": 0.00013524527890966385
+          },
+          {
+            "choice": "billing",
+            "label": "D",
+            "tokenId": 35,
+            "logit": 28.515194,
+            "score": 0.0022692661490599938
+          }
+        ],
+        "promptVersion": "qwen3-choice-v1",
+        "decisionMs": 32545.100000023842
+      }
+    },
+    {
+      "id": "a1",
+      "order": 1,
+      "elapsedMs": 32578.899999976158,
+      "result": {
+        "choice": "other",
+        "index": 0,
+        "scores": [
+          {
+            "choice": "other",
+            "label": "A",
+            "tokenId": 32,
+            "logit": 34.866745,
+            "score": 0.993858358760353
+          },
+          {
+            "choice": "account",
+            "label": "B",
+            "tokenId": 33,
+            "logit": 29.493496,
+            "score": 0.004610543040758019
+          },
+          {
+            "choice": "technical",
+            "label": "C",
+            "tokenId": 34,
+            "logit": 25.560266,
+            "score": 9.02759850625656e-05
+          },
+          {
+            "choice": "billing",
+            "label": "D",
+            "tokenId": 35,
+            "logit": 28.330364,
+            "score": 0.0014408222138265565
+          }
+        ],
+        "promptVersion": "qwen3-choice-v1",
+        "decisionMs": 32578.800000071526
+      }
+    },
+    {
+      "id": "a2",
+      "order": 1,
+      "elapsedMs": 33817.89999997616,
+      "result": {
+        "choice": "other",
+        "index": 0,
+        "scores": [
+          {
+            "choice": "other",
+            "label": "A",
+            "tokenId": 32,
+            "logit": 34.584633,
+            "score": 0.9950395630183904
+          },
+          {
+            "choice": "account",
+            "label": "B",
+            "tokenId": 33,
+            "logit": 29.109291,
+            "score": 0.004168018326192675
+          },
+          {
+            "choice": "technical",
+            "label": "C",
+            "tokenId": 34,
+            "logit": 24.588648,
+            "score": 4.535646598722793e-05
+          },
+          {
+            "choice": "billing",
+            "label": "D",
+            "tokenId": 35,
+            "logit": 27.390244,
+            "score": 0.0007470621894296424
+          }
+        ],
+        "promptVersion": "qwen3-choice-v1",
+        "decisionMs": 33817.799999952316
+      }
+    },
+    {
+      "id": "a3",
+      "order": 1,
+      "elapsedMs": 32169.5,
+      "result": {
+        "choice": "other",
+        "index": 0,
+        "scores": [
+          {
+            "choice": "other",
+            "label": "A",
+            "tokenId": 32,
+            "logit": 34.86258,
+            "score": 0.9673437396475972
+          },
+          {
+            "choice": "account",
+            "label": "B",
+            "tokenId": 33,
+            "logit": 31.366983,
+            "score": 0.029340181841963114
+          },
+          {
+            "choice": "technical",
+            "label": "C",
+            "tokenId": 34,
+            "logit": 26.565372,
+            "score": 0.00024107360523456005
+          },
+          {
+            "choice": "billing",
+            "label": "D",
+            "tokenId": 35,
+            "logit": 29.111332,
+            "score": 0.0030750049052051033
+          }
+        ],
+        "promptVersion": "qwen3-choice-v1",
+        "decisionMs": 32169.100000023842
+      }
+    },
+    {
+      "id": "a4",
+      "order": 1,
+      "elapsedMs": 32044.899999976158,
+      "result": {
+        "choice": "other",
+        "index": 0,
+        "scores": [
+          {
+            "choice": "other",
+            "label": "A",
+            "tokenId": 32,
+            "logit": 34.62857,
+            "score": 0.9972992582752972
+          },
+          {
+            "choice": "account",
+            "label": "B",
+            "tokenId": 33,
+            "logit": 28.519566,
+            "score": 0.0022167583128980266
+          },
+          {
+            "choice": "technical",
+            "label": "C",
+            "tokenId": 34,
+            "logit": 24.982805,
+            "score": 6.452423296276948e-05
+          },
+          {
+            "choice": "billing",
+            "label": "D",
+            "tokenId": 35,
+            "logit": 26.85473,
+            "score": 0.0004194591788421786
+          }
+        ],
+        "promptVersion": "qwen3-choice-v1",
+        "decisionMs": 32044.700000047684
+      }
+    },
+    {
+      "id": "o1",
+      "order": 1,
+      "elapsedMs": 32231.899999976158,
+      "result": {
+        "choice": "other",
+        "index": 0,
+        "scores": [
+          {
+            "choice": "other",
+            "label": "A",
+            "tokenId": 32,
+            "logit": 35.275784,
+            "score": 0.9976179975974782
+          },
+          {
+            "choice": "account",
+            "label": "B",
+            "tokenId": 33,
+            "logit": 28.493217,
+            "score": 0.0011306632014958314
+          },
+          {
+            "choice": "technical",
+            "label": "C",
+            "tokenId": 34,
+            "logit": 23.989601,
+            "score": 1.251519255267408e-05
+          },
+          {
+            "choice": "billing",
+            "label": "D",
+            "tokenId": 35,
+            "logit": 28.584576,
+            "score": 0.001238824008473487
+          }
+        ],
+        "promptVersion": "qwen3-choice-v1",
+        "decisionMs": 32231.800000071526
+      }
+    },
+    {
+      "id": "o2",
+      "order": 1,
+      "elapsedMs": 31947.600000023842,
+      "result": {
+        "choice": "other",
+        "index": 0,
+        "scores": [
+          {
+            "choice": "other",
+            "label": "A",
+            "tokenId": 32,
+            "logit": 34.799408,
+            "score": 0.9991077886195834
+          },
+          {
+            "choice": "account",
+            "label": "B",
+            "tokenId": 33,
+            "logit": 27.349216,
+            "score": 0.0005808116085731945
+          },
+          {
+            "choice": "technical",
+            "label": "C",
+            "tokenId": 34,
+            "logit": 23.648811,
+            "score": 1.4353894938666488e-05
+          },
+          {
+            "choice": "billing",
+            "label": "D",
+            "tokenId": 35,
+            "logit": 26.678677,
+            "score": 0.00029704587690476756
+          }
+        ],
+        "promptVersion": "qwen3-choice-v1",
+        "decisionMs": 31947.5
+      }
+    },
+    {
+      "id": "o3",
+      "order": 1,
+      "elapsedMs": 34993.39999997616,
+      "result": {
+        "choice": "other",
+        "index": 0,
+        "scores": [
+          {
+            "choice": "other",
+            "label": "A",
+            "tokenId": 32,
+            "logit": 35.24617,
+            "score": 0.9981908025829815
+          },
+          {
+            "choice": "account",
+            "label": "B",
+            "tokenId": 33,
+            "logit": 28.105137,
+            "score": 0.0007905007056923333
+          },
+          {
+            "choice": "technical",
+            "label": "C",
+            "tokenId": 34,
+            "logit": 24.62265,
+            "score": 2.429279549043687e-05
+          },
+          {
+            "choice": "billing",
+            "label": "D",
+            "tokenId": 35,
+            "logit": 28.334614,
+            "score": 0.0009944039158355708
+          }
+        ],
+        "promptVersion": "qwen3-choice-v1",
+        "decisionMs": 34993.200000047684
+      }
+    },
+    {
+      "id": "o4",
+      "order": 1,
+      "elapsedMs": 34865.90000009537,
+      "result": {
+        "choice": "other",
+        "index": 0,
+        "scores": [
+          {
+            "choice": "other",
+            "label": "A",
+            "tokenId": 32,
+            "logit": 34.806995,
+            "score": 0.9890436219471864
+          },
+          {
+            "choice": "account",
+            "label": "B",
+            "tokenId": 33,
+            "logit": 28.862007,
+            "score": 0.0025902390973846865
+          },
+          {
+            "choice": "technical",
+            "label": "C",
+            "tokenId": 34,
+            "logit": 26.669685,
+            "score": 0.0002892188559910799
+          },
+          {
+            "choice": "billing",
+            "label": "D",
+            "tokenId": 35,
+            "logit": 29.999268,
+            "score": 0.008076920099437812
+          }
+        ],
+        "promptVersion": "qwen3-choice-v1",
+        "decisionMs": 34865.800000071526
+      }
+    }
+  ]
+}
