@@ -2,24 +2,27 @@
 import hashlib
 import random
 import struct
+import sys
 from pathlib import Path
 
 root = Path(__file__).parent
 pack = struct.pack
+decision = len(sys.argv) > 1 and sys.argv[1] == '--decision'
+vocab = 151936 if decision else 128
 
 def string(s):
     b = s.encode()
     return pack('<Q', len(b)) + b
 
 metadata = {
-    'general.architecture': 'qwen3', 'qwen3.context_length': 256,
+    'general.architecture': 'qwen3', 'qwen3.context_length': 512 if decision else 256,
     'qwen3.embedding_length': 128, 'qwen3.block_count': 2,
     'qwen3.feed_forward_length': 192, 'qwen3.attention.head_count': 4,
     'qwen3.attention.head_count_kv': 2, 'qwen3.rope.dimension_count': 64,
     'qwen3.attention.key_length': 64, 'qwen3.attention.value_length': 64,
     'qwen3.rope.freq_base': 1000000.0,
     'qwen3.attention.layer_norm_rms_epsilon': 1e-6,
-    'qwen3.vocab_size': 128, 'tokenizer.ggml.model': 'none',
+    'qwen3.vocab_size': vocab, 'tokenizer.ggml.model': 'none',
 }
 rng = random.Random(540)
 tensors = []
@@ -36,7 +39,7 @@ def tensor(name, cols, rows=None, quant=False):
     # Qwen3 GGUF retains HF split-half row order, independently consumed by llama.cpp.
     tensors.append((name, dims, 8 if quant else 0, data))
 
-tensor('token_embd.weight', 128, 128)
+tensor('token_embd.weight', 128, vocab, quant=decision)
 for layer in range(2):
     for kind in ['attn_norm', 'ffn_norm']:
         tensor(f'blk.{layer}.{kind}.weight', 128)
@@ -59,5 +62,5 @@ for name, dims, kind, data in tensors:
     header += string(name) + pack('<I',len(dims)) + pack('<'+'Q'*len(dims),*dims) + pack('<IQ',kind,len(body))
     body += data
 model = header + bytes(-len(header) % 32) + body
-(root / 'gqa.gguf').write_bytes(model)
+(Path(sys.argv[2]) if decision else root / 'gqa.gguf').write_bytes(model)
 print(hashlib.sha256(model).hexdigest())

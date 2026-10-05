@@ -66,8 +66,8 @@ recommendation. No model weights are included in the package or repository.
   generation is available, but thinking-mode behavior is not certified.
 - Q8_0/F32 GGUF tensors are supported for this architecture. Qwen3 SafeTensors
   auto-inference is rejected because config semantics cannot be inferred from
-  shapes. Q4, MoE, Qwen3.5/DeltaNet, multimodal models, typed decisions and custom
-  classifier heads are outside this change.
+  shapes. Q4, MoE, Qwen3.5/DeltaNet, multimodal models and custom classifier heads remain unsupported. An
+  experimental CPU [bounded-decision API](DECISIONS.md) is available separately.
 
 ## Reference results
 
@@ -130,5 +130,5 @@ node flare-web/tests/browser/run.mjs /tmp/flare-consumer
 Repeat with `.1.reference.json` and `.2.reference.json`; `--gpu` exercises
 SwiftShader regressions plus Qwen3's deliberate CPU fallback. Ordinary CI runs
 only the committed small fixtures, with no model download. The actual model
-checks are opt-in. This is ready for a **CPU non-thinking typed-decision
-baseline** once reviewed; it does not include that baseline or NanoJev evaluation.
+checks are opt-in. The **CPU non-thinking typed-decision baseline** is documented in
+[DECISIONS.md](DECISIONS.md); NanoJev evaluation remains separate.

@@ -80,6 +80,37 @@ try {
     }), { gpu, qwen });
     assert(report.realReference.passed, JSON.stringify(report.realReference));
   }
+  if (process.env.DECISION_EVAL === '1') {
+    assert(realModel && qwen, 'Decision evaluation requires pinned Qwen model and tokenizer');
+    await page.evaluate(() => {
+      import('./decision.mjs').then(m => m.decisionCI(true)).then(
+        result => { window.decisionResult = result; },
+        error => { window.decisionFailure = String(error); });
+    });
+    await page.waitForFunction(() => window.decisionLoaded || window.decisionFailure, null, { timeout: 60000 });
+    const sdkWorker = page.workers().find(worker => worker.url().endsWith('/dist/worker.js'));
+    if (sdkWorker) report.decisionWasmCapacityBytes = await sdkWorker.evaluate(async () => {
+      const module = await import(new URL('../pkg/flare_web.js', self.location.href).href);
+      // init returns the already-initialized module in this worker.
+      return (await module.default()).memory.buffer.byteLength;
+    });
+    await page.waitForFunction(() => window.decisionResult || window.decisionFailure, null, { timeout: 1200000 });
+    const failure = await page.evaluate(() => window.decisionFailure);
+    assert(!failure, failure);
+    report.decisions = await page.evaluate(() => window.decisionResult);
+    await page.goto(`${url}/node_modules/@sauravpanda/flare/demo/routing.html`);
+    await page.locator('#model').fill('/real.gguf');
+    await page.locator('#tokenizer').fill('/original-tokenizer.json');
+    await page.locator('#load').click();
+    await page.waitForFunction(() => document.querySelector('#status').textContent.startsWith('Ready'), null, { timeout: 60000 });
+    await page.locator('#decide').click();
+    await page.waitForSelector('#prediction', { timeout: 120000 });
+    report.routingDemo = { prediction: await page.locator('#prediction').textContent(),
+      status: await page.locator('#status').textContent(), rows: await page.locator('tbody tr').count() };
+    assert.equal(report.routingDemo.rows, 4, 'Routing demo must display all scores');
+    await page.screenshot({ path: resolve(output, 'routing-demo.png'), fullPage: true });
+    await page.locator('#dispose').click();
+  }
   if (!gpu) {
     const adapter = await page.evaluate(async () => Boolean(await navigator.gpu?.requestAdapter()));
     assert.equal(adapter, false, 'CPU fallback job unexpectedly has a GPU adapter');

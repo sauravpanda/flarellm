@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Flare · Ticket routing baseline</title>
+<style>
+:root{font:16px system-ui;color:#203246;background:#f1f4f8}body{max-width:850px;margin:3rem auto;padding:0 1.5rem}h1{font-size:2.5rem;letter-spacing:-.04em;margin:.4rem 0}p{line-height:1.6}.tag{font-size:.75rem;letter-spacing:.12em;text-transform:uppercase;color:#526e84}section{background:white;padding:1.4rem;border-radius:12px;margin:1rem 0;box-shadow:0 2px 12px #20324608}label{display:block;margin:.7rem 0;font-weight:600}input,textarea,button{font:inherit;padding:.7rem;border:1px solid #b6c3cf;border-radius:6px}input,textarea{display:block;box-sizing:border-box;width:100%;margin-top:.4rem}button{background:#254e70;color:white;cursor:pointer;margin:.3rem .3rem .3rem 0}button:disabled{opacity:.5;cursor:default}.subtle{color:#546777;font-size:.9rem}table{border-collapse:collapse;width:100%;margin:1rem 0}td,th{text-align:left;padding:.7rem;border-bottom:1px solid #e1e7ed}#prediction{font-size:1.7rem;font-weight:650}progress{width:100%}details{margin:1rem 0}#status{min-height:1.6rem}a{color:#254e70}
+</style>
+<p class="tag">Local inference · Experimental baseline</p>
+<h1>Which queue fits this ticket?</h1>
+<p>Choose among billing, technical, account, and other. The model runs on your CPU in a browser worker. This demo displays a suggestion; it does not send or route tickets.</p>
+<section>
+<details open><summary>Qwen3 model setup</summary>
+<p class="subtle">639 MB download; allow several GB of free memory. WASM CPU, 512-token prompt budget. Model and tokenizer are downloaded from the pinned public Qwen repositories.</p>
+<label>GGUF model URL<input id="model" value="https://huggingface.co/Qwen/Qwen3-0.6B-GGUF/resolve/23749fefcc72300e3a2ad315e1317431b06b590a/Qwen3-0.6B-Q8_0.gguf"></label>
+<label>Original tokenizer URL<input id="tokenizer" value="https://huggingface.co/Qwen/Qwen3-0.6B/resolve/c1899de289a04d12100db370d81485cdf75e47ca/tokenizer.json"></label>
+</details>
+<button id="load">Load model</button><button id="cancel" disabled>Cancel</button><button id="dispose" disabled>Dispose</button>
+<p id="status" role="status">Load the model to begin.</p>
+</section>
+<section>
+<label>Ticket text<textarea id="state" rows="4">I was charged twice for my subscription.</textarea></label>
+<p class="subtle">Billing: payments and invoices. Technical: product faults. Account: login and profile access. Other: no specific queue fits, or multiple queues are equally needed.</p>
+<button id="decide" disabled>Suggest a queue</button>
+<div id="output" aria-live="polite"></div>
+<p class="subtle">Scores are relative to the offered choices, not calibrated confidence. A high score can still be wrong. “Other” is an ordinary model-scored choice, not an automatic uncertainty threshold.</p>
+</section>
+<script type="module">
+import { Flare } from '../dist/index.js';
+const $=id=>document.getElementById(id);
+let flare;
+function active(busy){$('load').disabled=busy;$('decide').disabled=busy||!flare;$('cancel').disabled=!busy;$('dispose').disabled=!flare;}
+function error(e){$('status').textContent=`${e.code??e.name}: ${e.message}`;}
+$('load').onclick=async()=>{
+ active(true);
+ try{flare?.dispose();flare=await Flare.init({backend:'cpu',tokenizerUrl:$('tokenizer').value,cache:false});$('dispose').disabled=false;
+ const t=performance.now();await flare.loadModel($('model').value);$('status').textContent=`Ready · load ${((performance.now()-t)/1000).toFixed(2)} s`;
+ }catch(e){error(e);}finally{active(false);}
+};
+$('decide').onclick=async()=>{
+ active(true);$('output').replaceChildren();$('status').textContent='Scoring choices…';
+ try{
+ const result=await flare.decide({state:$('state').value,question:'Which support queue should handle this? billing: payments and invoices; technical: product faults; account: login and profile access; other: none fits or multiple queues are equally needed.',choices:['billing','technical','account','other']});
+ const prediction=document.createElement('p');prediction.id='prediction';prediction.textContent=`Suggested queue: ${result.choice}`;
+ const table=document.createElement('table');table.innerHTML='<thead><tr><th>Queue</th><th>Relative score</th></tr></thead>';
+ const body=document.createElement('tbody');
+ for(const score of result.scores){const row=body.insertRow();row.insertCell().textContent=score.choice;row.insertCell().textContent=`${(score.score*100).toFixed(2)}%`;}
+ table.append(body);$('output').append(prediction,table);
+ $('status').textContent=`${result.promptIds.length} prompt tokens · decision ${(result.decisionMs/1000).toFixed(2)} s`;
+ }catch(e){error(e);}finally{active(false);}
+};
+$('cancel').onclick=()=>flare?.cancel();
+$('dispose').onclick=()=>{flare?.dispose();flare=undefined;active(false);$('status').textContent='Disposed. Load a model to begin again.';};
+</script>
+</html>

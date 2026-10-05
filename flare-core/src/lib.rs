@@ -18,6 +18,7 @@
 
 pub mod chat;
 pub mod config;
+pub mod decision;
 pub mod error;
 pub mod generate;
 pub mod kv_cache;

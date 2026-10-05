@@ -225,6 +225,21 @@ pub struct BpeTokenizer {
 }
 
 impl BpeTokenizer {
+    /// Supported decision pipeline and pinned template control IDs. Boundary
+    /// labels are additionally verified for every complete decision prompt.
+    pub(crate) fn is_qwen3_decision_compatible(&self) -> bool {
+        matches!(*self.pre_tokenizer, PreTokenizer::Qwen3 { .. })
+            && self.normalize_nfc
+            && [
+                ("<|im_start|>", 151644),
+                ("<|im_end|>", 151645),
+                ("<think>", 151667),
+                ("</think>", 151668),
+            ]
+            .iter()
+            .all(|(text, id)| self.special_tokens.get(*text) == Some(id))
+    }
+
     /// Decode bytes without losing UTF-8 sequences split across token boundaries.
     pub fn decode_bytes(&self, tokens: &[u32]) -> Result<Vec<u8>, TokenizerError> {
         let mut output = String::new();

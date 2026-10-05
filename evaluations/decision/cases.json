@@ -1,0 +1,26 @@
+{
+  "version": "routing-synthetic-v1",
+  "provenance": "Original synthetic examples authored for this repository before running the baseline; no customer data. MIT OR Apache-2.0, like the repository.",
+  "split": "held-out test only; no training, prompt tuning or calibration fitting on these examples",
+  "question": "Which support queue should handle this? billing: payments and invoices; technical: product faults; account: login and profile access; other: none fits or multiple queues are equally needed.",
+  "choices": ["billing", "technical", "account", "other"],
+  "orders": [[0,1,2,3], [3,2,1,0]],
+  "cases": [
+    {"id":"b1","state":"My card statement shows two payments for one monthly subscription.","expected":"billing","kind":"clear"},
+    {"id":"b2","state":"Please send me a tax invoice for last month's payment.","expected":"billing","kind":"clear"},
+    {"id":"b3","state":"The annual plan discount was missing from the amount you charged.","expected":"billing","kind":"clear"},
+    {"id":"b4","state":"I cancelled yesterday and want a refund for the unused subscription.","expected":"billing","kind":"clear"},
+    {"id":"t1","state":"Every PDF export crashes the desktop app, even after reinstalling it.","expected":"technical","kind":"clear"},
+    {"id":"t2","state":"The upload progress stops at 90 percent for every file on two browsers.","expected":"technical","kind":"clear"},
+    {"id":"t3","state":"The API returns server error 500 for requests that worked yesterday.","expected":"technical","kind":"clear"},
+    {"id":"t4","state":"My dashboard graphs are blank although the underlying rows are present.","expected":"technical","kind":"clear"},
+    {"id":"a1","state":"I lost my authenticator phone and cannot pass two-factor login.","expected":"account","kind":"clear"},
+    {"id":"a2","state":"I no longer have access to the email address on my profile and need to change it.","expected":"account","kind":"clear"},
+    {"id":"a3","state":"Please unlock my user profile after too many password attempts.","expected":"account","kind":"clear"},
+    {"id":"a4","state":"My password reset email never arrives, including in spam.","expected":"account","kind":"clear"},
+    {"id":"o1","state":"Where can I apply for a summer internship at your company?","expected":"other","kind":"none-of-the-above"},
+    {"id":"o2","state":"Would you sponsor our local charity's weekend event?","expected":"other","kind":"none-of-the-above"},
+    {"id":"o3","state":"I need both a refund for a duplicate charge and help with an export crash; both issues are equally urgent.","expected":"other","kind":"ambiguous"},
+    {"id":"o4","state":"Something is wrong with my subscription but I cannot tell whether it is payment, sign-in, or the app.","expected":"other","kind":"ambiguous"}
+  ]
+}
