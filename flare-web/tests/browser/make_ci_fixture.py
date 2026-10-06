@@ -20,3 +20,9 @@ for name, expected in manifest['sha256'].items():
     if actual != expected:
         raise SystemExit(f'{name}: SHA-256 {actual} != pinned {expected}')
 print('Fixture checksums verified')
+
+# Same Qwen3 architecture fixture, with a generated full-size vocabulary so
+# the original tokenizer/template can exercise actual SDK decisions in CI.
+subprocess.run([sys.executable, str(root.parents[2] / 'flare-loader/tests/fixtures/qwen3/generate.py'), '--decision', str(out / 'decision-fixture.gguf')], check=True)
+decision_reference = json.loads((out / 'decision/fixture-reference.json').read_text())
+assert hashlib.sha256((out / 'decision-fixture.gguf').read_bytes()).hexdigest() == decision_reference['modelSha256']

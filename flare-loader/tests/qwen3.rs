@@ -243,3 +243,67 @@ fn real_qwen3_reference_and_reset() {
         }
     }
 }
+
+#[test]
+fn decisions_reject_unsupported_models_and_preserve_qwen_cpu_fallback() {
+    use flare_core::{
+        decision::{decide, DecisionRequest},
+        model::{ComputeBackend, Model},
+        tokenizer::BpeTokenizer,
+        Tensor,
+    };
+    struct UnsupportedBackend;
+    impl ComputeBackend for UnsupportedBackend {
+        fn name(&self) -> &'static str {
+            "unsupported"
+        }
+        fn matmul(&self, _: &Tensor, _: &Tensor, _: &mut Tensor) {
+            panic!("must reject before execution")
+        }
+        fn rmsnorm(&self, _: &Tensor, _: &Tensor, _: f32, _: &mut Tensor) {
+            panic!("must reject before execution")
+        }
+        fn rope(&self, _: &mut Tensor, _: &mut Tensor, _: usize, _: usize, _: f32) {
+            panic!("must reject before execution")
+        }
+        fn softmax(&self, _: &mut Tensor) {
+            panic!("must reject before execution")
+        }
+        fn silu_mul(&self, _: &Tensor, _: &Tensor, _: &mut Tensor) {
+            panic!("must reject before execution")
+        }
+    }
+    let request = DecisionRequest {
+        state: "s".into(),
+        question: "q".into(),
+        choices: vec!["a".into(), "b".into()],
+    };
+    let tokenizer = BpeTokenizer::from_json(include_str!(
+        "../../evaluations/decision/tokenizer-reduced.json"
+    ))
+    .unwrap();
+    for unsupported_backend in [false, true] {
+        let mut reader = Cursor::new(MODEL);
+        let gguf = GgufFile::parse_header(&mut reader).unwrap();
+        let weights = load_model_weights(&gguf, &mut reader).unwrap();
+        let mut config = gguf.to_model_config().unwrap();
+        if !unsupported_backend {
+            config.architecture = flare_core::config::Architecture::Llama;
+        }
+        let mut model = Model::new(config, weights);
+        if unsupported_backend {
+            model.set_backend(Box::new(UnsupportedBackend));
+        }
+        let error = decide(&mut model, &tokenizer, &request)
+            .unwrap_err()
+            .to_string();
+        if unsupported_backend {
+            assert_eq!(model.backend().name(), "cpu");
+            // Existing Qwen3 selection deliberately falls back to CPU. The
+            // tiny vocabulary then rejects official prompt IDs before inference.
+            assert!(error.contains("outside model vocabulary"));
+        } else {
+            assert!(error.contains("requires Qwen3 CPU"));
+        }
+    }
+}

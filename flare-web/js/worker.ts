@@ -60,6 +60,11 @@ self.onmessage = async ({ data: { id, type, args } }: MessageEvent<WorkerRequest
         // Cache only successfully parsed models. Cache failures surface to callers.
         if (cache) await cache.put(args.modelUrl, new Response(bytes));
       } else if (type === 'reset') { engine?.reset(); }
+      else if (type === 'decide') {
+        if (!engine || !tokenizer) throw new Error('Decisions require a loaded Qwen3 model and its original tokenizerUrl');
+        const start = performance.now();
+        value = { ...JSON.parse(engine.decide(tokenizer, JSON.stringify(args))), decisionMs: performance.now() - start };
+      }
       else if (type === 'generate') {
         if (!engine) throw new Error('No model loaded');
         const maxTokens = args.maxTokens ?? 128;

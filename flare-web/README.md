@@ -93,3 +93,10 @@ Serve the package directory to try `demo/`. `demo/advanced.html` retains the
 previous low-level experimental demo. Run `npm run test:sdk` after building.
 For the installed tarball browser test, see `tests/browser/README.md`. Broader CI
 and release checks are tracked in #521 and #532.
+
+## Experimental bounded decisions
+
+Use `flare.decide({ state, question, choices })` to score 2–8 text choices with
+one Qwen3 CPU prefill. Returned scores are relative to the offered labels, not
+calibrated confidence. See [the contract and evaluation](../DECISIONS.md) and
+[the packaged routing demo](demo/routing.html).

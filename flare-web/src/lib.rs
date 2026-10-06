@@ -1177,6 +1177,27 @@ impl FlareEngine {
         self.utf8_byte_buf.clear();
     }
 
+    /// Experimental text-only bounded decision. Runs exactly one CPU prefill,
+    /// returns candidate logits/scores and reproduction metadata as JSON.
+    /// Clears all generation state before and after, including on input errors.
+    #[wasm_bindgen]
+    pub fn decide(
+        &mut self,
+        tokenizer: &FlareTokenizer,
+        request_json: &str,
+    ) -> Result<String, JsError> {
+        self.reset();
+        let result = (|| {
+            let request = serde_json::from_str(request_json)
+                .map_err(|e| JsError::new(&format!("invalid decision input: {e}")))?;
+            let result = flare_core::decision::decide(&mut self.model, &tokenizer.inner, &request)
+                .map_err(|e| JsError::new(&e.to_string()))?;
+            serde_json::to_string(&result).map_err(|e| JsError::new(&e.to_string()))
+        })();
+        self.reset();
+        result
+    }
+
     /// Get the vocabulary size of the loaded model.
     #[wasm_bindgen(getter)]
     pub fn vocab_size(&self) -> u32 {

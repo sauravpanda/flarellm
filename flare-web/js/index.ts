@@ -33,6 +33,25 @@ export interface ChatOptions extends Omit<GenerateOptions, 'prompt'> {
   system?: string;
 }
 export interface GenerationResult { text: string; tokenIds: number[]; stopReason: string }
+/** Experimental text-only Qwen3 CPU decision; 2..8 unique trimmed choices. */
+export interface DecisionOptions<C extends string = string> {
+  state: string;
+  question: string;
+  choices: readonly C[];
+  signal?: AbortSignal;
+}
+export interface DecisionResult<C extends string = string> {
+  choice: C;
+  /** Original choice index; exact logit ties select the first. */
+  index: number;
+  /** Original order. Relative candidate scores, NOT calibrated confidence. */
+  scores: { choice: C; label: string; tokenId: number; logit: number; score: number }[];
+  promptVersion: 'qwen3-choice-v1';
+  prompt: string;
+  promptIds: number[];
+  /** Worker wall time for validation, tokenization and one CPU prefill. */
+  decisionMs: number;
+}
 export class FlareError extends Error {
   constructor(public code: string, message: string) { super(message); this.name = 'FlareError'; }
 }
@@ -141,6 +160,14 @@ export class Flare {
       await this.connect();
       if (!this.loaded) await this.load();
       return this.request<GenerationResult>('generate', args, onToken);
+    }, options.signal);
+  }
+  async decide<const C extends string>(options: DecisionOptions<C>): Promise<DecisionResult<C>> {
+    return this.exclusive(async () => {
+      const { signal, ...args } = options;
+      await this.connect();
+      if (!this.loaded) await this.load();
+      return this.request<DecisionResult<C>>('decide', args);
     }, options.signal);
   }
   async reset(): Promise<void> {

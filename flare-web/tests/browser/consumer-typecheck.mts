@@ -13,3 +13,14 @@ async function consume() {
   return { result, ids, init, FlareError, FlareEngine, FlareTokenizer };
 }
 void consume;
+
+async function decisionTypes(flare: Flare) {
+const decision = await flare.decide({state:'Charged twice',question:'Queue?',choices:['billing','other'] as const});
+const selected: 'billing' | 'other' = decision.choice;
+const scoreChoice: 'billing' | 'other' = decision.scores[0].choice;
+void selected; void scoreChoice;
+// @ts-expect-error structured state is outside the text-only contract
+await flare.decide({state:{ticket:'x'},question:'Queue?',choices:['a','b']});
+
+}
+void decisionTypes;

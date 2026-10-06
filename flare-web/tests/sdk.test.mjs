@@ -36,12 +36,12 @@ test('public config URLs resolve relative to the consumer and capabilities are c
   f.deviceInfo.webgpu = false;
   assert.equal(f.webgpuAvailable, true); f.dispose();
 });
-for (const stage of ['load', 'generate']) test(`cancel during ${stage}, ignore stale replies, reload and generate again`, async () => {
+for (const stage of ['load', 'generate', 'decide']) test(`cancel during ${stage}, ignore stale replies, reload and generate again`, async () => {
   const f = await Flare.init();
-  if (stage === 'generate') await f.loadModel('/model.gguf');
+  if (stage !== 'load') await f.loadModel('/model.gguf');
   FakeWorker.hold = stage;
   const controller = new AbortController();
-  const pending = stage === 'load' ? f.loadModel('/model.gguf', { signal: controller.signal }) : f.generate({ prompt: 'hello', signal: controller.signal });
+  const pending = stage === 'load' ? f.loadModel('/model.gguf', { signal: controller.signal }) : stage === 'decide' ? f.decide({state:'ticket',question:'queue?',choices:['a','b'],signal:controller.signal}) : f.generate({ prompt: 'hello', signal: controller.signal });
   await new Promise(resolve => setImmediate(resolve));
   await assert.rejects(f.reset(), { code: 'BUSY' });
   controller.abort();
@@ -112,4 +112,18 @@ test('immediate abort between awaited lifecycle steps preserves ABORTED and disp
   controller.abort(); await assert.rejects(p, { code: 'ABORTED' });
   assert.deepEqual(workers[0].messages.map(m => m.type), ['init', 'load']);
   assert.equal((await f.generate({ prompt: 'retry' })).text, 'hi'); f.dispose();
+});
+
+test('decision request correlation and transport omit AbortSignal', async () => {
+  const f = await Flare.init({modelUrl:'/model.gguf'});
+  FakeWorker.hold='decide';
+  const p=f.decide({state:'ticket',question:'Queue?',choices:['billing','other'],signal:new AbortController().signal});
+  await new Promise(resolve=>setImmediate(resolve));
+  const w=workers[0],m=w.messages.at(-1);
+  assert.deepEqual(m.args,{state:'ticket',question:'Queue?',choices:['billing','other']});
+  w.emit(m.id-1,{type:'result',value:'stale'});
+  await assert.rejects(f.chat({message:'busy'}),{code:'BUSY'});
+  w.emit(m.id,{type:'error',code:'DECIDE',message:'context overflow'});
+  await assert.rejects(p,{code:'DECIDE'});
+  assert.equal(w.terminated,true);f.dispose();
 });

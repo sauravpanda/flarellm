@@ -1,4 +1,5 @@
 // The same installed consumer is driven by CI and the local Chrome harness.
+import { decisionCI } from './decision.mjs';
 import { tokenizerParity } from './tokenizer-parity.mjs';
 import { Flare } from '@sauravpanda/flare';
 import init, { FlareEngine, FlareTokenizer } from '@sauravpanda/flare/wasm';
@@ -44,6 +45,7 @@ window.runCI = async ({ gpu = false, originalTokenizer = false } = {}) => {
     const parity = await tokenizerParity();
     if (originalTokenizer) record('full original-tokenizer IDs', await tokenizerParity('/original-tokenizer.json'));
     record('independent original-tokenizer IDs', parity);
+    record('bounded decisions: independent logits/scores and SDK lifecycle', await decisionCI());
     report.coverage.independentReference = 'SmolLM2 tokenizer and pinned llama.cpp GQA logits passed';
     const tokenizer = FlareTokenizer.from_json(await (await fetch('/tokenizer.json')).text());
     try { equal(Array.from(tokenizer.encode(fixture.prompt)), fixture.promptIds, 'Pinned synthetic tokenizer IDs'); }
