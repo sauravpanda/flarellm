@@ -1,6 +1,7 @@
 """No weights, downloads, PyTorch or tokenizers needed for these audit tests."""
 import copy
 import json
+import math
 import tempfile
 from pathlib import Path
 import unittest
@@ -9,6 +10,25 @@ from common import (ROOT, attempts, digest, load_dataset, metrics, nanojev_reque
 
 
 class ComparisonTests(unittest.TestCase):
+    def assert_nested_equal(self, actual, expected):
+        # Python 3.12 changed float sum to compensated summation. Artifact
+        # identities/counts remain exact; only computed floats allow rounding.
+        if isinstance(expected, float):
+            self.assertIsInstance(actual, float)
+            self.assertTrue(math.isclose(actual, expected, rel_tol=0, abs_tol=1e-12),
+                            f'{actual} != {expected}')
+        elif isinstance(expected, dict):
+            self.assertEqual(actual.keys(), expected.keys())
+            for key in expected:
+                with self.subTest(key=key):
+                    self.assert_nested_equal(actual[key], expected[key])
+        elif isinstance(expected, list):
+            self.assertEqual(len(actual), len(expected))
+            for a, e in zip(actual, expected, strict=True):
+                self.assert_nested_equal(a, e)
+        else:
+            self.assertEqual(actual, expected)
+
     def setUp(self):
         self.data = dict(choices=['a','b'], orders=[[0,1],[1,0]],
                          question='Which?', cases=[dict(id='one', state='s', expected='a',kind='clear')])
@@ -102,7 +122,7 @@ class ComparisonTests(unittest.TestCase):
             for model, recorded in zip(['qwen3','nanojev'],report['models'],strict=True):
                 run_path=ROOT/'results'/f'{model}-{split}.json'
                 self.assertEqual(report['inputSha256'][model],digest(run_path))
-                self.assertEqual(recorded,summarize(data,read(run_path),digest(ROOT/f'{split}.json')))
+                self.assert_nested_equal(recorded,summarize(data,read(run_path),digest(ROOT/f'{split}.json')))
 
     def test_artifact_formatting_preserves_values(self):
         with tempfile.TemporaryDirectory() as tmp:
