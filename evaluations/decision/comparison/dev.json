@@ -1,0 +1,136 @@
+{
+  "version": "routing-synthetic-v2",
+  "split": "dev",
+  "provenance": "Original synthetic English tickets authored for this repository before inference. No customer data; MIT OR Apache-2.0. One author and no independent human adjudication. Test is held out from prompt selection, training and calibration; becomes public after this run.",
+  "question": "Which support queue should handle this? billing: payments and invoices; technical: product faults; account: login and profile access; other: none fits or multiple queues are equally needed.",
+  "choices": [
+    "billing",
+    "technical",
+    "account",
+    "other"
+  ],
+  "orders": [
+    [
+      0,
+      1,
+      2,
+      3
+    ],
+    [
+      3,
+      2,
+      1,
+      0
+    ],
+    [
+      1,
+      0,
+      3,
+      2
+    ],
+    [
+      2,
+      3,
+      0,
+      1
+    ]
+  ],
+  "cases": [
+    {
+      "id": "dev-billing-01",
+      "state": "I need the receipt addressed to my company instead of to me.",
+      "expected": "billing",
+      "kind": "clear"
+    },
+    {
+      "id": "dev-billing-02",
+      "state": "The payment page says my bank declined the renewal transaction.",
+      "expected": "billing",
+      "kind": "clear"
+    },
+    {
+      "id": "dev-billing-03",
+      "state": "Can you explain the sales tax on this week's charge?",
+      "expected": "billing",
+      "kind": "clear"
+    },
+    {
+      "id": "dev-billing-04",
+      "state": "Please switch my subscription from annual billing to monthly billing.",
+      "expected": "billing",
+      "kind": "clear"
+    },
+    {
+      "id": "dev-technical-01",
+      "state": "Notifications arrive six hours after the triggering event.",
+      "expected": "technical",
+      "kind": "clear"
+    },
+    {
+      "id": "dev-technical-02",
+      "state": "The search box always returns an empty list for a document I can open.",
+      "expected": "technical",
+      "kind": "clear"
+    },
+    {
+      "id": "dev-technical-03",
+      "state": "A saved chart changes color whenever I refresh the page.",
+      "expected": "technical",
+      "kind": "clear"
+    },
+    {
+      "id": "dev-technical-04",
+      "state": "CSV downloads contain garbled accented characters.",
+      "expected": "technical",
+      "kind": "clear"
+    },
+    {
+      "id": "dev-account-01",
+      "state": "I want to replace the recovery phone on my identity profile.",
+      "expected": "account",
+      "kind": "clear"
+    },
+    {
+      "id": "dev-account-02",
+      "state": "My invitation to join the workspace expired before I accepted it.",
+      "expected": "account",
+      "kind": "clear"
+    },
+    {
+      "id": "dev-account-03",
+      "state": "Please deactivate my personal user account.",
+      "expected": "account",
+      "kind": "clear"
+    },
+    {
+      "id": "dev-account-04",
+      "state": "I cannot sign in because my security key was lost.",
+      "expected": "account",
+      "kind": "clear"
+    },
+    {
+      "id": "dev-other-01",
+      "state": "May our magazine interview your founder?",
+      "expected": "other",
+      "kind": "none-of-the-above"
+    },
+    {
+      "id": "dev-other-02",
+      "state": "Do you sell gift baskets for conferences?",
+      "expected": "other",
+      "kind": "none-of-the-above"
+    },
+    {
+      "id": "dev-other-03",
+      "state": "Both my invoice total and my login permissions need fixing, with no priority between them.",
+      "expected": "other",
+      "kind": "ambiguous"
+    },
+    {
+      "id": "dev-other-04",
+      "state": "I only wrote to say thanks for a helpful webinar.",
+      "expected": "other",
+      "kind": "none-of-the-above"
+    }
+  ]
+}

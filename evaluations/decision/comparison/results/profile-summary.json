@@ -1,0 +1,29 @@
+{
+  "schema": 1,
+  "requestsSha256": "ee60818b148c4f57ca6708efc86cd8ed734239f5548764be3f18f218c6edbddb",
+  "runSha256": "b183ea4c70475fac29cd41950f19ae99362ff3866aad8c9789140c650a104a2c",
+  "unprofiledSha256": "4f3b63f10ea86a453f1ea237f41f5ba33bfcf7e232ee9905fa85313c0219a3de",
+  "attempts": 8,
+  "profiledControlExactlyMatches": true,
+  "meanMs": {
+    "attentionMs": 178.66267776489258,
+    "attnNormMs": 10.925119042396545,
+    "attnOutProjMs": 3946.456024169922,
+    "downMs": 5633.9034423828125,
+    "embedMs": 0.33956775069236755,
+    "ffnNormMs": 11.96705162525177,
+    "finalNormMs": 0.0021353750344133005,
+    "gateUpMs": 11472.445678710938,
+    "kvWriteMs": 3.3565886318683624,
+    "lmHeadMs": 23.686568021774292,
+    "outsidePrefillMs": 6.937704343750283,
+    "qkvProjMs": 7623.446594238281,
+    "residualMs": 2.0481608361005783,
+    "ropeMs": 19.05742049217224,
+    "siluMulMs": 28.961212635040283,
+    "totalMs": 28982.78955078125
+  },
+  "packedProjectionShareOfPrefill": 0.9894234538486295,
+  "warmMedianDecisionMs": 28819.051542,
+  "note": "Native Q8 CPU phase timings, four distinct development tickets repeated twice; no browser or stable performance guarantee."
+}

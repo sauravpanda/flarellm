@@ -101,6 +101,8 @@ reference revisions and reproduction commands live in
 [evaluations/decision](evaluations/decision/README.md). Changing prompt wording
 requires a new prompt version and new held-out data for any tuning comparison.
 
-This supplies a reusable baseline for a later NanoJev experiment. It is not
-TypeSafe Jev or NanoJev support, calibration equivalence, fine-tuning, or evidence
-that a game-trained checkpoint generalizes to ticket routing.
+The [NanoJev comparison](evaluations/decision/comparison/README.md) evaluates the
+published game checkpoint on new routing tickets. It selects `billing` for all
+64 test tickets in all four orders (25% accuracy), so it does not justify adding
+a NanoJev backend. The existing Qwen prompt also needs quality work. This API
+remains experimental; neither model is validated for unattended routing.

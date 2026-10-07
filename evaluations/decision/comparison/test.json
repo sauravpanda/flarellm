@@ -1,0 +1,424 @@
+{
+  "version": "routing-synthetic-v2",
+  "split": "test",
+  "provenance": "Original synthetic English tickets authored for this repository before inference. No customer data; MIT OR Apache-2.0. One author and no independent human adjudication. Test is held out from prompt selection, training and calibration; becomes public after this run.",
+  "question": "Which support queue should handle this? billing: payments and invoices; technical: product faults; account: login and profile access; other: none fits or multiple queues are equally needed.",
+  "choices": [
+    "billing",
+    "technical",
+    "account",
+    "other"
+  ],
+  "orders": [
+    [
+      0,
+      1,
+      2,
+      3
+    ],
+    [
+      3,
+      2,
+      1,
+      0
+    ],
+    [
+      1,
+      0,
+      3,
+      2
+    ],
+    [
+      2,
+      3,
+      0,
+      1
+    ]
+  ],
+  "cases": [
+    {
+      "id": "test-billing-01",
+      "state": "I paid for five seats but the invoice lists eight. Please correct the amount.",
+      "expected": "billing",
+      "kind": "clear"
+    },
+    {
+      "id": "test-billing-02",
+      "state": "Our finance department needs your bank details to pay the outstanding invoice.",
+      "expected": "billing",
+      "kind": "clear"
+    },
+    {
+      "id": "test-billing-03",
+      "state": "The renewal went through after we submitted the cancellation form. Please reverse the payment.",
+      "expected": "billing",
+      "kind": "clear"
+    },
+    {
+      "id": "test-billing-04",
+      "state": "I bought the plan in euros but my receipt shows dollars and an unexpected conversion charge.",
+      "expected": "billing",
+      "kind": "clear"
+    },
+    {
+      "id": "test-billing-05",
+      "state": "A coupon accepted at checkout did not reduce the final bill.",
+      "expected": "billing",
+      "kind": "clear"
+    },
+    {
+      "id": "test-billing-06",
+      "state": "Please split our subscription invoice between two cost centers.",
+      "expected": "billing",
+      "kind": "clear"
+    },
+    {
+      "id": "test-billing-07",
+      "state": "My card expires this month. Where do I update the card used for renewals?",
+      "expected": "billing",
+      "kind": "clear"
+    },
+    {
+      "id": "test-billing-08",
+      "state": "We upgraded halfway through the month and need an explanation of the prorated charge.",
+      "expected": "billing",
+      "kind": "clear"
+    },
+    {
+      "id": "test-billing-09",
+      "state": "The purchase order number is absent from the invoice we received.",
+      "expected": "billing",
+      "kind": "clear"
+    },
+    {
+      "id": "test-billing-10",
+      "state": "I was promised a credit for an outage but the balance still shows the full amount due.",
+      "expected": "billing",
+      "kind": "clear"
+    },
+    {
+      "id": "test-billing-11",
+      "state": "The transaction is marked unpaid even though our bank confirms that the transfer settled.",
+      "expected": "billing",
+      "kind": "clear"
+    },
+    {
+      "id": "test-billing-12",
+      "state": "Our organization is tax exempt. Please remove the VAT from this invoice.",
+      "expected": "billing",
+      "kind": "clear"
+    },
+    {
+      "id": "test-billing-13",
+      "state": "I accidentally bought two yearly subscriptions and want to return one.",
+      "expected": "billing",
+      "kind": "clear"
+    },
+    {
+      "id": "test-billing-14",
+      "state": "Can I settle the overdue balance with a different payment method?",
+      "expected": "billing",
+      "kind": "clear"
+    },
+    {
+      "id": "test-billing-15",
+      "state": "The trial ended earlier than stated and you billed my card this morning.",
+      "expected": "billing",
+      "kind": "clear"
+    },
+    {
+      "id": "test-billing-16",
+      "state": "Please tell me the date and amount of my next subscription renewal.",
+      "expected": "billing",
+      "kind": "clear"
+    },
+    {
+      "id": "test-technical-01",
+      "state": "Clicking Save spins forever and the document disappears when I reopen the app.",
+      "expected": "technical",
+      "kind": "clear"
+    },
+    {
+      "id": "test-technical-02",
+      "state": "The mobile app cuts off the right half of every table in landscape mode.",
+      "expected": "technical",
+      "kind": "clear"
+    },
+    {
+      "id": "test-technical-03",
+      "state": "The integration sends the same webhook event three times for a single update.",
+      "expected": "technical",
+      "kind": "clear"
+    },
+    {
+      "id": "test-technical-04",
+      "state": "Audio recorded inside the app plays back at double speed.",
+      "expected": "technical",
+      "kind": "clear"
+    },
+    {
+      "id": "test-technical-05",
+      "state": "I can log in, but the calendar shows all meetings one day later than their saved dates.",
+      "expected": "technical",
+      "kind": "clear"
+    },
+    {
+      "id": "test-technical-06",
+      "state": "The desktop process consumes all available memory when I sort a large worksheet.",
+      "expected": "technical",
+      "kind": "clear"
+    },
+    {
+      "id": "test-technical-07",
+      "state": "Images inserted into a report turn into broken icons after export.",
+      "expected": "technical",
+      "kind": "clear"
+    },
+    {
+      "id": "test-technical-08",
+      "state": "The endpoint returns malformed JSON with a trailing comma on every response.",
+      "expected": "technical",
+      "kind": "clear"
+    },
+    {
+      "id": "test-technical-09",
+      "state": "Screen sharing shows a black rectangle even though camera sharing works.",
+      "expected": "technical",
+      "kind": "clear"
+    },
+    {
+      "id": "test-technical-10",
+      "state": "Typing an emoji into a comment crashes the editor.",
+      "expected": "technical",
+      "kind": "clear"
+    },
+    {
+      "id": "test-technical-11",
+      "state": "The offline sync duplicates every paragraph when the network reconnects.",
+      "expected": "technical",
+      "kind": "clear"
+    },
+    {
+      "id": "test-technical-12",
+      "state": "Our scheduled report job never runs, although manually running the same report succeeds.",
+      "expected": "technical",
+      "kind": "clear"
+    },
+    {
+      "id": "test-technical-13",
+      "state": "The application cannot open its own saved project format after the latest update.",
+      "expected": "technical",
+      "kind": "clear"
+    },
+    {
+      "id": "test-technical-14",
+      "state": "Filters disappear immediately after I select a second column.",
+      "expected": "technical",
+      "kind": "clear"
+    },
+    {
+      "id": "test-technical-15",
+      "state": "The chart legend covers the data when the window is narrow.",
+      "expected": "technical",
+      "kind": "clear"
+    },
+    {
+      "id": "test-technical-16",
+      "state": "The app reports a successful upload but replaces the file contents with zero bytes.",
+      "expected": "technical",
+      "kind": "clear"
+    },
+    {
+      "id": "test-account-01",
+      "state": "Our administrator removed me from a team by mistake. I need membership restored.",
+      "expected": "account",
+      "kind": "clear"
+    },
+    {
+      "id": "test-account-02",
+      "state": "I changed my legal name and want my identity profile updated.",
+      "expected": "account",
+      "kind": "clear"
+    },
+    {
+      "id": "test-account-03",
+      "state": "My work email was retired, so I need a new address for signing in.",
+      "expected": "account",
+      "kind": "clear"
+    },
+    {
+      "id": "test-account-04",
+      "state": "A former employee still has access to our organization. Please revoke their membership.",
+      "expected": "account",
+      "kind": "clear"
+    },
+    {
+      "id": "test-account-05",
+      "state": "The single sign-on page says this user has no assigned role.",
+      "expected": "account",
+      "kind": "clear"
+    },
+    {
+      "id": "test-account-06",
+      "state": "I want to transfer workspace ownership to another administrator.",
+      "expected": "account",
+      "kind": "clear"
+    },
+    {
+      "id": "test-account-07",
+      "state": "The invitation was sent to the wrong address. Please resend it to my current address.",
+      "expected": "account",
+      "kind": "clear"
+    },
+    {
+      "id": "test-account-08",
+      "state": "I can sign in on my old phone but need to enroll a replacement security device.",
+      "expected": "account",
+      "kind": "clear"
+    },
+    {
+      "id": "test-account-09",
+      "state": "Please sign out all sessions associated with my user profile.",
+      "expected": "account",
+      "kind": "clear"
+    },
+    {
+      "id": "test-account-10",
+      "state": "My recovery codes have all been used and I cannot complete authentication.",
+      "expected": "account",
+      "kind": "clear"
+    },
+    {
+      "id": "test-account-11",
+      "state": "The identity provider says my user is disabled after an administrator change.",
+      "expected": "account",
+      "kind": "clear"
+    },
+    {
+      "id": "test-account-12",
+      "state": "I accidentally created two profiles with different emails and need them merged.",
+      "expected": "account",
+      "kind": "clear"
+    },
+    {
+      "id": "test-account-13",
+      "state": "How do I change the password for my personal sign-in?",
+      "expected": "account",
+      "kind": "clear"
+    },
+    {
+      "id": "test-account-14",
+      "state": "I want to remove my profile photograph and update my display name.",
+      "expected": "account",
+      "kind": "clear"
+    },
+    {
+      "id": "test-account-15",
+      "state": "I need to grant a colleague access to our shared workspace.",
+      "expected": "account",
+      "kind": "clear"
+    },
+    {
+      "id": "test-account-16",
+      "state": "Please close my user profile and remove its access to the team.",
+      "expected": "account",
+      "kind": "clear"
+    },
+    {
+      "id": "test-other-01",
+      "state": "Does your company have any open research positions?",
+      "expected": "other",
+      "kind": "none-of-the-above"
+    },
+    {
+      "id": "test-other-02",
+      "state": "Could your team speak at our local software meetup?",
+      "expected": "other",
+      "kind": "none-of-the-above"
+    },
+    {
+      "id": "test-other-03",
+      "state": "We would like permission to use your logo in a conference presentation.",
+      "expected": "other",
+      "kind": "none-of-the-above"
+    },
+    {
+      "id": "test-other-04",
+      "state": "I am a journalist looking for your press contact.",
+      "expected": "other",
+      "kind": "none-of-the-above"
+    },
+    {
+      "id": "test-other-05",
+      "state": "Where is your headquarters located?",
+      "expected": "other",
+      "kind": "none-of-the-above"
+    },
+    {
+      "id": "test-other-06",
+      "state": "Our company would like to propose a reseller partnership.",
+      "expected": "other",
+      "kind": "none-of-the-above"
+    },
+    {
+      "id": "test-other-07",
+      "state": "Can you share your accessibility roadmap for next year?",
+      "expected": "other",
+      "kind": "none-of-the-above"
+    },
+    {
+      "id": "test-other-08",
+      "state": "Please add a dark theme to your future product plans.",
+      "expected": "other",
+      "kind": "none-of-the-above"
+    },
+    {
+      "id": "test-other-09",
+      "state": "Do you offer a student ambassador program?",
+      "expected": "other",
+      "kind": "none-of-the-above"
+    },
+    {
+      "id": "test-other-10",
+      "state": "I have an idea for a new language translation feature.",
+      "expected": "other",
+      "kind": "none-of-the-above"
+    },
+    {
+      "id": "test-other-11",
+      "state": "Could you publish a tutorial about organizing community events?",
+      "expected": "other",
+      "kind": "none-of-the-above"
+    },
+    {
+      "id": "test-other-12",
+      "state": "Thank you for the detailed release announcement; I do not need assistance.",
+      "expected": "other",
+      "kind": "none-of-the-above"
+    },
+    {
+      "id": "test-other-13",
+      "state": "Please fix both an incorrect renewal bill and a crashing editor; neither can wait ahead of the other.",
+      "expected": "other",
+      "kind": "ambiguous"
+    },
+    {
+      "id": "test-other-14",
+      "state": "I have two equal priorities: restoring workspace access and repairing corrupted exports.",
+      "expected": "other",
+      "kind": "ambiguous"
+    },
+    {
+      "id": "test-other-15",
+      "state": "My request combines a tax refund and a profile ownership transfer, and both are equally necessary.",
+      "expected": "other",
+      "kind": "ambiguous"
+    },
+    {
+      "id": "test-other-16",
+      "state": "I cannot describe the problem yet; it might involve charges, identity access, or a broken feature.",
+      "expected": "other",
+      "kind": "ambiguous"
+    }
+  ]
+}

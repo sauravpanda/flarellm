@@ -1,0 +1,8 @@
+# Python >=3.12; recorded run uses 3.13.7. Core versions match upstream NanoJev.
+torch==2.14.0
+transformers==5.17.0
+safetensors==0.8.0
+numpy==2.5.3
+tokenizers==0.23.2
+huggingface-hub==1.33.0
+Jinja2==3.1.6
