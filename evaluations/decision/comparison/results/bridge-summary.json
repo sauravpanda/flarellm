@@ -1,0 +1,291 @@
+{
+  "schema": 1,
+  "runSha256": "733b63ab4b19ad799903b0aad7e11c70203f10dd97b91d0411a09997e0e5fdd9",
+  "referenceSha256": "edce37a801b806889136a52ffce2126a0ec0e5615bf0a44f716b497aea7527f7",
+  "winningChoicesMatch": 30,
+  "attempts": 32,
+  "failures": 0,
+  "maxLogitError": 1.2759704922119148,
+  "maxScoreError": 0.09011903533431992,
+  "disagreements": [
+    {
+      "id": "b1",
+      "order": 0,
+      "expected": "billing",
+      "originalWeight": "other",
+      "q8Reference": "billing"
+    },
+    {
+      "id": "b4",
+      "order": 0,
+      "expected": "billing",
+      "originalWeight": "other",
+      "q8Reference": "billing"
+    }
+  ],
+  "metrics": {
+    "model": "qwen3",
+    "datasetSha256": "33a517656ab641a009ddc031c93633124a020c9e3b1110cd387a18afd21869fc",
+    "uniqueCases": 16,
+    "byOrder": {
+      "0": {
+        "n": 16,
+        "correct": 4,
+        "accuracy": 0.25,
+        "failures": 0,
+        "completed": 16,
+        "overflow": 0,
+        "brier": 1.1639781552077006,
+        "ece5Completed": 0.6115582324564457,
+        "confusion": {
+          "billing": {
+            "billing": 0,
+            "technical": 0,
+            "account": 0,
+            "other": 4,
+            "<failure>": 0
+          },
+          "technical": {
+            "billing": 0,
+            "technical": 0,
+            "account": 0,
+            "other": 4,
+            "<failure>": 0
+          },
+          "account": {
+            "billing": 0,
+            "technical": 0,
+            "account": 0,
+            "other": 4,
+            "<failure>": 0
+          },
+          "other": {
+            "billing": 0,
+            "technical": 0,
+            "account": 0,
+            "other": 4,
+            "<failure>": 0
+          }
+        }
+      },
+      "1": {
+        "n": 16,
+        "correct": 4,
+        "accuracy": 0.25,
+        "failures": 0,
+        "completed": 16,
+        "overflow": 0,
+        "brier": 1.4734532408983838,
+        "ece5Completed": 0.7414171025156975,
+        "confusion": {
+          "billing": {
+            "billing": 0,
+            "technical": 0,
+            "account": 0,
+            "other": 4,
+            "<failure>": 0
+          },
+          "technical": {
+            "billing": 0,
+            "technical": 0,
+            "account": 0,
+            "other": 4,
+            "<failure>": 0
+          },
+          "account": {
+            "billing": 0,
+            "technical": 0,
+            "account": 0,
+            "other": 4,
+            "<failure>": 0
+          },
+          "other": {
+            "billing": 0,
+            "technical": 0,
+            "account": 0,
+            "other": 4,
+            "<failure>": 0
+          }
+        }
+      }
+    },
+    "pooledPaired": {
+      "n": 32,
+      "correct": 8,
+      "accuracy": 0.25,
+      "failures": 0,
+      "completed": 32,
+      "overflow": 0,
+      "brier": 1.3187156980530423,
+      "ece5Completed": 0.6764876674860716,
+      "confusion": {
+        "billing": {
+          "billing": 0,
+          "technical": 0,
+          "account": 0,
+          "other": 8,
+          "<failure>": 0
+        },
+        "technical": {
+          "billing": 0,
+          "technical": 0,
+          "account": 0,
+          "other": 8,
+          "<failure>": 0
+        },
+        "account": {
+          "billing": 0,
+          "technical": 0,
+          "account": 0,
+          "other": 8,
+          "<failure>": 0
+        },
+        "other": {
+          "billing": 0,
+          "technical": 0,
+          "account": 0,
+          "other": 8,
+          "<failure>": 0
+        }
+      }
+    },
+    "byKindOriginal": {
+      "ambiguous": {
+        "n": 2,
+        "correct": 2,
+        "accuracy": 1.0,
+        "failures": 0,
+        "completed": 2,
+        "overflow": 0,
+        "brier": 0.0506137797184825,
+        "ece5Completed": 0.16292992234230042,
+        "confusion": {
+          "billing": {
+            "billing": 0,
+            "technical": 0,
+            "account": 0,
+            "other": 0,
+            "<failure>": 0
+          },
+          "technical": {
+            "billing": 0,
+            "technical": 0,
+            "account": 0,
+            "other": 0,
+            "<failure>": 0
+          },
+          "account": {
+            "billing": 0,
+            "technical": 0,
+            "account": 0,
+            "other": 0,
+            "<failure>": 0
+          },
+          "other": {
+            "billing": 0,
+            "technical": 0,
+            "account": 0,
+            "other": 2,
+            "<failure>": 0
+          }
+        }
+      },
+      "clear": {
+        "n": 12,
+        "correct": 0,
+        "accuracy": 0.0,
+        "failures": 0,
+        "completed": 12,
+        "overflow": 0,
+        "brier": 1.5425832095875087,
+        "ece5Completed": 0.8508666008710861,
+        "confusion": {
+          "billing": {
+            "billing": 0,
+            "technical": 0,
+            "account": 0,
+            "other": 4,
+            "<failure>": 0
+          },
+          "technical": {
+            "billing": 0,
+            "technical": 0,
+            "account": 0,
+            "other": 4,
+            "<failure>": 0
+          },
+          "account": {
+            "billing": 0,
+            "technical": 0,
+            "account": 0,
+            "other": 4,
+            "<failure>": 0
+          },
+          "other": {
+            "billing": 0,
+            "technical": 0,
+            "account": 0,
+            "other": 0,
+            "<failure>": 0
+          }
+        }
+      },
+      "none-of-the-above": {
+        "n": 2,
+        "correct": 2,
+        "accuracy": 1.0,
+        "failures": 0,
+        "completed": 2,
+        "overflow": 0,
+        "brier": 0.0057122044180681255,
+        "ece5Completed": 0.04980382323265076,
+        "confusion": {
+          "billing": {
+            "billing": 0,
+            "technical": 0,
+            "account": 0,
+            "other": 0,
+            "<failure>": 0
+          },
+          "technical": {
+            "billing": 0,
+            "technical": 0,
+            "account": 0,
+            "other": 0,
+            "<failure>": 0
+          },
+          "account": {
+            "billing": 0,
+            "technical": 0,
+            "account": 0,
+            "other": 0,
+            "<failure>": 0
+          },
+          "other": {
+            "billing": 0,
+            "technical": 0,
+            "account": 0,
+            "other": 2,
+            "<failure>": 0
+          }
+        }
+      }
+    },
+    "orderSensitivity": {
+      "changed": 0,
+      "completeCases": 16,
+      "totalCases": 16,
+      "fraction": 0.0
+    },
+    "latency": {
+      "firstAttemptMs": 428.8817089982331,
+      "completed": 32,
+      "warmCompleted": 31,
+      "warmMedianMs": 242.23762494511902,
+      "warmP95Ms": 298.14404190983623
+    },
+    "loadMs": 2792.7381249610335,
+    "peakRssBytes": 4975886336
+  },
+  "note": "Original-weight PyTorch FP32 vs llama.cpp Q8 with f16 KV. Differences include precision and runtime; no parity tolerance or deployment equivalence claimed."
+}

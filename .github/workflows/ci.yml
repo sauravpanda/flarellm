@@ -28,6 +28,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --workspace
+      - name: Validate decision comparison data and reporting
+        run: python3 -m unittest discover -s evaluations/decision/comparison -p 'test_*.py'
 
   fmt:
     name: Format

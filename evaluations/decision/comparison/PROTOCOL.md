@@ -48,3 +48,11 @@ transfer evaluation, not a deployment qualification or a test of TypeSafe Jev.
   a Rust/WASM port. Even then, a representative human-reviewed evaluation and
   browser latency/memory feasibility are required. Otherwise retain the head
   as research and prioritize the measured Flare bottleneck or prompt work on dev.
+
+Runtime setup amendment, before any NanoJev inference: its published bundle uses
+Transformers 5.17.0 tokenizer/config serialization. The initial Transformers
+4.57.1 loader failed before making a NanoJev request. Align both models to the
+published torch 2.14.0 / transformers 5.17.0 / safetensors 0.8.0 / numpy 2.5.3
+versions, on available native Python 3.13.7 (upstream used 3.14.4). Rerun all Qwen
+measurements on this same environment. Dataset, prompts, metrics and gate stay
+as frozen above. No extra tokenizer aliases or RoPE config translations.

@@ -2,6 +2,7 @@
 import hashlib
 import json
 import math
+import re
 import statistics
 from pathlib import Path
 
@@ -26,7 +27,11 @@ def read(path):
 def write(path, value):
     path = Path(path)
     temporary = path.with_suffix(path.suffix + '.tmp')
-    temporary.write_text(json.dumps(value, ensure_ascii=False, indent=2, allow_nan=False) + '\n')
+    text = json.dumps(value, ensure_ascii=False, indent=2, allow_nan=False)
+    # Keep long token-ID arrays on one line so raw traces remain reviewable.
+    text = re.sub(r'\[\n\s*-?\d+(?:,\n\s*-?\d+)*\n\s*\]',
+                  lambda match: re.sub(r'\s+', '', match.group()), text)
+    temporary.write_text(text + '\n')
     temporary.replace(path)
 
 
