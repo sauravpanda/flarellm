@@ -1,0 +1,20 @@
+{
+  "datasetSha256": "af00a4e161064b1b39ec6fddbc778feb1d9e32719f765b589e22cc29ffd4ed8d",
+  "records": [
+    {
+      "id": "dev-billing-01",
+      "request": {
+        "state": "I need the receipt addressed to my company instead of to me.",
+        "question": "Which support queue should handle this? billing: payments and invoices; technical: product faults; account: login and profile access; other: none fits or multiple queues are equally needed.",
+        "choices": [
+          "billing",
+          "technical",
+          "account",
+          "other"
+        ]
+      },
+      "order": 0
+    }
+  ],
+  "note": "First development ticket per class, original choices, two repetitions; order denotes repetition here."
+}

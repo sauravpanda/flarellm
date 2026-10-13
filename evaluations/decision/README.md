@@ -217,3 +217,12 @@ not establish classification quality.
 The baseline and reusable evaluation are ready for a later NanoJev comparison.
 This checkpoint/prompt combination is **not ready for unattended routing**, and
 these conditional scores provide no Jev-equivalent calibration claim.
+
+
+## Follow-up comparison
+
+The [Qwen3/NanoJev comparison](comparison/README.md) adds separate development
+and held-out routing data, a matched CPU runtime comparison, a bridge back to
+this Q8 baseline, and native Flare prefill profiling. The original results above
+remain historical evidence; the new original-weight FP32 run is a different
+precision/backend measurement.

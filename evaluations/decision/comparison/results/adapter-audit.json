@@ -1,0 +1,27 @@
+{
+  "schema": 1,
+  "sourceSha256": "59c48a8aa6c8dc4515572e9ada99a41dac4864b182c55d42a4752eff6735d6c2",
+  "checks": [
+    {
+      "choices": [
+        "billing",
+        "technical",
+        "account",
+        "other"
+      ],
+      "maxScoreError": 0.0,
+      "choice": "billing"
+    },
+    {
+      "choices": [
+        "other",
+        "account",
+        "technical",
+        "billing"
+      ],
+      "maxScoreError": 0.0,
+      "choice": "billing"
+    }
+  ],
+  "note": "Real checkpoint, CPU FP32. Unchanged upstream predict method with CPU-initialized fields; no CUDA/BF16 parity claim."
+}
