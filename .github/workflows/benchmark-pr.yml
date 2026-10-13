@@ -75,17 +75,7 @@ jobs:
           echo "--- bench-compare.txt ---"
           cat bench-compare.txt
 
-      - name: Upload benchmark JSON
-        uses: actions/upload-artifact@v4
-        with:
-          name: benchmark-${{ github.event.pull_request.number }}-${{ github.sha }}
-          path: |
-            bench-result.json
-            bench-compare.txt
-          retention-days: 30
-
-      - name: Post results as PR comment
-        if: github.event_name == 'pull_request'
+      - name: Write benchmark summary
         uses: actions/github-script@v7
         with:
           script: |
@@ -138,6 +128,34 @@ jobs:
             const marker = '<!-- flare-benchmark-pr-comment -->';
             const fullBody = `${marker}\n${body}`;
 
+            fs.writeFileSync('bench-comment.md', fullBody);
+            await core.summary.addRaw(body).write();
+
+      - name: Upload benchmark results
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-${{ github.event.pull_request.number }}-${{ github.sha }}
+          path: |
+            bench-result.json
+            bench-compare.txt
+            bench-comment.md
+          retention-days: 30
+
+      - name: Post results as PR comment
+        id: comment
+        # Fork PRs have a read-only token; their results remain in the summary.
+        if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+        # Reporting is optional. Build, inference, summary and artifact failures
+        # still fail the job; a GitHub API outage must not invalidate the benchmark.
+        continue-on-error: true
+        uses: actions/github-script@v7
+        with:
+          retries: 3
+          script: |
+            const fs = require('fs');
+            const marker = '<!-- flare-benchmark-pr-comment -->';
+            const fullBody = fs.readFileSync('bench-comment.md', 'utf8');
+
             const { owner, repo } = context.repo;
             const issue_number = context.issue.number;
 
@@ -158,3 +176,7 @@ jobs:
                 owner, repo, issue_number, body: fullBody,
               });
             }
+
+      - name: Warn if the PR comment could not be posted
+        if: steps.comment.outcome == 'failure'
+        run: echo "::warning::Could not post benchmark comment after retries. Results are available in the job summary and benchmark artifact."
