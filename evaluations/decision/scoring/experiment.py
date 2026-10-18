@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Opt-in Q8 prompt experiment; normal CI never downloads or loads weights."""
 import argparse
+import json
 import math
 import platform
 import statistics
@@ -10,7 +11,7 @@ import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
-sys.path.insert(0, str(ROOT.parent/'comparison'))
+sys.path.append(str(ROOT.parent/'comparison'))
 from common import attempts, digest, load_dataset, read, summarize, validate_result, write
 from prompts import VARIANTS, prepare
 
@@ -98,7 +99,7 @@ def run(args):
         ids.write_text('\n'.join(' '.join(map(str,[len(r['labelIds']),*r['labelIds'],*r['promptIds']])) for r in rows)+'\n')
         raw=args.output.with_suffix('.raw.jsonl')
         subprocess.run([str(args.client),str(args.model),str(ids),str(raw)],check=True)
-        values=[__import__('json').loads(line) for line in raw.read_text().splitlines()]
+        values=[json.loads(line) for line in raw.read_text().splitlines()]
     if len(values)!=len(rows):
         raise ValueError('missing client attempts')
     for row,actual in zip(rows,values,strict=True):

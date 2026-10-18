@@ -1,0 +1,4 @@
+# The main result files retain complete prepared inputs and engine outputs.
+# Keep these incremental diagnostics local when a client is interrupted.
+results/*.requests.json
+results/*.raw.jsonl

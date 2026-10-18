@@ -106,3 +106,9 @@ published game checkpoint on new routing tickets. It selects `billing` for all
 64 test tickets in all four orders (25% accuracy), so it does not justify adding
 a NanoJev backend. The existing Qwen prompt also needs quality work. This API
 remains experimental; neither model is validated for unattended routing.
+
+The [Q8 scoring experiment](evaluations/decision/scoring/README.md) tested four
+fixed prompt/scoring variants. Its development-selected answer prefix matched
+the baseline at 26.56% paired test accuracy and failed every preliminary quality
+gate. Production retains `qwen3-choice-v1`; task-specific supervision and an
+independently labeled quality evaluation are the recommended next steps.
