@@ -95,8 +95,8 @@ the ownership wrapper also releases them when its last reference disappears.
   reusable if the separate tokenizer download fails.
 - This version uses foreground downloads. After interruption, a retry restarts
   the missing asset. Background URLSession restoration and HTTP range resume are
-  follow-ups. A process crash can leave a hidden `.partial` staging file; it is
-  never treated as a cache hit and can be removed when no store uses the directory.
+  follow-ups. A process crash can leave a hidden `.partial` staging file; the next store
+  initialization removes these abandoned files from its exclusively owned root.
 
 The pinned Qwen weights/tokenizer are Apache-2.0. Applications distributing these
 assets must preserve upstream license notices. Model files are not shipped with
@@ -135,8 +135,10 @@ FLARE_REAL_CACHE=/tmp/flare-models FLARE_REAL_RESULT=/tmp/flare-result.json \
 This tests the actual HTTPS download, a verified cache hit, native load, Qwen3
 chat formatting, and exact greedy tokens against the preserved reference. The
 result records prepare/cache/load/first-token/request timings and model hashes.
-Request timings include time between native steps and callbacks; they are wall
-latencies, not isolated kernel timings. Native f32 activations and packed Q8
+Generation timings start after tokenization, at native request initialization;
+they include prefill, time between native steps, and previous callbacks. They
+exclude cache verification, queue wait, and prompt encoding. First-token time
+measures the first model decision, including EOS, rather than first visible text. Native f32 activations and packed Q8
 projection matrices match the existing correctness path. Embeddings/output
 storage still uses substantial f32 memory; this preview does not promise a low
 memory footprint just because the download is quantized.
@@ -150,11 +152,11 @@ on an M1 Max Mac, including the pinned model's nine non-EOS reference tokens and
 correct stop termination. Device and simulator Rust slices compiled successfully.
 
 The [Mac smoke record](results/macos-qwen3-smoke.json) preserves the exact output,
-IDs, hashes and environment. A verified disk hit took 364 ms; native load 324 ms;
-first token 4.93 s; the nine-token answer plus EOS completed in 8.42 s. Assets were
+IDs, hashes and environment. A verified disk hit took 313 ms; native load 306 ms;
+first token 3.76 s; the nine-token answer plus EOS completed in 6.69 s. Assets were
 already cached for this recorded run after the preceding actual HTTPS download.
-Simulator tests ran concurrently, so these are uncontrolled observations and
-provide no iPhone speed or performance-improvement claim. Peak iPhone memory,
+No other Flare tests ran concurrently, but this remains a single shared-host
+observation and provides no iPhone speed or performance-improvement claim. Peak iPhone memory,
 battery and thermal measurements remain outstanding.
 
 ### Next performance work

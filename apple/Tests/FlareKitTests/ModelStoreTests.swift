@@ -32,12 +32,20 @@ final class ModelStoreTests: XCTestCase {
     func testVerifiedCacheHitWorksOfflineAndCorruptionIsReplaced() async throws {
         let bytes = Data("verified model bytes".utf8), count = Counter()
         let root = try directory(), item = try asset(bytes)
+        let abandoned = root.appendingPathComponent(".\(UUID().uuidString).partial")
+        try bytes.write(to: abandoned)
         let store = try ModelStore(directory: root, maximumBytes: 100, download: transport(bytes, count: count))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: abandoned.path))
         let first = try await store.ensure(item)
         let second = try await store.ensure(item)
         XCTAssertEqual(first, second)
         let calls = await count.value
         XCTAssertEqual(calls, 1)
+        let offline = try ModelStore(directory: root, maximumBytes: 100) { _, _ in
+            throw FlareError.native("Offline cache hit attempted a download")
+        }
+        let persisted = try await offline.ensure(item)
+        XCTAssertEqual(persisted, first)
         try Data(repeating: 0, count: bytes.count).write(to: first)
         let corrupt = try await store.cachedURL(for: item)
         XCTAssertNil(corrupt)

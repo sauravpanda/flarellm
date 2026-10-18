@@ -62,6 +62,15 @@ public actor ModelStore {
         var values = URLResourceValues()
         values.isExcludedFromBackup = true
         try location.setResourceValues(values)
+        // This store exclusively owns the app-private root. Recover staging
+        // files left by a process termination; never treat them as cache hits.
+        for entry in try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil) {
+            let name = entry.lastPathComponent
+            if name.hasPrefix("."), name.hasSuffix(".partial"),
+               UUID(uuidString: String(name.dropFirst().dropLast(8))) != nil {
+                try FileManager.default.removeItem(at: entry)
+            }
+        }
     }
 
     private static func defaultDirectory() throws -> URL {
@@ -154,10 +163,14 @@ public actor ModelStore {
         defer { try? file.close() }
         var hash = SHA256()
         while true {
-            try Task.checkCancellation()
-            let chunk = try file.read(upToCount: 256 * 1024) ?? Data()
-            if chunk.isEmpty { break }
-            hash.update(data: chunk)
+            let more = try autoreleasepool {
+                try Task.checkCancellation()
+                let chunk = try file.read(upToCount: 256 * 1024) ?? Data()
+                if chunk.isEmpty { return false }
+                hash.update(data: chunk)
+                return true
+            }
+            if !more { break }
         }
         let actual = hash.finalize().map { String(format: "%02x", $0) }.joined()
         guard actual == asset.sha256 else { throw FlareError.integrity("SHA-256 mismatch") }

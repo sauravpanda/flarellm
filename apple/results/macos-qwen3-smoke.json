@@ -1,13 +1,13 @@
 {
   "backend": "native CPU Q8 weights/f32 activations",
   "context": 128,
-  "elapsedMs": 8418.46825,
-  "firstTokenMs": 4928.421375,
+  "elapsedMs": 6693.615583,
+  "firstTokenMs": 3759.407042,
   "generatedTokens": 9,
-  "loadMs": 323.52379199999996,
+  "loadMs": 306.428583,
   "modelSHA256": "9465e63a22add5354d9bb4b99e90117043c7124007664907259bd16d043bb031",
   "os": "Version 27.0.1 (Build 26A434)",
-  "prepareMs": 364.6447083328894,
+  "prepareMs": 311.0022916671369,
   "scope": "One host smoke test; not iPhone performance or a controlled speed comparison",
   "text": "The capital of France is **Paris**.",
   "tokenIDs": [
@@ -22,7 +22,7 @@
     13
   ],
   "tokenizerSHA256": "aeb13307a71acd8fe81861d94ad54ab689df773318809eed3cbe794b4492dae4",
-  "verifiedCacheHitMs": 364.15470833344443,
+  "verifiedCacheHitMs": 313.25354166619945,
   "recordedDate": "2026-10-18",
   "hardware": {
     "cpu": "Apple M1 Max",
@@ -34,5 +34,11 @@
     "swift": "debug",
     "target": "aarch64-apple-darwin"
   },
-  "runConditions": "iPhone simulator tests ran concurrently on the same Mac; timings are observations, not controlled comparisons."
+  "runConditions": "No concurrent Flare tests; shared host, single smoke observation, no controlled performance comparison.",
+  "sourceSha256": {
+    "flare-native/src/lib.rs": "c07ce03b25d69d61826688ecc940a7d3a295aa3345c08947a184ebd129075670",
+    "flare-core/src/model.rs": "30c631387cb05f8b7a014d8d30279f86b43d260f298409a779720ff0692cbb26",
+    "apple/Sources/FlareKit/FlareModel.swift": "aefc4e53b2e1bc65105f5cd96c9fc7bb3b1b4f1b1087d3528c31b1bd2ec2468b",
+    "apple/Sources/FlareKit/ModelStore.swift": "f323dc548376a742a67409cb761df945bb7eb748d8aa42706073497586a7c9d9"
+  }
 }
