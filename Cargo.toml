@@ -12,6 +12,7 @@ members = [
     "flare-web",
     "flare-server",
     "flare-edge",
+    "flare-native",
 ]
 resolver = "2"
 

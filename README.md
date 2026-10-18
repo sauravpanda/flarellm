@@ -308,3 +308,10 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
 ## License
 
 MIT OR Apache-2.0
+
+## Native Apple preview
+
+[FlareKit](apple/README.md) provides an iOS/macOS Swift package for verified model
+downloads, persistent offline caching, and native Qwen3 Q8 CPU generation. Build
+the XCFramework from source. Physical-iPhone performance and Qwen3 Metal support
+remain unqualified; see the supported scope and tests before integrating.

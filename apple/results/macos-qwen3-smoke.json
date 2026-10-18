@@ -1,0 +1,38 @@
+{
+  "backend": "native CPU Q8 weights/f32 activations",
+  "context": 128,
+  "elapsedMs": 8418.46825,
+  "firstTokenMs": 4928.421375,
+  "generatedTokens": 9,
+  "loadMs": 323.52379199999996,
+  "modelSHA256": "9465e63a22add5354d9bb4b99e90117043c7124007664907259bd16d043bb031",
+  "os": "Version 27.0.1 (Build 26A434)",
+  "prepareMs": 364.6447083328894,
+  "scope": "One host smoke test; not iPhone performance or a controlled speed comparison",
+  "text": "The capital of France is **Paris**.",
+  "tokenIDs": [
+    785,
+    6722,
+    315,
+    9625,
+    374,
+    3070,
+    59604,
+    334,
+    13
+  ],
+  "tokenizerSHA256": "aeb13307a71acd8fe81861d94ad54ab689df773318809eed3cbe794b4492dae4",
+  "verifiedCacheHitMs": 364.15470833344443,
+  "recordedDate": "2026-10-18",
+  "hardware": {
+    "cpu": "Apple M1 Max",
+    "memoryBytes": 68719476736
+  },
+  "referenceTokensMatch": true,
+  "build": {
+    "rust": "release",
+    "swift": "debug",
+    "target": "aarch64-apple-darwin"
+  },
+  "runConditions": "iPhone simulator tests ran concurrently on the same Mac; timings are observations, not controlled comparisons."
+}

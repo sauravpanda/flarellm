@@ -36,6 +36,8 @@ COPY flarellm         flarellm/
 # workspace without pulling in their (wasm-pack / edge-runtime) toolchains.
 COPY flare-web/Cargo.toml flare-web/Cargo.toml
 RUN mkdir -p flare-web/src && echo 'fn main() {}' > flare-web/src/lib.rs
+COPY flare-native/Cargo.toml flare-native/Cargo.toml
+RUN mkdir -p flare-native/src && echo 'fn main() {}' > flare-native/src/lib.rs
 COPY flare-edge/Cargo.toml flare-edge/Cargo.toml
 RUN mkdir -p flare-edge/src && echo 'fn main() {}' > flare-edge/src/lib.rs
 

@@ -478,6 +478,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "flarellm-native"
+version = "0.1.0"
+dependencies = [
+ "flarellm-core",
+ "flarellm-loader",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "flarellm-server"
 version = "0.1.0"
 dependencies = [

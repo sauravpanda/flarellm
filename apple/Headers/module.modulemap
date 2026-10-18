@@ -1,0 +1,6 @@
+module CFlare {
+    header "flare_native.h"
+    export *
+    link framework "Accelerate"
+    link "c++"
+}
