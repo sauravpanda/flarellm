@@ -1,0 +1,232 @@
+{
+  "version": "routing-synthetic-v3",
+  "split": "test",
+  "provenance": "Original synthetic English tickets authored before inference for this repository, MIT OR Apache-2.0; no customer data or independent human adjudication.",
+  "question": "Which support queue should handle this? billing: payments and invoices; technical: product faults; account: login and profile access; other: none fits or multiple queues are equally needed.",
+  "choices": [
+    "billing",
+    "technical",
+    "account",
+    "other"
+  ],
+  "orders": [
+    [
+      0,
+      1,
+      2,
+      3
+    ],
+    [
+      3,
+      2,
+      1,
+      0
+    ],
+    [
+      1,
+      0,
+      3,
+      2
+    ],
+    [
+      2,
+      3,
+      0,
+      1
+    ]
+  ],
+  "cases": [
+    {
+      "id": "v3-billing-01",
+      "state": "Our nonprofit received a charge for a license we never ordered. Please investigate the payment.",
+      "expected": "billing",
+      "kind": "clear"
+    },
+    {
+      "id": "v3-billing-02",
+      "state": "Please move our next payment deadline to the end of this month.",
+      "expected": "billing",
+      "kind": "clear"
+    },
+    {
+      "id": "v3-billing-03",
+      "state": "I need a refund for the add-on that I purchased by mistake this afternoon.",
+      "expected": "billing",
+      "kind": "clear"
+    },
+    {
+      "id": "v3-billing-04",
+      "state": "The receipt has the wrong registered business address for our finance records.",
+      "expected": "billing",
+      "kind": "clear"
+    },
+    {
+      "id": "v3-billing-05",
+      "state": "We paid the yearly fee in advance, yet a monthly fee was deducted as well.",
+      "expected": "billing",
+      "kind": "clear"
+    },
+    {
+      "id": "v3-billing-06",
+      "state": "An additional service fee appeared on the final invoice without an explanation.",
+      "expected": "billing",
+      "kind": "clear"
+    },
+    {
+      "id": "v3-billing-07",
+      "state": "Could you confirm whether the wire transfer for invoice 781 was received?",
+      "expected": "billing",
+      "kind": "clear"
+    },
+    {
+      "id": "v3-billing-08",
+      "state": "Please stop auto-renewal so that no payment is taken next year.",
+      "expected": "billing",
+      "kind": "clear"
+    },
+    {
+      "id": "v3-technical-01",
+      "state": "The drawing tool leaves a trail on the screen after I release the mouse button.",
+      "expected": "technical",
+      "kind": "clear"
+    },
+    {
+      "id": "v3-technical-02",
+      "state": "Every saved checklist loses its last item when opened on another device.",
+      "expected": "technical",
+      "kind": "clear"
+    },
+    {
+      "id": "v3-technical-03",
+      "state": "The app rotates uploaded photographs upside down even when the originals are upright.",
+      "expected": "technical",
+      "kind": "clear"
+    },
+    {
+      "id": "v3-technical-04",
+      "state": "The progress counter resets to zero every time a background task reaches completion.",
+      "expected": "technical",
+      "kind": "clear"
+    },
+    {
+      "id": "v3-technical-05",
+      "state": "Attaching a spreadsheet makes the conversation window stop responding.",
+      "expected": "technical",
+      "kind": "clear"
+    },
+    {
+      "id": "v3-technical-06",
+      "state": "The playback slider jumps to the start whenever I try to skip ahead.",
+      "expected": "technical",
+      "kind": "clear"
+    },
+    {
+      "id": "v3-technical-07",
+      "state": "Adding a second data source makes the report show the first source twice.",
+      "expected": "technical",
+      "kind": "clear"
+    },
+    {
+      "id": "v3-technical-08",
+      "state": "The document viewer renders white text on a white background after the update.",
+      "expected": "technical",
+      "kind": "clear"
+    },
+    {
+      "id": "v3-account-01",
+      "state": "My employer changed our email domain. Please update the email tied to my user identity.",
+      "expected": "account",
+      "kind": "clear"
+    },
+    {
+      "id": "v3-account-02",
+      "state": "I need access restored after my administrator accidentally suspended my membership.",
+      "expected": "account",
+      "kind": "clear"
+    },
+    {
+      "id": "v3-account-03",
+      "state": "Can you remove the old recovery address from my login settings?",
+      "expected": "account",
+      "kind": "clear"
+    },
+    {
+      "id": "v3-account-04",
+      "state": "Please help me accept an organization invitation with my existing user identity.",
+      "expected": "account",
+      "kind": "clear"
+    },
+    {
+      "id": "v3-account-05",
+      "state": "Our workspace owner has left the company and we need to designate a replacement.",
+      "expected": "account",
+      "kind": "clear"
+    },
+    {
+      "id": "v3-account-06",
+      "state": "I cannot authenticate because my hardware security token was stolen.",
+      "expected": "account",
+      "kind": "clear"
+    },
+    {
+      "id": "v3-account-07",
+      "state": "Please change which staff member has administrator privileges in our workspace.",
+      "expected": "account",
+      "kind": "clear"
+    },
+    {
+      "id": "v3-account-08",
+      "state": "I want to end the sessions on a shared computer where I forgot to sign out.",
+      "expected": "account",
+      "kind": "clear"
+    },
+    {
+      "id": "v3-other-01",
+      "state": "Would your company donate merchandise for our school auction?",
+      "expected": "other",
+      "kind": "none-of-the-above"
+    },
+    {
+      "id": "v3-other-02",
+      "state": "I am collecting company histories for a university research project.",
+      "expected": "other",
+      "kind": "none-of-the-above"
+    },
+    {
+      "id": "v3-other-03",
+      "state": "Who handles inquiries about filming an interview in your office?",
+      "expected": "other",
+      "kind": "none-of-the-above"
+    },
+    {
+      "id": "v3-other-04",
+      "state": "Can your team contribute a guest article to our community newsletter?",
+      "expected": "other",
+      "kind": "none-of-the-above"
+    },
+    {
+      "id": "v3-other-05",
+      "state": "Is there a public archive of your company conference talks?",
+      "expected": "other",
+      "kind": "none-of-the-above"
+    },
+    {
+      "id": "v3-other-06",
+      "state": "I would like to suggest adding a gardening planner as a new product feature.",
+      "expected": "other",
+      "kind": "none-of-the-above"
+    },
+    {
+      "id": "v3-other-07",
+      "state": "Please resolve a wrong service fee and a broken document viewer, both with equal priority.",
+      "expected": "other",
+      "kind": "ambiguous"
+    },
+    {
+      "id": "v3-other-08",
+      "state": "I have a sign-in access issue and incorrect invoice details; I need both addressed equally.",
+      "expected": "other",
+      "kind": "ambiguous"
+    }
+  ]
+}

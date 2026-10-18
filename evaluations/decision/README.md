@@ -226,3 +226,8 @@ and held-out routing data, a matched CPU runtime comparison, a bridge back to
 this Q8 baseline, and native Flare prefill profiling. The original results above
 remain historical evidence; the new original-weight FP32 run is a different
 precision/backend measurement.
+
+The [Q8 scoring experiment](scoring/README.md) follows that comparison with four
+fixed candidates, a frozen development selection, 32 new held-out tickets, and
+full-vocabulary label-mass diagnostics. The selected prompt failed all quality
+gates; no production prompt change is justified.

@@ -1,0 +1,11 @@
+{
+  "attempts": 8,
+  "winnerMatches": 8,
+  "maxCandidateLogitError": 0.3802070617675781,
+  "maxConditionalScoreError": 0.030145099017084953,
+  "maxLabelMassError": 0.0045004459332737,
+  "disagreements": [],
+  "note": "Predeclared eight-case numerical smoke only; full test quality measured with llama.cpp Q8. No browser or speed claim.",
+  "requestsSha256": "3eabe4c1b054416a135ce7f1202e97b92a939f6c5081b33d7183dfb63332c120",
+  "runSha256": "2435b94200b8b02bd650944605782d11ec3224f364e6dfef81d05389a4669091"
+}

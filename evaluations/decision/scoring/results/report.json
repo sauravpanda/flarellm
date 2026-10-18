@@ -1,0 +1,754 @@
+{
+  "selectedVariant": "answer_prefix",
+  "uniqueTestCases": 32,
+  "summaries": {
+    "baseline": {
+      "model": "baseline",
+      "datasetSha256": "ec76803ebf51112c2ef750ddcf1335c09e1f60a3950e783d933a91c90b03223c",
+      "uniqueCases": 32,
+      "byOrder": {
+        "0": {
+          "n": 32,
+          "correct": 10,
+          "accuracy": 0.3125,
+          "failures": 0,
+          "completed": 32,
+          "overflow": 0,
+          "brier": 1.2586950765772342,
+          "ece5Completed": 0.6252753408533377,
+          "confusion": {
+            "billing": {
+              "billing": 2,
+              "technical": 0,
+              "account": 0,
+              "other": 6,
+              "<failure>": 0
+            },
+            "technical": {
+              "billing": 0,
+              "technical": 0,
+              "account": 0,
+              "other": 8,
+              "<failure>": 0
+            },
+            "account": {
+              "billing": 0,
+              "technical": 0,
+              "account": 0,
+              "other": 8,
+              "<failure>": 0
+            },
+            "other": {
+              "billing": 0,
+              "technical": 0,
+              "account": 0,
+              "other": 8,
+              "<failure>": 0
+            }
+          }
+        },
+        "1": {
+          "n": 32,
+          "correct": 8,
+          "accuracy": 0.25,
+          "failures": 0,
+          "completed": 32,
+          "overflow": 0,
+          "brier": 1.4710409782568457,
+          "ece5Completed": 0.7318727584088343,
+          "confusion": {
+            "billing": {
+              "billing": 0,
+              "technical": 0,
+              "account": 0,
+              "other": 8,
+              "<failure>": 0
+            },
+            "technical": {
+              "billing": 0,
+              "technical": 0,
+              "account": 0,
+              "other": 8,
+              "<failure>": 0
+            },
+            "account": {
+              "billing": 0,
+              "technical": 0,
+              "account": 0,
+              "other": 8,
+              "<failure>": 0
+            },
+            "other": {
+              "billing": 0,
+              "technical": 0,
+              "account": 0,
+              "other": 8,
+              "<failure>": 0
+            }
+          }
+        },
+        "2": {
+          "n": 32,
+          "correct": 8,
+          "accuracy": 0.25,
+          "failures": 0,
+          "completed": 32,
+          "overflow": 0,
+          "brier": 1.040363976478912,
+          "ece5Completed": 0.45539372107750253,
+          "confusion": {
+            "billing": {
+              "billing": 2,
+              "technical": 0,
+              "account": 0,
+              "other": 6,
+              "<failure>": 0
+            },
+            "technical": {
+              "billing": 0,
+              "technical": 1,
+              "account": 0,
+              "other": 7,
+              "<failure>": 0
+            },
+            "account": {
+              "billing": 0,
+              "technical": 4,
+              "account": 0,
+              "other": 4,
+              "<failure>": 0
+            },
+            "other": {
+              "billing": 0,
+              "technical": 3,
+              "account": 0,
+              "other": 5,
+              "<failure>": 0
+            }
+          }
+        },
+        "3": {
+          "n": 32,
+          "correct": 8,
+          "accuracy": 0.25,
+          "failures": 0,
+          "completed": 32,
+          "overflow": 0,
+          "brier": 1.3250588909043275,
+          "ece5Completed": 0.6690965046574969,
+          "confusion": {
+            "billing": {
+              "billing": 0,
+              "technical": 0,
+              "account": 0,
+              "other": 8,
+              "<failure>": 0
+            },
+            "technical": {
+              "billing": 0,
+              "technical": 0,
+              "account": 0,
+              "other": 8,
+              "<failure>": 0
+            },
+            "account": {
+              "billing": 0,
+              "technical": 0,
+              "account": 0,
+              "other": 8,
+              "<failure>": 0
+            },
+            "other": {
+              "billing": 0,
+              "technical": 0,
+              "account": 0,
+              "other": 8,
+              "<failure>": 0
+            }
+          }
+        }
+      },
+      "pooledPaired": {
+        "n": 128,
+        "correct": 34,
+        "accuracy": 0.265625,
+        "failures": 0,
+        "completed": 128,
+        "overflow": 0,
+        "brier": 1.2737897305543302,
+        "ece5Completed": 0.5994962927296305,
+        "confusion": {
+          "billing": {
+            "billing": 4,
+            "technical": 0,
+            "account": 0,
+            "other": 28,
+            "<failure>": 0
+          },
+          "technical": {
+            "billing": 0,
+            "technical": 1,
+            "account": 0,
+            "other": 31,
+            "<failure>": 0
+          },
+          "account": {
+            "billing": 0,
+            "technical": 4,
+            "account": 0,
+            "other": 28,
+            "<failure>": 0
+          },
+          "other": {
+            "billing": 0,
+            "technical": 3,
+            "account": 0,
+            "other": 29,
+            "<failure>": 0
+          }
+        }
+      },
+      "byKindOriginal": {
+        "ambiguous": {
+          "n": 2,
+          "correct": 2,
+          "accuracy": 1.0,
+          "failures": 0,
+          "completed": 2,
+          "overflow": 0,
+          "brier": 0.09477039846613972,
+          "ece5Completed": 0.22020465383813248,
+          "confusion": {
+            "billing": {
+              "billing": 0,
+              "technical": 0,
+              "account": 0,
+              "other": 0,
+              "<failure>": 0
+            },
+            "technical": {
+              "billing": 0,
+              "technical": 0,
+              "account": 0,
+              "other": 0,
+              "<failure>": 0
+            },
+            "account": {
+              "billing": 0,
+              "technical": 0,
+              "account": 0,
+              "other": 0,
+              "<failure>": 0
+            },
+            "other": {
+              "billing": 0,
+              "technical": 0,
+              "account": 0,
+              "other": 2,
+              "<failure>": 0
+            }
+          }
+        },
+        "clear": {
+          "n": 24,
+          "correct": 2,
+          "accuracy": 0.08333333333333333,
+          "failures": 0,
+          "completed": 24,
+          "overflow": 0,
+          "brier": 1.6611416072916807,
+          "ece5Completed": 0.8843567132517179,
+          "confusion": {
+            "billing": {
+              "billing": 2,
+              "technical": 0,
+              "account": 0,
+              "other": 6,
+              "<failure>": 0
+            },
+            "technical": {
+              "billing": 0,
+              "technical": 0,
+              "account": 0,
+              "other": 8,
+              "<failure>": 0
+            },
+            "account": {
+              "billing": 0,
+              "technical": 0,
+              "account": 0,
+              "other": 8,
+              "<failure>": 0
+            },
+            "other": {
+              "billing": 0,
+              "technical": 0,
+              "account": 0,
+              "other": 0,
+              "<failure>": 0
+            }
+          }
+        },
+        "none-of-the-above": {
+          "n": 6,
+          "correct": 6,
+          "accuracy": 1.0,
+          "failures": 0,
+          "completed": 6,
+          "overflow": 0,
+          "brier": 0.036883846423144566,
+          "ece5Completed": 0.1292234838430275,
+          "confusion": {
+            "billing": {
+              "billing": 0,
+              "technical": 0,
+              "account": 0,
+              "other": 0,
+              "<failure>": 0
+            },
+            "technical": {
+              "billing": 0,
+              "technical": 0,
+              "account": 0,
+              "other": 0,
+              "<failure>": 0
+            },
+            "account": {
+              "billing": 0,
+              "technical": 0,
+              "account": 0,
+              "other": 0,
+              "<failure>": 0
+            },
+            "other": {
+              "billing": 0,
+              "technical": 0,
+              "account": 0,
+              "other": 6,
+              "<failure>": 0
+            }
+          }
+        }
+      },
+      "orderSensitivity": {
+        "changed": 11,
+        "completeCases": 32,
+        "totalCases": 32,
+        "fraction": 0.34375
+      },
+      "latency": {
+        "firstAttemptMs": 239.090709,
+        "completed": 128,
+        "warmCompleted": 127,
+        "warmMedianMs": 224.262833,
+        "warmP95Ms": 244.556667
+      },
+      "loadMs": null,
+      "peakRssBytes": null,
+      "labelMass": {
+        "completed": 128,
+        "mean": 0.9996973693533006,
+        "minimum": 0.9989450251986626,
+        "topTokenOutsideLabels": 0
+      }
+    },
+    "answer_prefix": {
+      "model": "answer_prefix",
+      "datasetSha256": "ec76803ebf51112c2ef750ddcf1335c09e1f60a3950e783d933a91c90b03223c",
+      "uniqueCases": 32,
+      "byOrder": {
+        "0": {
+          "n": 32,
+          "correct": 8,
+          "accuracy": 0.25,
+          "failures": 0,
+          "completed": 32,
+          "overflow": 0,
+          "brier": 1.4309818607345133,
+          "ece5Completed": 0.7288718021644389,
+          "confusion": {
+            "billing": {
+              "billing": 0,
+              "technical": 0,
+              "account": 0,
+              "other": 8,
+              "<failure>": 0
+            },
+            "technical": {
+              "billing": 0,
+              "technical": 0,
+              "account": 0,
+              "other": 8,
+              "<failure>": 0
+            },
+            "account": {
+              "billing": 0,
+              "technical": 0,
+              "account": 0,
+              "other": 8,
+              "<failure>": 0
+            },
+            "other": {
+              "billing": 0,
+              "technical": 0,
+              "account": 0,
+              "other": 8,
+              "<failure>": 0
+            }
+          }
+        },
+        "1": {
+          "n": 32,
+          "correct": 9,
+          "accuracy": 0.28125,
+          "failures": 0,
+          "completed": 32,
+          "overflow": 0,
+          "brier": 1.2124803024558553,
+          "ece5Completed": 0.6111141352375407,
+          "confusion": {
+            "billing": {
+              "billing": 0,
+              "technical": 0,
+              "account": 0,
+              "other": 8,
+              "<failure>": 0
+            },
+            "technical": {
+              "billing": 0,
+              "technical": 0,
+              "account": 1,
+              "other": 7,
+              "<failure>": 0
+            },
+            "account": {
+              "billing": 0,
+              "technical": 0,
+              "account": 1,
+              "other": 7,
+              "<failure>": 0
+            },
+            "other": {
+              "billing": 0,
+              "technical": 0,
+              "account": 0,
+              "other": 8,
+              "<failure>": 0
+            }
+          }
+        },
+        "2": {
+          "n": 32,
+          "correct": 9,
+          "accuracy": 0.28125,
+          "failures": 0,
+          "completed": 32,
+          "overflow": 0,
+          "brier": 1.3528422839514478,
+          "ece5Completed": 0.6812836067310896,
+          "confusion": {
+            "billing": {
+              "billing": 0,
+              "technical": 0,
+              "account": 0,
+              "other": 8,
+              "<failure>": 0
+            },
+            "technical": {
+              "billing": 0,
+              "technical": 0,
+              "account": 0,
+              "other": 8,
+              "<failure>": 0
+            },
+            "account": {
+              "billing": 0,
+              "technical": 0,
+              "account": 1,
+              "other": 7,
+              "<failure>": 0
+            },
+            "other": {
+              "billing": 0,
+              "technical": 0,
+              "account": 0,
+              "other": 8,
+              "<failure>": 0
+            }
+          }
+        },
+        "3": {
+          "n": 32,
+          "correct": 8,
+          "accuracy": 0.25,
+          "failures": 0,
+          "completed": 32,
+          "overflow": 0,
+          "brier": 1.4905326862044783,
+          "ece5Completed": 0.7467961567671191,
+          "confusion": {
+            "billing": {
+              "billing": 0,
+              "technical": 0,
+              "account": 0,
+              "other": 8,
+              "<failure>": 0
+            },
+            "technical": {
+              "billing": 0,
+              "technical": 0,
+              "account": 0,
+              "other": 8,
+              "<failure>": 0
+            },
+            "account": {
+              "billing": 0,
+              "technical": 0,
+              "account": 0,
+              "other": 8,
+              "<failure>": 0
+            },
+            "other": {
+              "billing": 0,
+              "technical": 0,
+              "account": 0,
+              "other": 8,
+              "<failure>": 0
+            }
+          }
+        }
+      },
+      "pooledPaired": {
+        "n": 128,
+        "correct": 34,
+        "accuracy": 0.265625,
+        "failures": 0,
+        "completed": 128,
+        "overflow": 0,
+        "brier": 1.371709283336574,
+        "ece5Completed": 0.692016425225047,
+        "confusion": {
+          "billing": {
+            "billing": 0,
+            "technical": 0,
+            "account": 0,
+            "other": 32,
+            "<failure>": 0
+          },
+          "technical": {
+            "billing": 0,
+            "technical": 0,
+            "account": 1,
+            "other": 31,
+            "<failure>": 0
+          },
+          "account": {
+            "billing": 0,
+            "technical": 0,
+            "account": 2,
+            "other": 30,
+            "<failure>": 0
+          },
+          "other": {
+            "billing": 0,
+            "technical": 0,
+            "account": 0,
+            "other": 32,
+            "<failure>": 0
+          }
+        }
+      },
+      "byKindOriginal": {
+        "ambiguous": {
+          "n": 2,
+          "correct": 2,
+          "accuracy": 1.0,
+          "failures": 0,
+          "completed": 2,
+          "overflow": 0,
+          "brier": 0.00014065151100056726,
+          "ece5Completed": 0.008510181550437368,
+          "confusion": {
+            "billing": {
+              "billing": 0,
+              "technical": 0,
+              "account": 0,
+              "other": 0,
+              "<failure>": 0
+            },
+            "technical": {
+              "billing": 0,
+              "technical": 0,
+              "account": 0,
+              "other": 0,
+              "<failure>": 0
+            },
+            "account": {
+              "billing": 0,
+              "technical": 0,
+              "account": 0,
+              "other": 0,
+              "<failure>": 0
+            },
+            "other": {
+              "billing": 0,
+              "technical": 0,
+              "account": 0,
+              "other": 2,
+              "<failure>": 0
+            }
+          }
+        },
+        "clear": {
+          "n": 24,
+          "correct": 0,
+          "accuracy": 0.0,
+          "failures": 0,
+          "completed": 24,
+          "overflow": 0,
+          "brier": 1.9079638353623392,
+          "ece5Completed": 0.9727218502189475,
+          "confusion": {
+            "billing": {
+              "billing": 0,
+              "technical": 0,
+              "account": 0,
+              "other": 8,
+              "<failure>": 0
+            },
+            "technical": {
+              "billing": 0,
+              "technical": 0,
+              "account": 0,
+              "other": 8,
+              "<failure>": 0
+            },
+            "account": {
+              "billing": 0,
+              "technical": 0,
+              "account": 0,
+              "other": 8,
+              "<failure>": 0
+            },
+            "other": {
+              "billing": 0,
+              "technical": 0,
+              "account": 0,
+              "other": 0,
+              "<failure>": 0
+            }
+          }
+        },
+        "none-of-the-above": {
+          "n": 6,
+          "correct": 6,
+          "accuracy": 1.0,
+          "failures": 0,
+          "completed": 6,
+          "overflow": 0,
+          "brier": 1.0319643799434876e-06,
+          "ece5Completed": 0.0007343954819694076,
+          "confusion": {
+            "billing": {
+              "billing": 0,
+              "technical": 0,
+              "account": 0,
+              "other": 0,
+              "<failure>": 0
+            },
+            "technical": {
+              "billing": 0,
+              "technical": 0,
+              "account": 0,
+              "other": 0,
+              "<failure>": 0
+            },
+            "account": {
+              "billing": 0,
+              "technical": 0,
+              "account": 0,
+              "other": 0,
+              "<failure>": 0
+            },
+            "other": {
+              "billing": 0,
+              "technical": 0,
+              "account": 0,
+              "other": 6,
+              "<failure>": 0
+            }
+          }
+        }
+      },
+      "orderSensitivity": {
+        "changed": 2,
+        "completeCases": 32,
+        "totalCases": 32,
+        "fraction": 0.0625
+      },
+      "latency": {
+        "firstAttemptMs": 250.67,
+        "completed": 128,
+        "warmCompleted": 127,
+        "warmMedianMs": 198.673625,
+        "warmP95Ms": 209.591166
+      },
+      "loadMs": null,
+      "peakRssBytes": null,
+      "labelMass": {
+        "completed": 128,
+        "mean": 0.988051537375742,
+        "minimum": 0.9663100161451252,
+        "topTokenOutsideLabels": 0
+      }
+    }
+  },
+  "originalOrderClassAccuracy": {
+    "billing": 0.0,
+    "technical": 0.0,
+    "account": 0.0,
+    "other": 1.0
+  },
+  "pairedByOrder": {
+    "0": {
+      "bothCorrect": 8,
+      "baselineOnly": 2,
+      "selectedOnly": 0,
+      "neitherCorrect": 22
+    },
+    "1": {
+      "bothCorrect": 8,
+      "baselineOnly": 0,
+      "selectedOnly": 1,
+      "neitherCorrect": 23
+    },
+    "2": {
+      "bothCorrect": 5,
+      "baselineOnly": 3,
+      "selectedOnly": 4,
+      "neitherCorrect": 20
+    },
+    "3": {
+      "bothCorrect": 8,
+      "baselineOnly": 0,
+      "selectedOnly": 0,
+      "neitherCorrect": 24
+    }
+  },
+  "preliminaryGate": {
+    "passed": false,
+    "beatsBaselineEveryOrder": false,
+    "beats25PercentEveryOrder": false,
+    "eachOriginalOrderClassAbove50Percent": false
+  },
+  "caveats": [
+    "Synthetic n=32 with author-assigned targets; no independent human adjudication.",
+    "Choice orders are paired measurements, not independent additional cases.",
+    "Conditional scores and label mass are different quantities; neither is calibrated confidence.",
+    "Full quality run uses llama.cpp Q8 CPU; Flare is checked on a predeclared eight-case subset.",
+    "Passing these preliminary gates is not deployment acceptance."
+  ],
+  "datasetSha256": "ec76803ebf51112c2ef750ddcf1335c09e1f60a3950e783d933a91c90b03223c",
+  "runSha256": "84ab5f7e0ec30409f15b96d9f7a4b8b5796db4f3cc7500614f4562d43820cc03",
+  "selectionSha256": "6baee616c2bf12b5694fd9402653dda01abfeee562da5971da8116ff42c69f76"
+}

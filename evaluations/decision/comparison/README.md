@@ -258,3 +258,11 @@ this PR does not remeasure the browser or certify a browser speed improvement.
 3. Reconsider a learned decision head only with domain-relevant supervision and
    representative validation. This result does not establish that NanoJev is
    ineffective on its published game tasks or all possible decision tasks.
+
+## Follow-up scoring experiment
+
+The [Q8 scoring experiment](../scoring/README.md) compares four fixed prompt and
+label-continuation variants on this development split, then tests the frozen
+winner on 32 new tickets. The winner failed all preliminary quality gates despite
+high probability mass on offered letters. See that report for the recorded
+outputs and proposed task-specific supervised baseline.
