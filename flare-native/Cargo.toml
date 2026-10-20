@@ -1,0 +1,16 @@
+[package]
+name = "flarellm-native"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[lib]
+name = "flare_native"
+crate-type = ["staticlib", "rlib"]
+
+[dependencies]
+flare-core = { package = "flarellm-core", path = "../flare-core" }
+flare-loader = { package = "flarellm-loader", path = "../flare-loader" }
+serde = { workspace = true }
+serde_json = { workspace = true }

@@ -6051,19 +6051,12 @@ pub fn matvec_q8_0_scalar(weight_data: &[u8], input: &[f32], rows: usize, cols: 
     output
 }
 
-/// Emulate ARM dot product instruction using widening multiply + pairwise add.
-/// Computes acc + sum_of_products(a[i]*b[i]) for 16 int8 pairs, returning 4 int32 lanes.
-/// Equivalent to `vdotq_s32` (ARMv8.2 dotprod) using inline assembly to emit
-/// the hardware SDOT instruction on stable Rust, avoiding the unstable
-/// `stdarch_neon_dotprod` feature.
-///
-/// SDOT computes four independent dot-products of 4 signed-int8 pairs each,
-/// accumulating into int32 lanes. This is ~2x faster than the widening-multiply
-/// fallback (`vmull_s8` + `vpaddlq_s16`) because it retires in a single cycle
-/// on Apple Silicon and other ARMv8.2+ cores.
+/// Four signed-int8 dot products, each accumulating four pairs into one lane.
+/// Uses SDOT only when enabled for the compilation target; generic ARM64 iOS
+/// builds use the NEON equivalent instead of emitting unsupported instructions.
 ///
 /// # Safety
-/// Requires ARMv8.2-A with dotprod (all Apple Silicon, Cortex-A76+, etc.).
+/// Requires aarch64 NEON (baseline on supported ARM64 targets).
 #[cfg(target_arch = "aarch64")]
 #[inline(always)]
 unsafe fn ggml_vdotq_s32(
@@ -6071,16 +6064,22 @@ unsafe fn ggml_vdotq_s32(
     a: std::arch::aarch64::int8x16_t,
     b: std::arch::aarch64::int8x16_t,
 ) -> std::arch::aarch64::int32x4_t {
-    let mut result = acc;
-    // SDOT Vd.4S, Vn.16B, Vm.16B — signed dot product, 4 lanes x 4 int8 pairs
-    core::arch::asm!(
-        "sdot {result:v}.4s, {a:v}.16b, {b:v}.16b",
-        result = inout(vreg) result,
-        a = in(vreg) a,
-        b = in(vreg) b,
-        options(pure, nomem, nostack),
-    );
-    result
+    #[cfg(target_feature = "dotprod")]
+    {
+        let mut result = acc;
+        core::arch::asm!(
+            "sdot {result:v}.4s, {a:v}.16b, {b:v}.16b",
+            result = inout(vreg) result,
+            a = in(vreg) a,
+            b = in(vreg) b,
+            options(pure, nomem, nostack),
+        );
+        result
+    }
+    #[cfg(not(target_feature = "dotprod"))]
+    {
+        ggml_vdotq_s32_fallback(acc, a, b)
+    }
 }
 
 /// Fallback for pre-ARMv8.2 cores without the dotprod extension.
@@ -6096,7 +6095,7 @@ unsafe fn ggml_vdotq_s32_fallback(
     use std::arch::aarch64::*;
     let p0 = vmull_s8(vget_low_s8(a), vget_low_s8(b));
     let p1 = vmull_s8(vget_high_s8(a), vget_high_s8(b));
-    vaddq_s32(acc, vaddq_s32(vpaddlq_s16(p0), vpaddlq_s16(p1)))
+    vaddq_s32(acc, vpaddq_s32(vpaddlq_s16(p0), vpaddlq_s16(p1)))
 }
 
 /// Quantize 32 f32 values to Q8_0 format (scale + 32 int8 quants) using NEON.
@@ -8058,6 +8057,7 @@ fn matvec_q8_0_relaxed_simd_into(
 /// ARM NEON SIMD matvec into pre-allocated output.
 #[cfg(all(target_arch = "aarch64", not(target_os = "macos")))]
 fn matvec_simd_into(mat: &[f32], vec: &[f32], rows: usize, cols: usize, output: &mut [f32]) {
+    debug_assert_eq!(output.len(), rows);
     for (i, out) in output.iter_mut().enumerate() {
         let row = &mat[i * cols..i * cols + cols];
         // SAFETY: row.len() == cols, SIMD feature gated by cfg
@@ -10432,6 +10432,47 @@ fn cpu_gqa_softcap(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_arch = "aarch64")]
+    #[test]
+    fn neon_dot_fallback_preserves_each_four_byte_lane() {
+        use std::arch::aarch64::*;
+        let a: [i8; 16] = [
+            -128, 127, 2, -3, 4, 5, -6, 7, 8, -9, 10, 11, 12, 13, 14, -15,
+        ];
+        let b: [i8; 16] = [2, 3, -4, 5, 6, -7, 8, 9, 10, 11, -12, 13, 14, 15, -16, 17];
+        let initial = [11, 22, 33, 44];
+        let expected: Vec<i32> = (0..4)
+            .map(|lane| {
+                initial[lane]
+                    + (0..4)
+                        .map(|i| i32::from(a[lane * 4 + i]) * i32::from(b[lane * 4 + i]))
+                        .sum::<i32>()
+            })
+            .collect();
+        // SAFETY: ARM64 guarantees NEON, and each load/store uses a full array.
+        unsafe {
+            let mut result = [0; 4];
+            vst1q_s32(
+                result.as_mut_ptr(),
+                ggml_vdotq_s32_fallback(
+                    vld1q_s32(initial.as_ptr()),
+                    vld1q_s8(a.as_ptr()),
+                    vld1q_s8(b.as_ptr()),
+                ),
+            );
+            assert_eq!(result.as_slice(), expected);
+            vst1q_s32(
+                result.as_mut_ptr(),
+                ggml_vdotq_s32(
+                    vld1q_s32(initial.as_ptr()),
+                    vld1q_s8(a.as_ptr()),
+                    vld1q_s8(b.as_ptr()),
+                ),
+            );
+            assert_eq!(result.as_slice(), expected);
+        }
+    }
 
     #[test]
     fn qwen3_normalizes_each_head_before_rotary() {
