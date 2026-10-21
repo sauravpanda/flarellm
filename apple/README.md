@@ -207,6 +207,32 @@ activations and the scalar accumulation order; other targets use scalar. Neither
 path introduces activation quantization. CI checks the kernel's float results
 and the independent Qwen logits/token reference on ARM64 in release mode.
 
+### Recorded NEON comparison
+
+The [2026-10-20 Mac comparison](results/macos-qwen3-neon.json) records scalar main
+`cb6a9d7` versus NEON `8af57d0` on an M1 Max, with Rust release libraries and Swift
+debug tests. These are medians of three measured requests after one warmup per
+prompt, using the same cached model, context 512, and maximum 16 output tokens.
+
+| Prompt tokens | Scalar first token | NEON first token | Speedup | Scalar decode steps/s | NEON decode steps/s |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 19 | 3.69 s | 1.07 s | 3.46× | 3.12 | 5.50 |
+| 64 | 14.17 s | 3.55 s | 3.99× | 3.07 | 5.48 |
+| 127 | 24.49 s | 7.04 s | 3.48× | 3.11 | 5.42 |
+
+All nine measured token sequences and finish reasons match across revisions.
+The short answer completes in 2.70 s versus 6.57 s. The projection microbenchmark
+reports 3.51–3.52× speedups across Qwen's Q and FFN shapes with exact float results.
+Independent fixture logits, trained-model reference tokens/sampled logits across
+three prompts, and native bridge tests also pass.
+
+No other Flare builds/tests ran concurrently with these recorded measurements.
+This is one sequential comparison on a shared Mac; other activity, frequency and
+power conditions were not controlled. All measured thermal states were nominal.
+Process high-water RSS reached 1.85 GB for scalar and 1.89 GB for NEON, including
+XCTest/cache/load work. This change does not establish a memory reduction or
+physical-iPhone performance, battery, or thermal results.
+
 ### Next performance work
 
 1. Measure a physical iPhone: peak resident memory during load/inference,
