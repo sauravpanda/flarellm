@@ -696,7 +696,7 @@ impl ComputeBackend for Qwen3CpuBackend {
         assert_eq!(input.len(), batch * cols);
         input
             .chunks_exact(cols)
-            .flat_map(|row| matvec_q8_0_scalar(&weight.data, row, weight.num_rows, cols))
+            .flat_map(|row| matvec_q8_0_f32(&weight.data, row, weight.num_rows, cols))
             .collect()
     }
 }
@@ -6051,6 +6051,76 @@ pub fn matvec_q8_0_scalar(weight_data: &[u8], input: &[f32], rows: usize, cols: 
     output
 }
 
+/// Packed Q8_0 weights times f32 activations, without activation quantization.
+/// ARM64 uses NEON; other targets retain the scalar implementation. Both keep
+/// the scalar four-lane accumulation and left-to-right reduction order.
+///
+/// # Panics
+/// Panics unless `cols` is a multiple of 32, `input.len() == cols`, and
+/// `weight_data` contains exactly `rows * (cols / 32) * 34` bytes.
+pub fn matvec_q8_0_f32(weight_data: &[u8], input: &[f32], rows: usize, cols: usize) -> Vec<f32> {
+    assert_eq!(
+        cols % Q8_0_BLOCK_SIZE,
+        0,
+        "Q8_0 columns must align to blocks"
+    );
+    assert_eq!(input.len(), cols, "Q8_0 input length mismatch");
+    let blocks_per_row = cols / Q8_0_BLOCK_SIZE;
+    let bytes_per_row = blocks_per_row
+        .checked_mul(Q8_0_BLOCK_BYTES)
+        .expect("Q8_0 row size overflow");
+    assert_eq!(
+        weight_data.len(),
+        rows.checked_mul(bytes_per_row)
+            .expect("Q8_0 matrix size overflow"),
+        "Q8_0 weight length mismatch"
+    );
+    #[cfg(target_arch = "aarch64")]
+    {
+        let mut output = vec![0.0; rows];
+        for (row, value) in output.iter_mut().enumerate() {
+            let bytes = &weight_data[row * bytes_per_row..(row + 1) * bytes_per_row];
+            // SAFETY: ARM64 has baseline NEON. The checks above guarantee all
+            // full-block loads fit both slices, including the final block.
+            *value = unsafe { matvec_q8_0_f32_neon_row(bytes, input, blocks_per_row) };
+        }
+        output
+    }
+    #[cfg(not(target_arch = "aarch64"))]
+    matvec_q8_0_scalar(weight_data, input, rows, cols)
+}
+
+/// # Safety
+/// Requires baseline ARM64 NEON, `blocks * 34` weight bytes and `blocks * 32`
+/// input floats. Loads are unaligned: GGUF blocks have a two-byte scale prefix.
+#[cfg(target_arch = "aarch64")]
+#[inline]
+unsafe fn matvec_q8_0_f32_neon_row(bytes: &[u8], input: &[f32], blocks: usize) -> f32 {
+    use std::arch::aarch64::*;
+    let mut sum = 0.0f32;
+    for block in 0..blocks {
+        let offset = block * Q8_0_BLOCK_BYTES;
+        let scale = f16_to_f32_inline(u16::from_le_bytes([bytes[offset], bytes[offset + 1]]));
+        let weights = bytes.as_ptr().add(offset + 2).cast::<i8>();
+        let activations = input.as_ptr().add(block * Q8_0_BLOCK_SIZE);
+        let mut lanes = vdupq_n_f32(0.0);
+        for j in (0..32).step_by(8) {
+            let q = vmovl_s8(vld1_s8(weights.add(j)));
+            let low = vcvtq_f32_s32(vmovl_s16(vget_low_s16(q)));
+            let high = vcvtq_f32_s32(vmovl_high_s16(q));
+            // Separate multiply/add and sequential accumulation preserve the
+            // scalar rounding. FMA or a tree reduction would change it.
+            lanes = vaddq_f32(lanes, vmulq_f32(low, vld1q_f32(activations.add(j))));
+            lanes = vaddq_f32(lanes, vmulq_f32(high, vld1q_f32(activations.add(j + 4))));
+        }
+        let dot = ((vgetq_lane_f32::<0>(lanes) + vgetq_lane_f32::<1>(lanes))
+            + vgetq_lane_f32::<2>(lanes))
+            + vgetq_lane_f32::<3>(lanes);
+        sum += scale * dot;
+    }
+    sum
+}
+
 /// Four signed-int8 dot products, each accumulating four pairs into one lane.
 /// Uses SDOT only when enabled for the compilation target; generic ARM64 iOS
 /// builds use the NEON equivalent instead of emitting unsupported instructions.
@@ -10432,6 +10502,68 @@ fn cpu_gqa_softcap(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn q8_f32_matches_scalar_bits_with_unaligned_blocks_and_float_inputs() {
+        let mut seed = 0x1234_5678u32;
+        let mut next = || {
+            seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+            seed
+        };
+        // Include signed zero, the smallest f16 subnormal, negative scales,
+        // mixed signs, all i8 values, and actual Qwen projection widths.
+        let scales = [0x0000u16, 0x8000, 0x0001, 0x0400, 0x3800, 0xbc00, 0x7bff];
+        for cols in [0, 32, 64, 96, 1024, 2048, 3072] {
+            for rows in [0, 1, 3, 7] {
+                let size = rows * (cols / 32) * 34;
+                let mut storage = vec![0u8; size + 1];
+                let data = &mut storage[1..];
+                for (index, block) in data.as_chunks_mut::<34>().0.iter_mut().enumerate() {
+                    block[..2].copy_from_slice(&scales[index % scales.len()].to_le_bytes());
+                    for value in &mut block[2..] {
+                        *value = next() as u8;
+                    }
+                }
+                let mut input = vec![0.0; cols + 1];
+                for x in &mut input[1..] {
+                    *x = (next() as i32 as f32) / 2147483648.0;
+                }
+                let expected = matvec_q8_0_scalar(data, &input[1..], rows, cols);
+                let actual = matvec_q8_0_f32(data, &input[1..], rows, cols);
+                assert!(actual.iter().all(|x| x.is_finite()));
+                assert_eq!(
+                    actual.iter().map(|x| x.to_bits()).collect::<Vec<_>>(),
+                    expected.iter().map(|x| x.to_bits()).collect::<Vec<_>>(),
+                    "rows={rows}, cols={cols}"
+                );
+            }
+        }
+        // A small activation must survive even beside a much larger one;
+        // requantizing the input to int8 would erase its contribution.
+        let mut weights = [0u8; 34];
+        weights[..2].copy_from_slice(&0x3c00u16.to_le_bytes());
+        weights[3] = 1;
+        let mut input = [0.0; 32];
+        input[0] = 1000.0;
+        input[1] = 0.00012345;
+        assert_eq!(matvec_q8_0_f32(&weights, &input, 1, 32), [input[1]]);
+    }
+
+    #[test]
+    fn q8_f32_rejects_invalid_shapes_before_neon_loads() {
+        for (bytes, input, rows, cols) in [
+            (34, 31, 1, 31),         // partial block
+            (34, 31, 1, 32),         // short input
+            (33, 32, 1, 32),         // truncated weight block
+            (35, 32, 1, 32),         // extra weight byte
+            (0, 32, usize::MAX, 32), // byte-count overflow
+        ] {
+            assert!(std::panic::catch_unwind(|| {
+                matvec_q8_0_f32(&vec![0; bytes], &vec![0.0; input], rows, cols)
+            })
+            .is_err());
+        }
+    }
 
     #[cfg(target_arch = "aarch64")]
     #[test]
