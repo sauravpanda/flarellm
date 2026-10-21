@@ -10518,7 +10518,7 @@ mod tests {
                 let size = rows * (cols / 32) * 34;
                 let mut storage = vec![0u8; size + 1];
                 let data = &mut storage[1..];
-                for (index, block) in data.chunks_exact_mut(34).enumerate() {
+                for (index, block) in data.as_chunks_mut::<34>().0.iter_mut().enumerate() {
                     block[..2].copy_from_slice(&scales[index % scales.len()].to_le_bytes());
                     for value in &mut block[2..] {
                         *value = next() as u8;

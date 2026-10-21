@@ -14,7 +14,7 @@ fn main() {
         ("FFN down", 1024, 3072),
     ] {
         let mut weights = vec![0; rows * (cols / 32) * 34];
-        for (index, block) in weights.chunks_exact_mut(34).enumerate() {
+        for (index, block) in weights.as_chunks_mut::<34>().0.iter_mut().enumerate() {
             block[..2].copy_from_slice(&0x2800u16.to_le_bytes());
             for (j, q) in block[2..].iter_mut().enumerate() {
                 *q = (index * 17 + j * 31) as u8;
