@@ -139,6 +139,8 @@ jobs:
       - name: Check ARM fallback and native bridge
         run: |
           cargo test --locked -p flarellm-core neon_dot_fallback
+          cargo test --locked --release -p flarellm-core q8_f32
+          cargo test --locked --release -p flarellm-loader --test qwen3
           cargo test --locked -p flarellm-native
       - name: Test cache and native Swift API on macOS
         run: swift test --package-path apple
